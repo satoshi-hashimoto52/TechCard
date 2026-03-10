@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date
+from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date, Boolean
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -23,6 +23,7 @@ class Contact(Base):
     first_met_at = Column(Date, nullable=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     notes = Column(Text, nullable=True)
+    is_self = Column(Boolean, nullable=False, default=False)
 
     company = relationship("Company", back_populates="contacts")
     tags = relationship("Tag", secondary=contact_tags, back_populates="contacts")

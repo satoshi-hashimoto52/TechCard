@@ -267,6 +267,29 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
     db.refresh(db_contact)
     return db_contact
 
+@router.put("/{contact_id}/self", response_model=schemas.ContactRead)
+def set_self_contact(contact_id: int, payload: schemas.ContactSelfRequest, db: Session = Depends(get_db)):
+    db_contact = crud.get_contact(db, contact_id=contact_id)
+    if db_contact is None:
+        raise HTTPException(status_code=404, detail="Contact not found")
+
+    if payload.is_self:
+        db.query(models.Contact).filter(models.Contact.id != contact_id).filter(models.Contact.is_self.is_(True)).update(
+            {models.Contact.is_self: False},
+            synchronize_session=False,
+        )
+        db_contact.is_self = True
+    else:
+        db_contact.is_self = False
+
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="自分の更新に失敗しました。")
+    db.refresh(db_contact)
+    return db_contact
+
 @router.delete("/{contact_id}")
 def delete_contact(contact_id: int, db: Session = Depends(get_db)):
     success = crud.delete_contact(db, contact_id=contact_id)

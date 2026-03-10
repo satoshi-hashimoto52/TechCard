@@ -77,6 +77,7 @@ class ContactBase(BaseModel):
     first_met_at: Optional[date] = None
     company_id: Optional[int] = None
     notes: Optional[str] = None
+    is_self: Optional[bool] = None
 
 class ContactCreate(ContactBase):
     pass
@@ -106,3 +107,6 @@ class ContactRegisterRequest(BaseModel):
     notes: Optional[str] = None
     card_filename: Optional[str] = None
     ocr_text: Optional[str] = None
+
+class ContactSelfRequest(BaseModel):
+    is_self: bool

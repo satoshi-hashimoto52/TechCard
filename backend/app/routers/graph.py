@@ -130,6 +130,7 @@ def get_network_graph(
                 "phone": contact.phone or "",
                 "mobile": contact.mobile or "",
                 "company_node_id": f"company_{contact.company_id}" if contact.company_id else "",
+                "is_self": bool(contact.is_self),
             }
         )
 

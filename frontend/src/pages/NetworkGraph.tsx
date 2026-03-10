@@ -14,6 +14,7 @@ type GraphNode = {
   postal_code?: string;
   address?: string;
   company_node_id?: string;
+  is_self?: boolean;
 };
 
 type NodeObject = {
@@ -52,6 +53,9 @@ const NetworkGraph: React.FC = () => {
   const [highlightMode, setHighlightMode] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number; groupId?: string | null }[]>([]);
+  const hasCenteredRef = useRef(false);
+  const companyAnglesRef = useRef<Map<string, number>>(new Map());
+  const companyRadiusRef = useRef(0);
 
   useEffect(() => {
     const params: Record<string, string | number> = {};
@@ -88,6 +92,27 @@ const NetworkGraph: React.FC = () => {
     });
     return { nodes, links };
   }, [rawGraph, visibleTypes]);
+
+  const selfNodeId = useMemo(() => {
+    const selfNode = graph.nodes.find(node => node.type === 'person' && (node as GraphNode).is_self);
+    return selfNode?.id ?? null;
+  }, [graph.nodes]);
+  const connectedTagIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!selfNodeId) return ids;
+    const techIds = new Set(graph.nodes.filter(node => node.type === 'technology').map(node => node.id));
+    graph.links.forEach(link => {
+      const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+      const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+      if (sourceId === selfNodeId && techIds.has(targetId)) {
+        ids.add(targetId);
+      }
+      if (targetId === selfNodeId && techIds.has(sourceId)) {
+        ids.add(sourceId);
+      }
+    });
+    return ids;
+  }, [graph.links, graph.nodes, selfNodeId]);
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -126,6 +151,17 @@ const NetworkGraph: React.FC = () => {
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
+    graph.nodes.forEach(node => {
+      if (node.type !== 'company' && !(node as GraphNode).is_self) {
+        (node as any).fx = undefined;
+        (node as any).fy = undefined;
+      }
+    });
+    const selfNode = graph.nodes.find(node => node.type === 'person' && (node as GraphNode).is_self);
+    if (selfNode) {
+      (selfNode as any).fx = 0;
+      (selfNode as any).fy = 0;
+    }
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
       charge.strength((node: GraphNode) => {
@@ -156,7 +192,7 @@ const NetworkGraph: React.FC = () => {
       const force = (alpha: number) => {
         for (const node of nodes) {
           const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type !== 'person' || !typed.company_node_id) continue;
+          if (typed.type !== 'person' || typed.is_self || !typed.company_node_id) continue;
           const companyNode = nodeMap.get(typed.company_node_id);
           if (!companyNode) continue;
           const dx = (companyNode.x ?? 0) - (typed.x ?? 0);
@@ -172,6 +208,68 @@ const NetworkGraph: React.FC = () => {
       return force;
     };
     fg.d3Force('person-company-attract', personCompanyAttractForce());
+    const ringForce = () => {
+      let nodes: any[] = [];
+      const strength = 0.08;
+      const resolveRadii = () => {
+        const companyRadius = companyRadiusRef.current || 320;
+        const connectedTagRadius = Math.min(220, Math.max(120, companyRadius * 0.45));
+        const personRadius = Math.min(280, Math.max(170, companyRadius * 0.7));
+        const meetingRadius = Math.max(60, Math.round(personRadius * 0.5));
+        return { connectedTagRadius, personRadius, meetingRadius };
+      };
+      const force = (alpha: number) => {
+        const { connectedTagRadius, personRadius, meetingRadius } = resolveRadii();
+        for (const node of nodes) {
+          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          if (typed.type === 'company' || typed.is_self) continue;
+          let target = 0;
+          if (typed.type === 'technology') {
+            target = connectedTagRadius;
+          } else if (typed.type === 'person') {
+            target = personRadius;
+          } else if (typed.type === 'meeting') {
+            target = meetingRadius;
+          }
+          const dx = typed.x ?? 0;
+          const dy = typed.y ?? 0;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const k = ((target - dist) / dist) * strength * alpha;
+          typed.vx = (typed.vx ?? 0) + dx * k;
+          typed.vy = (typed.vy ?? 0) + dy * k;
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+      };
+      return force;
+    };
+    fg.d3Force('rings', ringForce());
+    const personCompanySectorForce = () => {
+      let nodes: any[] = [];
+      const strength = 0.12;
+      const force = (alpha: number) => {
+        const angleMap = companyAnglesRef.current;
+        for (const node of nodes) {
+          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          if (typed.type !== 'person' || typed.is_self || !typed.company_node_id) continue;
+          const targetAngle = angleMap.get(typed.company_node_id);
+          if (targetAngle == null) continue;
+          const x = typed.x ?? 0;
+          const y = typed.y ?? 0;
+          const r = Math.sqrt(x * x + y * y) || 1;
+          const targetX = Math.cos(targetAngle) * r;
+          const targetY = Math.sin(targetAngle) * r;
+          typed.vx = (typed.vx ?? 0) + (targetX - x) * strength * alpha;
+          typed.vy = (typed.vy ?? 0) + (targetY - y) * strength * alpha;
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+      };
+      return force;
+    };
+    fg.d3Force('person-company-sector', personCompanySectorForce());
     const personSeparationForce = () => {
       let nodes: any[] = [];
       const minDistance = 26;
@@ -203,6 +301,11 @@ const NetworkGraph: React.FC = () => {
     };
     fg.d3Force('person-separation', personSeparationForce());
     fg.d3ReheatSimulation();
+    if (selfNode && !hasCenteredRef.current) {
+      hasCenteredRef.current = true;
+      fg.centerAt(0, 0, 600);
+      fg.zoom(1.15, 600);
+    }
   }, [graph]);
 
   const applySearch = (value: string, type: typeof searchType) => {
@@ -240,6 +343,7 @@ const NetworkGraph: React.FC = () => {
   const nodeColor = useMemo(() => {
     return (node: NodeObject) => {
       const typed = node as GraphNode;
+      if (typed.is_self) return '#f87171';
       const base =
         typed.type === 'person'
           ? '#3b82f6'
@@ -485,8 +589,31 @@ const NetworkGraph: React.FC = () => {
         <ForceGraph2D
           ref={graphRef}
           graphData={graph}
-          onRenderFramePre={() => {
+          onRenderFramePre={(ctx, globalScale) => {
             labelBoxesRef.current = [];
+            const companies = graph.nodes.filter(node => node.type === 'company');
+            if (companies.length > 0) {
+              const nextAngles = new Map<string, number>();
+              let radiusSum = 0;
+              let radiusCount = 0;
+              companies.forEach(node => {
+                const x = (node as any).x ?? 0;
+                const y = (node as any).y ?? 0;
+                if (x === 0 && y === 0) return;
+                const angle = Math.atan2(y, x);
+                nextAngles.set(node.id, angle);
+                radiusSum += Math.hypot(x, y);
+                radiusCount += 1;
+              });
+              companyAnglesRef.current = nextAngles;
+              companyRadiusRef.current = radiusCount > 0 ? radiusSum / radiusCount : 0;
+            } else {
+              companyAnglesRef.current = new Map();
+              companyRadiusRef.current = 0;
+            }
+            const companyRadius = companyRadiusRef.current;
+            if (!companyRadius) return;
+            // guide lines removed
           }}
           nodeLabel={(node: NodeObject) => {
             const typed = node as GraphNode;

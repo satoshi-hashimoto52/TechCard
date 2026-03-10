@@ -18,6 +18,7 @@ interface Contact {
   notes?: string;
   meetings: { timestamp: string; notes?: string }[];
   business_cards: { id: number; filename: string; ocr_text: string | null }[];
+  is_self?: boolean;
 }
 
 const ContactDetail: React.FC = () => {
@@ -72,6 +73,16 @@ const ContactDetail: React.FC = () => {
     });
   };
 
+  const handleSelfToggle = async (checked: boolean) => {
+    if (!id) return;
+    try {
+      const response = await axios.put(`http://localhost:8000/contacts/${id}/self`, { is_self: checked });
+      setContact(response.data);
+    } catch {
+      // no-op
+    }
+  };
+
   return (
     <div className="p-6">
       <div className="flex items-center justify-between mb-4">
@@ -104,6 +115,15 @@ const ContactDetail: React.FC = () => {
             {isDeleting ? '削除中...' : '連絡先を削除'}
           </button>
         </div>
+      </div>
+      <div className="mb-3 flex items-center gap-2 text-sm text-gray-700">
+        <input
+          id="is-self"
+          type="checkbox"
+          checked={Boolean(contact.is_self)}
+          onChange={event => handleSelfToggle(event.target.checked)}
+        />
+        <label htmlFor="is-self">自分</label>
       </div>
       {flashMessage && (
         <div className="mb-4 rounded border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">

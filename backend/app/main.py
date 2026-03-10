@@ -17,6 +17,8 @@ with engine.begin() as connection:
         connection.execute(text("ALTER TABLE contacts ADD COLUMN postal_code TEXT"))
     if columns and not any(column[1] == "first_met_at" for column in columns):
         connection.execute(text("ALTER TABLE contacts ADD COLUMN first_met_at DATE"))
+    if columns and not any(column[1] == "is_self" for column in columns):
+        connection.execute(text("ALTER TABLE contacts ADD COLUMN is_self INTEGER DEFAULT 0"))
     indexes = connection.execute(text("PRAGMA index_list(contacts)")).fetchall()
     has_unique_contact_index = False
     for index in indexes:
@@ -48,6 +50,7 @@ with engine.begin() as connection:
                     first_met_at DATE,
                     company_id INTEGER,
                     notes TEXT,
+                    is_self INTEGER DEFAULT 0,
                     FOREIGN KEY(company_id) REFERENCES companies(id)
                 )
                 """
@@ -56,8 +59,8 @@ with engine.begin() as connection:
         connection.execute(
             text(
                 """
-                INSERT INTO contacts_new (id, name, email, phone, role, mobile, postal_code, address, branch, first_met_at, company_id, notes)
-                SELECT id, name, email, phone, role, mobile, postal_code, address, branch, first_met_at, company_id, notes
+                INSERT INTO contacts_new (id, name, email, phone, role, mobile, postal_code, address, branch, first_met_at, company_id, notes, is_self)
+                SELECT id, name, email, phone, role, mobile, postal_code, address, branch, first_met_at, company_id, notes, 0
                 FROM contacts
                 """
             )
