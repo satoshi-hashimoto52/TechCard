@@ -35,6 +35,7 @@ type MobileUploadStatus = {
   filename?: string | null;
   image_url?: string | null;
   error?: string | null;
+  upload_count?: number | null;
 };
 
 type RoiField = 'name' | 'company' | 'branch' | 'role' | 'email' | 'phone' | 'mobile' | 'postal_code' | 'address';
@@ -120,6 +121,11 @@ const ContactRegister: React.FC = () => {
   const [mobileSession, setMobileSession] = useState<MobileUploadSession | null>(null);
   const [mobileStatus, setMobileStatus] = useState<'idle' | 'waiting' | 'done' | 'error'>('idle');
   const [mobileError, setMobileError] = useState<string | null>(null);
+  const [mobileContinuous, setMobileContinuous] = useState(false);
+  const [lastMobileUploadCount, setLastMobileUploadCount] = useState(0);
+  const [flashMessage, setFlashMessage] = useState<string | null>(null);
+  const [mobileSessionLoading, setMobileSessionLoading] = useState(false);
+  const isBlank = (value?: string) => !value || value.trim() === '';
   const targetWidth = 1200;
   const targetHeight = 700;
   const [bulkMoveStep, setBulkMoveStep] = useState(2);
@@ -603,6 +609,14 @@ const ContactRegister: React.FC = () => {
     };
   }, [cameraStream]);
 
+  useEffect(() => {
+    if (!flashMessage) return;
+    const timer = window.setTimeout(() => {
+      setFlashMessage(null);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [flashMessage]);
+
   const runRoiOcr = async () => {
     console.log('ROI OCR started');
     if (!konvaImage || rois.length === 0) {
@@ -647,22 +661,50 @@ const ContactRegister: React.FC = () => {
         console.log('OCR response:', response.data);
         const text = response.data.text;
         setForm(prev => {
-          if (roi.field === 'name') return { ...prev, name: normalizePersonName(text) };
-          if (roi.field === 'company') return { ...prev, company: normalizeCompanyName(text) };
-          if (roi.field === 'branch') return { ...prev, branch: text };
-          if (roi.field === 'phone') return { ...prev, phone: text };
-          if (roi.field === 'mobile') return { ...prev, mobile: text };
-          if (roi.field === 'role') return { ...prev, role: text };
-          if (roi.field === 'email') return { ...prev, email: normalizeEmail(text) };
+          if (roi.field === 'name') {
+            if (!isBlank(prev.name)) return prev;
+            return { ...prev, name: normalizePersonName(text) };
+          }
+          if (roi.field === 'company') {
+            if (!isBlank(prev.company)) return prev;
+            return { ...prev, company: normalizeCompanyName(text) };
+          }
+          if (roi.field === 'branch') {
+            if (!isBlank(prev.branch)) return prev;
+            return { ...prev, branch: text };
+          }
+          if (roi.field === 'phone') {
+            if (!isBlank(prev.phone)) return prev;
+            return { ...prev, phone: text };
+          }
+          if (roi.field === 'mobile') {
+            if (!isBlank(prev.mobile)) return prev;
+            return { ...prev, mobile: text };
+          }
+          if (roi.field === 'role') {
+            if (!isBlank(prev.role)) return prev;
+            return { ...prev, role: text };
+          }
+          if (roi.field === 'email') {
+            if (!isBlank(prev.email)) return prev;
+            return { ...prev, email: normalizeEmail(text) };
+          }
           if (roi.field === 'postal_code') {
+            if (!isBlank(prev.postal_code)) return prev;
             return { ...prev, postal_code: normalizePostalCode(text) };
           }
           if (roi.field === 'address') {
             const parsed = parsePostalAndAddress(text);
+            if (!isBlank(prev.address)) {
+              if (isBlank(prev.postal_code) && parsed.postalCode) {
+                return { ...prev, postal_code: parsed.postalCode };
+              }
+              return prev;
+            }
             return {
               ...prev,
               address: parsed.address || text,
-              postal_code: parsed.postalCode || prev.postal_code,
+              postal_code: isBlank(prev.postal_code) ? (parsed.postalCode || prev.postal_code) : prev.postal_code,
             };
           }
           return prev;
@@ -716,13 +758,35 @@ const ContactRegister: React.FC = () => {
       card_filename: cardFilename,
       ocr_text: ocrText,
     };
+    const keepFieldsForContinuous = () => {
+      setForm(prev => ({
+        ...prev,
+        name: '',
+        email: '',
+        mobile: '',
+        role: '',
+        branch: '',
+        notes: '',
+        first_met_at: todayString,
+        company: prev.company,
+        phone: prev.phone,
+        postal_code: prev.postal_code,
+        address: prev.address,
+      }));
+    };
+    const shouldStayOnRegister = !isEdit && mode === 'upload' && mobileContinuous;
     try {
       if (isEdit && id) {
         const response = await axios.put<ContactRegisterResponse>(`http://localhost:8000/contacts/${id}/register`, payload);
-        navigate(`/contacts/${response.data.id}`);
+        navigate(`/contacts/${response.data.id}`, { state: { flash: '更新しました。' } });
       } else {
         const response = await axios.post<ContactRegisterResponse>('http://localhost:8000/contacts/register', payload);
-        navigate(`/contacts/${response.data.id}`);
+        if (shouldStayOnRegister) {
+          setFlashMessage('登録しました。');
+          keepFieldsForContinuous();
+        } else {
+          navigate(`/contacts/${response.data.id}`, { state: { flash: '登録しました。' } });
+        }
       }
     } catch (error: any) {
       const detail = error?.response?.data?.detail;
@@ -734,7 +798,12 @@ const ContactRegister: React.FC = () => {
           const confirmed = window.confirm(`${message || '同名・同会社の連絡先が存在します。'}\n上書きしますか？`);
           if (confirmed) {
             const response = await axios.put<ContactRegisterResponse>(`http://localhost:8000/contacts/${existingId}/register`, payload);
-            navigate(`/contacts/${response.data.id}`);
+            if (shouldStayOnRegister) {
+              setFlashMessage('上書きしました。');
+              keepFieldsForContinuous();
+            } else {
+              navigate(`/contacts/${response.data.id}`, { state: { flash: '上書きしました。' } });
+            }
             return;
           }
           setSubmitError('登録をキャンセルしました。');
@@ -814,14 +883,21 @@ const ContactRegister: React.FC = () => {
     : 0;
 
   const startMobileUploadSession = async () => {
+    if (mobileSessionLoading) return;
+    setMobileSessionLoading(true);
     setMobileError(null);
     try {
       const rawHost = window.location.hostname || 'localhost';
       const mobileHost = rawHost === 'localhost' ? '127.0.0.1' : rawHost;
       const baseUrl = `https://${mobileHost}:8443`;
-      const response = await axios.post<MobileUploadSession>(`${baseUrl}/mobile-upload/sessions?scheme=https&port=8443`);
+      const response = await axios.post<MobileUploadSession>(
+        `${baseUrl}/mobile-upload/sessions?scheme=https&port=8443`,
+        undefined,
+        { timeout: 8000 },
+      );
       setMobileSession(response.data);
       setMobileStatus('waiting');
+      setLastMobileUploadCount(0);
     } catch (error) {
       if (axios.isAxiosError(error)) {
         const detail = (error.response?.data as { detail?: string } | undefined)?.detail;
@@ -835,6 +911,8 @@ const ContactRegister: React.FC = () => {
         }
       }
       setMobileError('QRの生成に失敗しました。');
+    } finally {
+      setMobileSessionLoading(false);
     }
   };
 
@@ -847,10 +925,16 @@ const ContactRegister: React.FC = () => {
         if (stopped) return;
         setMobileStatus(response.data.status);
         if (response.data.status === 'done' && response.data.image_url) {
-          const cacheBusted = `${response.data.image_url}?t=${Date.now()}`;
-          setImageUrl(cacheBusted);
-          setCardFilename(response.data.filename || 'mobile-upload.png');
-          stopped = true;
+          const uploadCount = response.data.upload_count ?? 0;
+          if (!mobileContinuous || uploadCount > lastMobileUploadCount) {
+            const cacheBusted = `${response.data.image_url}?t=${Date.now()}`;
+            setImageUrl(cacheBusted);
+            setCardFilename(response.data.filename || 'mobile-upload.png');
+            setLastMobileUploadCount(uploadCount);
+          }
+          if (!mobileContinuous) {
+            stopped = true;
+          }
         }
         if (response.data.status === 'error') {
           setMobileError(response.data.error || 'アップロードでエラーが発生しました。');
@@ -868,11 +952,16 @@ const ContactRegister: React.FC = () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [mobileSession?.session_id]);
+  }, [mobileSession?.session_id, mobileContinuous, lastMobileUploadCount]);
 
   return (
     <div className="p-6">
       <h1 className="text-2xl font-bold mb-4">連絡先登録</h1>
+      {flashMessage && (
+        <div className="mb-4 rounded border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
+          {flashMessage}
+        </div>
+      )}
       <div className="bg-white p-6 rounded-lg shadow w-full max-w-[1280px] mx-auto overflow-hidden">
         {!isEdit && (
           <div className="flex gap-2 mb-6">
@@ -910,11 +999,20 @@ const ContactRegister: React.FC = () => {
                 <button
                   type="button"
                   onClick={startMobileUploadSession}
-                  className="bg-emerald-600 text-white px-4 py-2 rounded"
+                  disabled={mobileSessionLoading}
+                  className="bg-emerald-600 text-white px-4 py-2 rounded cursor-pointer relative z-10 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  スマホで撮影（QR表示）
+                  {mobileSessionLoading ? 'QR生成中...' : 'スマホで撮影（QR表示）'}
                 </button>
-                <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。</span>
+                <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。OCRは空欄のみ取得します。</span>
+                <label className="text-xs text-gray-600 flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={mobileContinuous}
+                    onChange={event => setMobileContinuous(event.target.checked)}
+                  />
+                  連続登録モード
+                </label>
               </div>
               {mobileError && (
                 <p className="mt-2 text-sm text-red-600">{mobileError}</p>

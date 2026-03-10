@@ -70,6 +70,52 @@ def preprocess_for_ocr(img: np.ndarray) -> np.ndarray:
     )
     return thresh
 
+def preprocess_soft_for_ocr(img: np.ndarray) -> np.ndarray:
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.convertScaleAbs(gray, alpha=1.2, beta=5)
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    enhanced = clahe.apply(gray)
+    return enhanced
+
+def _score_results(results) -> int:
+    if not isinstance(results, list):
+        return 0
+    score = 0
+    for entry in results:
+        if not entry or len(entry) < 2:
+            continue
+        text = entry[1]
+        if not text:
+            continue
+        score += len(str(text).strip())
+    return score
+
+def _readtext_best(
+    image: np.ndarray,
+    *,
+    paragraph: bool = False,
+    contrast_ths: float | None = None,
+    adjust_contrast: float | None = None,
+):
+    candidates: List[Tuple[np.ndarray, Dict[str, float | bool]]] = []
+    candidates.append((preprocess_soft_for_ocr(image), {}))
+    candidates.append((preprocess_for_ocr(image), {}))
+    best_results = []
+    best_score = -1
+    for candidate, extra in candidates:
+        kwargs: Dict[str, float | bool] = {"paragraph": paragraph}
+        if contrast_ths is not None:
+            kwargs["contrast_ths"] = contrast_ths
+        if adjust_contrast is not None:
+            kwargs["adjust_contrast"] = adjust_contrast
+        kwargs.update(extra)
+        results = OCR_READER.readtext(candidate, **kwargs)
+        score = _score_results(results)
+        if score > best_score:
+            best_score = score
+            best_results = results
+    return best_results
+
 def _build_items(results) -> List[Dict[str, float | str]]:
     items: List[Dict[str, float | str]] = []
     if not isinstance(results, list):
@@ -101,8 +147,7 @@ def _build_items(results) -> List[Dict[str, float | str]]:
 def run_ocr(image_path: str) -> Tuple[List[Dict[str, float | str]], str]:
     image = load_image(image_path)
     image = resize_for_ocr(image)
-    image = preprocess_for_ocr(image)
-    results = OCR_READER.readtext(
+    results = _readtext_best(
         image,
         paragraph=True,
         contrast_ths=0.1,
@@ -120,8 +165,7 @@ def ocr_image_array(image: np.ndarray) -> str:
         image = cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
     print("Image shape:", image.shape)
     image = resize_for_ocr(image)
-    image = preprocess_for_ocr(image)
-    results = OCR_READER.readtext(image)
+    results = _readtext_best(image)
     entries: List[Tuple[str, float, float]] = []
     for bbox, text, _confidence in results:
         xs = [point[0] for point in bbox]

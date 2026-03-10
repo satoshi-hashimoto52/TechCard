@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 
 interface Contact {
@@ -23,8 +23,20 @@ interface Contact {
 const ContactDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const location = useLocation();
   const [contact, setContact] = useState<Contact | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
+  const [flashMessage, setFlashMessage] = useState<string | null>(
+    (location.state as { flash?: string } | null)?.flash || null,
+  );
+
+  useEffect(() => {
+    if (!flashMessage) return;
+    const timer = window.setTimeout(() => {
+      setFlashMessage(null);
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [flashMessage]);
 
   useEffect(() => {
     if (id) {
@@ -89,6 +101,11 @@ const ContactDetail: React.FC = () => {
           </button>
         </div>
       </div>
+      {flashMessage && (
+        <div className="mb-4 rounded border border-emerald-200 bg-emerald-50 px-4 py-2 text-sm text-emerald-800">
+          {flashMessage}
+        </div>
+      )}
       <div className="bg-white p-4 rounded-lg shadow">
         <p><strong>メール:</strong> {contact.email}</p>
         <p><strong>電話:</strong> {contact.phone}</p>

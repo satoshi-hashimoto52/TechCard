@@ -69,6 +69,8 @@ def create_session(
     MOBILE_UPLOADS[session_id] = {
         "status": "waiting",
         "created_at": time.time(),
+        "upload_count": 0,
+        "updated_at": None,
         "filename": None,
         "file_path": None,
         "base_url": base_url,
@@ -261,12 +263,15 @@ def mobile_upload_page(session_id: str) -> HTMLResponse:
 
       const uploadBlob = async (blob, filename) => {{
         setStatus('アップロード中...');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
         const formData = new FormData();
         formData.append('image', blob, filename);
         try {{
           const response = await fetch('/mobile-upload/' + sessionId + '/image', {{
             method: 'POST',
             body: formData,
+            signal: controller.signal,
           }});
           if (!response.ok) {{
             let detail = '';
@@ -278,10 +283,14 @@ def mobile_upload_page(session_id: str) -> HTMLResponse:
             }}
             throw new Error('upload failed' + detail);
           }}
-          setStatus('アップロード完了。PC側で反映されます。');
+          setStatus('アップロード完了。続けて撮影できます。');
         }} catch (error) {{
-          const message = error && error.message ? error.message : 'アップロードに失敗しました。';
+          const message = error && error.name === 'AbortError'
+            ? 'アップロードがタイムアウトしました。通信状態をご確認ください。'
+            : (error && error.message ? error.message : 'アップロードに失敗しました。');
           setStatus(message);
+        }} finally {{
+          clearTimeout(timeoutId);
           captureButton.disabled = false;
         }}
       }};
@@ -304,12 +313,15 @@ def mobile_upload_page(session_id: str) -> HTMLResponse:
           setStatus('カメラが準備できていません。');
           return;
         }}
+        captureButton.disabled = true;
+        setStatus('画像処理中...');
         const fullCanvas = document.createElement('canvas');
         fullCanvas.width = video.videoWidth;
         fullCanvas.height = video.videoHeight;
         const fullCtx = fullCanvas.getContext('2d');
         if (!fullCtx) {{
           setStatus('撮影に失敗しました。');
+          captureButton.disabled = false;
           return;
         }}
         fullCtx.drawImage(video, 0, 0, fullCanvas.width, fullCanvas.height);
@@ -317,13 +329,12 @@ def mobile_upload_page(session_id: str) -> HTMLResponse:
         outputCanvas.toBlob(async (blob) => {{
           if (!blob) {{
             setStatus('撮影に失敗しました。');
+            captureButton.disabled = false;
             return;
           }}
           previewEl.src = URL.createObjectURL(blob);
           previewEl.hidden = false;
-          captureButton.disabled = true;
           await uploadBlob(blob, 'mobile-capture.jpg');
-          stopStream();
         }}, 'image/jpeg', 0.92);
       }});
     </script>
@@ -345,6 +356,7 @@ def get_status(session_id: str) -> Dict[str, Any]:
         "filename": session.get("filename"),
         "image_url": image_url,
         "error": session.get("error"),
+        "upload_count": session.get("upload_count", 0),
     }
 
 
@@ -383,6 +395,8 @@ async def upload_image(
     session["status"] = "done"
     session["filename"] = target_file.filename
     session["file_path"] = str(file_path)
+    session["upload_count"] = int(session.get("upload_count", 0)) + 1
+    session["updated_at"] = time.time()
     session["error"] = None
     return {"status": "done", "filename": target_file.filename}
 
