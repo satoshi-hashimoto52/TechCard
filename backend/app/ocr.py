@@ -199,6 +199,13 @@ def extract_fields(items: List[Dict[str, float | str]], raw_text: str) -> Dict[s
                     split_at = 3
                 return f"{normalized[:split_at]} {normalized[split_at:]}"
         return normalized
+
+    def normalize_role(text: str) -> str:
+        if not text:
+            return text
+        normalized = text.replace("\u3000", " ").strip()
+        normalized = re.sub(r"\s+", " ", normalized)
+        return normalized
     email = find_email(raw_text)
 
     phone_candidates = re.findall(r"(?:\+?81[-\s]?)?0\d{1,4}[-\s]?\d{1,4}[-\s]?\d{3,4}", raw_text)
@@ -313,7 +320,7 @@ def extract_fields(items: List[Dict[str, float | str]], raw_text: str) -> Dict[s
         "name": normalize_person_name(name or ""),
         "company": normalize_company_name(company or ""),
         "branch": branch or "",
-        "role": role or "",
+        "role": normalize_role(role or ""),
         "email": email or "",
         "phone": phone or "",
         "mobile": mobile or "",

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text
+from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -20,6 +20,7 @@ class Contact(Base):
     postal_code = Column(String, nullable=True)
     address = Column(Text, nullable=True)
     branch = Column(String, nullable=True)
+    first_met_at = Column(Date, nullable=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)
     notes = Column(Text, nullable=True)
 

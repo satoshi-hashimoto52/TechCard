@@ -71,6 +71,13 @@ const ContactRegister: React.FC = () => {
   const [availableTags, setAvailableTags] = useState<string[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
   const [deleteTagOption, setDeleteTagOption] = useState('');
+  const todayString = (() => {
+    const today = new Date();
+    const yyyy = today.getFullYear();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  })();
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -81,6 +88,7 @@ const ContactRegister: React.FC = () => {
     branch: '',
     postal_code: '',
     address: '',
+    first_met_at: todayString,
     notes: '',
   });
   const [imageUrl, setImageUrl] = useState<string | null>(null);
@@ -557,6 +565,7 @@ const ContactRegister: React.FC = () => {
         branch: data.branch || '',
         postal_code: data.postal_code || '',
         address: data.address || '',
+        first_met_at: data.first_met_at || '',
         notes: data.notes || '',
       });
       setSelectedTags((data.tags || []).map((tag: { name: string }) => tag.name));
@@ -701,6 +710,7 @@ const ContactRegister: React.FC = () => {
       address: form.address || null,
       branch: form.branch || null,
       company_name: form.company || null,
+      first_met_at: form.first_met_at || null,
       tags: tagsPayload,
       notes: form.notes || null,
       card_filename: cardFilename,
@@ -1358,6 +1368,15 @@ const ContactRegister: React.FC = () => {
               type="text"
               value={form.role}
               onChange={handleChange('role')}
+              className="flex-1 border rounded px-3 py-2"
+            />
+          </div>
+          <div className="flex items-center gap-4">
+            <label className="w-32 text-sm font-medium">初回に会った日</label>
+            <input
+              type="date"
+              value={form.first_met_at}
+              onChange={handleChange('first_met_at')}
               className="flex-1 border rounded px-3 py-2"
             />
           </div>

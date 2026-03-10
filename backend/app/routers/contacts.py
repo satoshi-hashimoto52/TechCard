@@ -4,6 +4,7 @@ from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from pathlib import Path
 import uuid
+from datetime import date
 from .. import crud, models, schemas
 from ..database import SessionLocal
 from ..services.tech_extractor import extract_technologies
@@ -91,6 +92,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
         postal_code=payload.postal_code,
         address=payload.address,
         branch=payload.branch,
+        first_met_at=payload.first_met_at or date.today(),
         company=company,
         notes=payload.notes,
     )
@@ -210,6 +212,8 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
     db_contact.postal_code = payload.postal_code
     db_contact.address = payload.address
     db_contact.branch = payload.branch
+    if payload.first_met_at is not None:
+        db_contact.first_met_at = payload.first_met_at
     db_contact.notes = payload.notes
     db_contact.company = company
 

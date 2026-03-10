@@ -37,6 +37,7 @@ const NetworkGraph: React.FC = () => {
   const [companyFilter, setCompanyFilter] = useState<string | null>(null);
   const [personFilter, setPersonFilter] = useState<string | null>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [hoveredPos, setHoveredPos] = useState<{ x: number; y: number } | null>(null);
   const [searchType, setSearchType] = useState<'technology' | 'company' | 'person'>('technology');
   const [searchValue, setSearchValue] = useState('');
   const [visibleTypes, setVisibleTypes] = useState({
@@ -207,6 +208,10 @@ const NetworkGraph: React.FC = () => {
 
   const handleNodeClick = (node: NodeObject) => {
     const typed = node as GraphNode;
+    if (typed.type === 'company' && graphRef.current && (node as any).x != null && (node as any).y != null) {
+      graphRef.current.centerAt((node as any).x, (node as any).y, 600);
+      graphRef.current.zoom(1.6, 600);
+    }
     if (highlightMode) {
       setSelectedNodeId(prev => (prev === typed.id ? null : typed.id));
       return;
@@ -321,11 +326,15 @@ const NetworkGraph: React.FC = () => {
             検索
           </button>
         </div>
+        <p className="text-xs text-gray-500 mt-2">
+          タイプのON/OFFで表示切替。ハイライトONはクリックで周辺強調、OFFは会社/技術で絞り込み。
+          会社ノードはクリックで中心表示します。
+        </p>
         {personFilter && (
           <p className="text-xs text-gray-500 mt-2">氏名で絞り込み: "{personFilter}"</p>
         )}
       </div>
-      <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)]">
+      <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] relative">
         <ForceGraph2D
           ref={graphRef}
           graphData={graph}
@@ -354,11 +363,28 @@ const NetworkGraph: React.FC = () => {
           linkDirectionalArrowLength={6}
           linkDirectionalArrowRelPos={1}
           onNodeClick={handleNodeClick}
-          onNodeHover={(node: NodeObject | null) => setHoveredNode((node as GraphNode) || null)}
+          onNodeHover={(node: NodeObject | null) => {
+            const typed = (node as GraphNode) || null;
+            setHoveredNode(typed);
+            if (typed && graphRef.current && (node as any).x != null && (node as any).y != null) {
+              const coords = graphRef.current.graph2ScreenCoords((node as any).x, (node as any).y);
+              setHoveredPos({ x: coords.x, y: coords.y });
+            } else {
+              setHoveredPos(null);
+            }
+          }}
           onBackgroundClick={() => setSelectedNodeId(null)}
         />
-        {hoveredNode && (
-          <div className="absolute bottom-6 left-6 bg-gray-900 text-white text-xs px-3 py-2 rounded shadow space-y-1">
+        {hoveredNode && hoveredPos && (
+          <div
+            className="absolute bg-gray-900 text-white text-sm px-3 py-2 rounded shadow space-y-1 pointer-events-none"
+            style={{
+              left: hoveredPos.x + 12,
+              top: hoveredPos.y + 12,
+              transform: 'translate(-50%, -100%)',
+              maxWidth: 240,
+            }}
+          >
             <div className="font-semibold">{hoveredNode.label}</div>
             {hoveredNode.type === 'person' ? (
               <>

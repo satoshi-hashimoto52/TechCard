@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import List, Optional
 from pydantic import BaseModel, Field
 
@@ -74,6 +74,7 @@ class ContactBase(BaseModel):
     postal_code: Optional[str] = None
     address: Optional[str] = None
     branch: Optional[str] = None
+    first_met_at: Optional[date] = None
     company_id: Optional[int] = None
     notes: Optional[str] = None
 
@@ -99,6 +100,7 @@ class ContactRegisterRequest(BaseModel):
     postal_code: Optional[str] = None
     address: Optional[str] = None
     branch: Optional[str] = None
+    first_met_at: Optional[date] = None
     company_name: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     notes: Optional[str] = None
