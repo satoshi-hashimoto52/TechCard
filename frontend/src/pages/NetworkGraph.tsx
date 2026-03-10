@@ -51,7 +51,7 @@ const NetworkGraph: React.FC = () => {
   });
   const [highlightMode, setHighlightMode] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number }[]>([]);
+  const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number; groupId?: string | null }[]>([]);
 
   useEffect(() => {
     const params: Record<string, string | number> = {};
@@ -140,15 +140,38 @@ const NetworkGraph: React.FC = () => {
       linkForce.distance((link: any) => {
         const sourceType = (link.source as GraphNode)?.type;
         const targetType = (link.target as GraphNode)?.type;
-        if (link.type === 'works_at') return 90;
+        if (link.type === 'works_at') return 70;
         if (link.type === 'company_uses') return 140;
         if (sourceType === 'company' || targetType === 'company') return 150;
         return 120;
       });
       if (typeof linkForce.strength === 'function') {
-        linkForce.strength((link: any) => (link.type === 'works_at' ? 0.9 : 0.4));
+        linkForce.strength((link: any) => (link.type === 'works_at' ? 1.0 : 0.4));
       }
     }
+    const personCompanyAttractForce = () => {
+      let nodes: any[] = [];
+      let nodeMap: Map<string, any> = new Map();
+      const strength = 0.06;
+      const force = (alpha: number) => {
+        for (const node of nodes) {
+          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          if (typed.type !== 'person' || !typed.company_node_id) continue;
+          const companyNode = nodeMap.get(typed.company_node_id);
+          if (!companyNode) continue;
+          const dx = (companyNode.x ?? 0) - (typed.x ?? 0);
+          const dy = (companyNode.y ?? 0) - (typed.y ?? 0);
+          typed.vx = (typed.vx ?? 0) + dx * strength * alpha;
+          typed.vy = (typed.vy ?? 0) + dy * strength * alpha;
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+        nodeMap = new Map(nodes.filter(n => n?.id).map(n => [n.id, n]));
+      };
+      return force;
+    };
+    fg.d3Force('person-company-attract', personCompanyAttractForce());
     const personSeparationForce = () => {
       let nodes: any[] = [];
       const minDistance = 26;
@@ -263,20 +286,26 @@ const NetworkGraph: React.FC = () => {
     ctx.shadowOffsetY = 1 / globalScale;
     const textWidth = ctx.measureText(typed.label).width;
     const padding = 3 / globalScale;
-    const overlaps = (box: { x: number; y: number; w: number; h: number }) =>
+    const overlaps = (box: { x: number; y: number; w: number; h: number; groupId?: string | null }) =>
       labelBoxesRef.current.some(existing =>
         box.x < existing.x + existing.w
         && box.x + box.w > existing.x
         && box.y < existing.y + existing.h
         && box.y + box.h > existing.y,
       );
+    const groupId = typed.type === 'company'
+      ? typed.id
+      : typed.type === 'person'
+      ? typed.company_node_id
+      : null;
     const makeBox = (cx: number, cy: number) => ({
       x: cx - textWidth / 2 - padding,
       y: cy - fontSize / 2 - padding,
       w: textWidth + padding * 2,
       h: fontSize + padding * 2,
+      groupId,
     });
-    const offsets = [0, 10, 18, 26];
+    const offsets = [0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168, 180, 192];
     const directions = [
       [0, 0],
       [0, -1],
@@ -296,7 +325,23 @@ const NetworkGraph: React.FC = () => {
         const cx = x + dx;
         const cy = y + dy;
         const box = makeBox(cx, cy);
-        if (!overlaps(box)) {
+        const hasOverlap = overlaps(box);
+        if (!hasOverlap) {
+          labelBoxesRef.current.push(box);
+          ctx.fillText(typed.label, cx, cy);
+          placed = true;
+          break;
+        }
+        const overlapsDifferentCompany = labelBoxesRef.current.some(existing =>
+          box.x < existing.x + existing.w
+          && box.x + box.w > existing.x
+          && box.y < existing.y + existing.h
+          && box.y + box.h > existing.y
+          && existing.groupId
+          && box.groupId
+          && existing.groupId !== box.groupId,
+        );
+        if (!overlapsDifferentCompany) {
           labelBoxesRef.current.push(box);
           ctx.fillText(typed.label, cx, cy);
           placed = true;
