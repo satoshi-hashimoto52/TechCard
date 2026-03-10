@@ -38,6 +38,12 @@ type MobileUploadStatus = {
   upload_count?: number | null;
 };
 
+type TagOption = {
+  id: number;
+  name: string;
+  type: 'technology' | 'relation' | string;
+};
+
 type RoiField = 'name' | 'company' | 'branch' | 'role' | 'email' | 'phone' | 'mobile' | 'postal_code' | 'address';
 
 type CameraCapabilities = MediaTrackCapabilities & {
@@ -69,9 +75,11 @@ const ContactRegister: React.FC = () => {
   const [initialTags, setInitialTags] = useState<string[]>([]);
   const [tagsTouched, setTagsTouched] = useState(false);
   const [customTag, setCustomTag] = useState('');
-  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
   const [deleteTagOption, setDeleteTagOption] = useState('');
+  const [tagTypeTarget, setTagTypeTarget] = useState('');
+  const [tagTypeValue, setTagTypeValue] = useState<'technology' | 'relation'>('technology');
   const todayString = (() => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -547,11 +555,16 @@ const ContactRegister: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    axios.get<{ name: string }[]>('http://localhost:8000/tags')
+    axios.get<TagOption[]>('http://localhost:8000/tags')
       .then(response => {
-        const names = response.data.map(tag => tag.name).filter(Boolean);
-        names.sort((a, b) => a.localeCompare(b, 'ja'));
-        setAvailableTags(names);
+        const tags = response.data.filter(tag => tag.name);
+        tags.sort((a, b) => {
+          const typeOrder = (value: string) => (value === 'relation' ? 1 : 0);
+          const diff = typeOrder(a.type) - typeOrder(b.type);
+          if (diff !== 0) return diff;
+          return a.name.localeCompare(b.name, 'ja');
+        });
+        setAvailableTags(tags);
       })
       .catch(() => setAvailableTags([]));
   }, []);
@@ -887,11 +900,11 @@ const ContactRegister: React.FC = () => {
     setMobileSessionLoading(true);
     setMobileError(null);
     try {
-      const rawHost = window.location.hostname || 'localhost';
-      const mobileHost = rawHost === 'localhost' ? '127.0.0.1' : rawHost;
-      const baseUrl = `https://${mobileHost}:8443`;
+      const scheme = 'https';
+      const port = 8443;
+      const baseUrl = `https://localhost:8443`;
       const response = await axios.post<MobileUploadSession>(
-        `${baseUrl}/mobile-upload/sessions?scheme=https&port=8443`,
+        `${baseUrl}/mobile-upload/sessions?scheme=${scheme}&port=${port}`,
         undefined,
         { timeout: 8000 },
       );
@@ -1005,7 +1018,13 @@ const ContactRegister: React.FC = () => {
                   {mobileSessionLoading ? 'QR生成中...' : 'スマホで撮影（QR表示）'}
                 </button>
                 <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。OCRは空欄のみ取得します。</span>
-                <label className="text-xs text-gray-600 flex items-center gap-2">
+                <label
+                  className={`text-xs font-semibold flex items-center gap-2 border rounded px-2 py-1 transition-colors ${
+                    mobileContinuous
+                      ? 'bg-emerald-50 text-emerald-700 border-emerald-400'
+                      : 'bg-amber-50 text-amber-700 border-amber-400'
+                  }`}
+                >
                   <input
                     type="checkbox"
                     checked={mobileContinuous}
@@ -1510,24 +1529,30 @@ const ContactRegister: React.FC = () => {
             <label className="w-32 text-sm font-medium pt-2">タグ</label>
             <div className="flex-1 space-y-3">
               <div className="flex flex-wrap gap-2">
-                {selectedTags.map(tag => (
-                  <span
-                    key={tag}
-                    className="inline-flex items-center gap-2 bg-blue-100 text-blue-800 px-2 py-1 rounded text-sm"
-                  >
-                    {tag}
+                {selectedTags.map(tag => {
+                  const tagType = availableTags.find(item => item.name === tag)?.type;
+                  const styleClass = tagType === 'relation'
+                    ? 'bg-amber-100 text-amber-800'
+                    : 'bg-blue-100 text-blue-800';
+                  return (
+                    <span
+                      key={tag}
+                      className={`inline-flex items-center gap-2 px-2 py-1 rounded text-sm ${styleClass}`}
+                    >
+                      {tag}
                     <button
                       type="button"
                       onClick={() => {
                         setTagsTouched(true);
                         setSelectedTags(prev => prev.filter(item => item !== tag));
                       }}
-                      className="text-blue-800 hover:text-blue-900"
+                      className={tagType === 'relation' ? 'text-amber-800 hover:text-amber-900' : 'text-blue-800 hover:text-blue-900'}
                     >
                       ×
                     </button>
-                  </span>
-                ))}
+                    </span>
+                  );
+                })}
                 {selectedTags.length === 0 && (
                   <span className="text-sm text-gray-500">タグが選択されていません。</span>
                 )}
@@ -1540,8 +1565,8 @@ const ContactRegister: React.FC = () => {
                 >
                   <option value="">既存タグを選択</option>
                   {availableTags.map(tag => (
-                    <option key={tag} value={tag}>
-                      {tag}
+                    <option key={tag.id} value={tag.name}>
+                      {tag.type === 'relation' ? 'Tag/Relation' : 'Tag/Tech'}: {tag.name}
                     </option>
                   ))}
                 </select>
@@ -1566,8 +1591,8 @@ const ContactRegister: React.FC = () => {
                 >
                   <option value="">既存タグを削除</option>
                   {availableTags.map(tag => (
-                    <option key={`delete-${tag}`} value={tag}>
-                      {tag}
+                    <option key={`delete-${tag.id}`} value={tag.name}>
+                      {tag.type === 'relation' ? 'Tag/Relation' : 'Tag/Tech'}: {tag.name}
                     </option>
                   ))}
                 </select>
@@ -1579,14 +1604,13 @@ const ContactRegister: React.FC = () => {
                     const confirmed = window.confirm(`タグ「${target}」を削除しますか？`);
                     if (!confirmed) return;
                     try {
-                      const tagsResponse = await axios.get<{ id: number; name: string }[]>('http://localhost:8000/tags');
-                      const match = tagsResponse.data.find(tag => tag.name === target);
+                      const match = availableTags.find(tag => tag.name === target);
                       if (!match) {
                         setSubmitError('タグが見つかりません。');
                         return;
                       }
                       await axios.delete(`http://localhost:8000/tags/${match.id}`);
-                      setAvailableTags(prev => prev.filter(tag => tag !== target));
+                      setAvailableTags(prev => prev.filter(tag => tag.name !== target));
                       setSelectedTags(prev => prev.filter(tag => tag !== target));
                       setDeleteTagOption('');
                     } catch {
@@ -1596,6 +1620,62 @@ const ContactRegister: React.FC = () => {
                   className="bg-red-600 text-white px-3 py-2 rounded"
                 >
                   削除
+                </button>
+                <select
+                  value={tagTypeTarget}
+                  onChange={e => setTagTypeTarget(e.target.value)}
+                  className="border rounded px-3 py-2 text-sm min-w-[200px]"
+                >
+                  <option value="">タグ種別を変更</option>
+                  {availableTags.map(tag => (
+                    <option key={`type-${tag.id}`} value={tag.name}>
+                      {tag.type === 'relation' ? 'Tag/Relation' : 'Tag/Tech'}: {tag.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={tagTypeValue}
+                  onChange={e => setTagTypeValue(e.target.value as 'technology' | 'relation')}
+                  className="border rounded px-3 py-2 text-sm"
+                >
+                  <option value="technology">Tag/Tech</option>
+                  <option value="relation">Tag/Relation</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const target = tagTypeTarget.trim();
+                    if (!target) return;
+                    const match = availableTags.find(tag => tag.name === target);
+                    if (!match) {
+                      setSubmitError('タグが見つかりません。');
+                      return;
+                    }
+                    try {
+                      const response = await axios.put(`http://localhost:8000/tags/${match.id}`, {
+                        name: match.name,
+                        type: tagTypeValue,
+                      });
+                      setAvailableTags(prev => {
+                        const updated = prev.map(tag => (
+                          tag.id === match.id ? { ...tag, type: response.data.type } : tag
+                        ));
+                        updated.sort((a, b) => {
+                          const typeOrder = (value: string) => (value === 'relation' ? 1 : 0);
+                          const diff = typeOrder(a.type) - typeOrder(b.type);
+                          if (diff !== 0) return diff;
+                          return a.name.localeCompare(b.name, 'ja');
+                        });
+                        return updated;
+                      });
+                      setTagTypeTarget('');
+                    } catch {
+                      setSubmitError('タグ種別の更新に失敗しました。');
+                    }
+                  }}
+                  className="bg-gray-700 text-white px-3 py-2 rounded"
+                >
+                  種別変更
                 </button>
                 <input
                   type="text"

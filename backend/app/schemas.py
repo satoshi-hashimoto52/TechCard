@@ -5,9 +5,10 @@ from pydantic import BaseModel, Field
 # Tag schemas
 class TagBase(BaseModel):
     name: str
+    type: Optional[str] = None
 
 class TagCreate(TagBase):
-    pass
+    type: str = "technology"
 
 class TagRead(TagBase):
     id: int

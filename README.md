@@ -75,15 +75,16 @@ iPhone/Androidのブラウザで**撮影時に枠を表示**するため、HTTPS
 
 2. **ローカルIPの確認**
    ```bash
-   ipconfig getifaddr en0
+   ifconfig | grep -E "inet " | head -n 5
    ```
+   `192.168.x.x` のLAN IPを使用します。
 
 3. **証明書作成**
    ```bash
    cd techcard/backend
    mkdir -p certs
-   mkcert -cert-file certs/localhost.pem -key-file certs/localhost-key.pem \
-     localhost 127.0.0.1 <YOUR_LOCAL_IP>
+   mkcert -cert-file certs/lan.pem -key-file certs/lan-key.pem \
+     <YOUR_LOCAL_IP> localhost 127.0.0.1
    ```
 
 4. **HTTPSでバックエンドを起動（8443）**
@@ -91,12 +92,29 @@ iPhone/Androidのブラウザで**撮影時に枠を表示**するため、HTTPS
    cd techcard/backend
    source .venv/bin/activate
    python -m uvicorn app.main:app --host 0.0.0.0 --port 8443 \
-     --ssl-certfile certs/localhost.pem --ssl-keyfile certs/localhost-key.pem
+     --ssl-certfile certs/lan.pem --ssl-keyfile certs/lan-key.pem
    ```
 
 5. **iPhoneで証明書を信頼**
    - `mkcert -CAROOT` で表示されるフォルダ内の `rootCA.pem` をiPhoneへ送信
    - 設定 → 一般 → 情報 → 証明書信頼設定 で信頼をON
+
+### IPが変わった場合（重要）
+- **LAN IPが変わったら証明書は再生成が必要**です。
+- 手順:
+  1. `ifconfig | grep -E "inet " | head -n 5` で新しいIPを確認
+  2. `mkcert -cert-file certs/lan.pem -key-file certs/lan-key.pem <NEW_IP> localhost 127.0.0.1` を再実行
+  3. バックエンド/フロントエンドを再起動
+  4. 「スマホで撮影（QR表示）」からQRを再生成
+
+### カメラ起動までの流れ（重要）
+1. 上記の証明書手順を完了（Mac + iPhoneで信頼）
+2. `./dev_start.sh` で起動
+3. ブラウザで `http://localhost:3000` を開く
+4. 連絡先登録 → 「スマホで撮影（QR表示）」を押す
+5. QRをiPhoneで開く  
+   **HTTPS（`https://<PCのIP>:8443`）で開かれていることを確認**
+6. 「カメラ起動」→ 撮影してアップロード  
 
 QRからアクセスするURLはHTTPS（`https://<PCのIP>:8443`）になります。  
 PCとスマホは**同一Wi-Fi**が必要です。

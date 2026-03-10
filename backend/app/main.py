@@ -72,6 +72,20 @@ with engine.begin() as connection:
         connection.execute(text("CREATE INDEX IF NOT EXISTS ix_contacts_phone ON contacts (phone)"))
         connection.execute(text("PRAGMA foreign_keys=ON"))
 
+    company_columns = connection.execute(text("PRAGMA table_info(companies)")).fetchall()
+    if company_columns and not any(column[1] == "latitude" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN latitude REAL"))
+    if company_columns and not any(column[1] == "longitude" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN longitude REAL"))
+    if company_columns and not any(column[1] == "geocoded_at" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN geocoded_at DATETIME"))
+
+    tag_columns = connection.execute(text("PRAGMA table_info(tags)")).fetchall()
+    if tag_columns and not any(column[1] == "type" for column in tag_columns):
+        connection.execute(text("ALTER TABLE tags ADD COLUMN type TEXT DEFAULT 'technology'"))
+    if tag_columns:
+        connection.execute(text("UPDATE tags SET type='technology' WHERE type IS NULL"))
+
 app = FastAPI(title="TechCard Backend")
 
 # Add CORS middleware

@@ -21,8 +21,7 @@ def get_network_graph(
     company: str | None = Query(default=None),
     person: str | None = Query(default=None),
     person_id: int | None = Query(default=None, ge=1),
-    limit_contacts: int = Query(default=50, ge=1),
-    limit_meetings: int = Query(default=100, ge=0),
+    limit_contacts: int = Query(default=1000, ge=1),
     db: Session = Depends(get_db),
 ):
     contacts = (
@@ -30,8 +29,8 @@ def get_network_graph(
         .options(
             joinedload(models.Contact.company),
             joinedload(models.Contact.tags),
-            joinedload(models.Contact.meetings),
         )
+        .order_by(models.Contact.id.desc())
         .all()
     )
 
@@ -76,7 +75,6 @@ def get_network_graph(
     links: list[dict[str, str]] = []
     node_ids: set[str] = set()
     link_keys: set[tuple[str, str, str]] = set()
-    meeting_count = 0
     company_postal_counts: dict[int, Counter[str]] = defaultdict(Counter)
     company_address_counts: dict[int, Counter[str]] = defaultdict(Counter)
 
@@ -150,24 +148,6 @@ def get_network_graph(
                 "uses",
             )
 
-        for meeting in contact.meetings:
-            if meeting_count >= limit_meetings:
-                break
-            add_node(
-                {
-                    "id": f"meeting_{meeting.id}",
-                    "type": "meeting",
-                    "label": "Meeting",
-                    "timestamp": meeting.timestamp.isoformat(),
-                }
-            )
-            add_link(
-                f"contact_{contact_id}",
-                f"meeting_{meeting.id}",
-                "met_at",
-            )
-            meeting_count += 1
-
         if contact.company:
             add_node(
                 {
@@ -187,6 +167,7 @@ def get_network_graph(
                     "id": f"tag_{tag.id}",
                     "type": "technology",
                     "label": tag.name,
+                    "tag_type": tag.type or "technology",
                 }
             )
             if contact.company:

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date, Boolean
+from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date, Boolean, Float
 from sqlalchemy.orm import relationship
 from .database import Base
 
@@ -34,6 +34,9 @@ class Company(Base):
     __tablename__ = "companies"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    latitude = Column(Float, nullable=True)
+    longitude = Column(Float, nullable=True)
+    geocoded_at = Column(DateTime, nullable=True)
 
     contacts = relationship("Contact", back_populates="company")
 
@@ -41,6 +44,7 @@ class Tag(Base):
     __tablename__ = "tags"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    type = Column(String, nullable=False, default="technology")
 
     contacts = relationship("Contact", secondary=contact_tags, back_populates="tags")
 

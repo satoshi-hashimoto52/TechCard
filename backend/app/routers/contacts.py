@@ -126,7 +126,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
             .first()
         )
         if tag is None:
-            tag = models.Tag(name=tag_name)
+            tag = models.Tag(name=tag_name, type="technology")
             db.add(tag)
             db.flush()
         contact.tags.append(tag)

@@ -14,7 +14,7 @@ interface Contact {
   first_met_at?: string;
   branch?: string;
   company?: { name: string };
-  tags: { name: string }[];
+  tags: { name: string; type?: string }[];
   notes?: string;
   meetings: { timestamp: string; notes?: string }[];
   business_cards: { id: number; filename: string; ocr_text: string | null }[];

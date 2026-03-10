@@ -9,7 +9,7 @@ interface Contact {
   phone?: string;
   role?: string;
   company?: { name: string };
-  tags: { name: string }[];
+  tags: { name: string; type?: string }[];
   first_met_at?: string;
   notes?: string;
 }

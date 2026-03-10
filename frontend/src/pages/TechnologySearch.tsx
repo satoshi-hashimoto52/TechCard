@@ -5,7 +5,7 @@ interface Contact {
   id: number;
   name: string;
   email?: string;
-  tags: { name: string }[];
+  tags: { name: string; type?: string }[];
 }
 
 const TechnologySearch: React.FC = () => {
@@ -15,7 +15,7 @@ const TechnologySearch: React.FC = () => {
   const search = () => {
     axios.get(`http://localhost:8000/contacts/`).then(response => {
       const filtered = response.data.filter((contact: Contact) =>
-        contact.tags.some(tag => tag.name.toLowerCase().includes(query.toLowerCase()))
+        contact.tags.some(tag => tag.type === 'technology' && tag.name.toLowerCase().includes(query.toLowerCase()))
       );
       setContacts(filtered);
     });
@@ -38,7 +38,7 @@ const TechnologySearch: React.FC = () => {
             <h2 className="text-lg font-semibold">{contact.name}</h2>
             <p>{contact.email}</p>
             <div>
-              {contact.tags.map(tag => (
+              {contact.tags.filter(tag => tag.type === 'technology').map(tag => (
                 <span key={tag.name} className="bg-green-100 text-green-800 px-2 py-1 rounded mr-1">
                   {tag.name}
                 </span>

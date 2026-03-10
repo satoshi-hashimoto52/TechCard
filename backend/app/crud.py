@@ -81,7 +81,7 @@ def get_tags(db: Session, skip: int = 0, limit: int = 100) -> List[models.Tag]:
 def update_tag(db: Session, tag_id: int, tag: schemas.TagBase) -> models.Tag:
     db_tag = db.query(models.Tag).filter(models.Tag.id == tag_id).first()
     if db_tag:
-        for key, value in tag.dict().items():
+        for key, value in tag.dict(exclude_none=True).items():
             setattr(db_tag, key, value)
         db.commit()
         db.refresh(db_tag)

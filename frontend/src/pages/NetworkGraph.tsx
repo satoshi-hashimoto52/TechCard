@@ -5,7 +5,7 @@ import ForceGraph2D from 'react-force-graph-2d';
 
 type GraphNode = {
   id: string;
-  type: 'person' | 'company' | 'technology' | 'meeting';
+  type: 'person' | 'company' | 'technology';
   label: string;
   role?: string;
   email?: string;
@@ -15,6 +15,7 @@ type GraphNode = {
   address?: string;
   company_node_id?: string;
   is_self?: boolean;
+  tag_type?: 'technology' | 'relation' | string;
 };
 
 type NodeObject = {
@@ -25,7 +26,7 @@ type NodeObject = {
 type GraphLink = {
   source: string | { id: string };
   target: string | { id: string };
-  type: 'works_at' | 'uses' | 'met_at' | 'company_uses';
+  type: 'works_at' | 'uses' | 'company_uses';
 };
 
 type GraphData = {
@@ -48,7 +49,10 @@ const NetworkGraph: React.FC = () => {
     person: true,
     company: true,
     technology: true,
-    meeting: true,
+  });
+  const [visibleTagTypes, setVisibleTagTypes] = useState({
+    tech: true,
+    relation: true,
   });
   const [highlightMode, setHighlightMode] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -74,13 +78,19 @@ const NetworkGraph: React.FC = () => {
         .map(([type]) => type),
     );
     const nodes = rawGraph.nodes
-      .filter(node => allowedTypes.has(node.type))
+      .filter(node => {
+        if (!allowedTypes.has(node.type)) return false;
+        if (node.type === 'technology') {
+          const tagKey = node.tag_type === 'relation' ? 'relation' : 'tech';
+          return visibleTagTypes[tagKey];
+        }
+        return true;
+      })
       .sort((a, b) => {
         const order: Record<GraphNode['type'], number> = {
           company: 0,
           person: 1,
           technology: 2,
-          meeting: 3,
         };
         return order[a.type] - order[b.type];
       });
@@ -349,8 +359,8 @@ const NetworkGraph: React.FC = () => {
           ? '#3b82f6'
           : typed.type === 'company'
           ? '#22c55e'
-          : typed.type === 'meeting'
-          ? '#a855f7'
+          : typed.tag_type === 'relation'
+          ? '#ec4899'
           : '#f59e0b';
       if (highlightMode && selectedNodeId) {
         if (!highlightedNodeIds.has(typed.id)) {
@@ -365,7 +375,6 @@ const NetworkGraph: React.FC = () => {
     return (node: NodeObject) => {
       const typed = node as GraphNode;
       if (typed.type === 'technology') return 12;
-      if (typed.type === 'meeting') return 3;
       return 6;
     };
   }, []);
@@ -529,20 +538,20 @@ const NetworkGraph: React.FC = () => {
             <label className="text-xs text-gray-600">
               <input
                 type="checkbox"
-                checked={visibleTypes.technology}
-                onChange={event => setVisibleTypes(prev => ({ ...prev, technology: event.target.checked }))}
+                checked={visibleTagTypes.tech}
+                onChange={event => setVisibleTagTypes(prev => ({ ...prev, tech: event.target.checked }))}
                 className="mr-1"
               />
-              技術
+              Tag/Tech
             </label>
             <label className="text-xs text-gray-600">
               <input
                 type="checkbox"
-                checked={visibleTypes.meeting}
-                onChange={event => setVisibleTypes(prev => ({ ...prev, meeting: event.target.checked }))}
+                checked={visibleTagTypes.relation}
+                onChange={event => setVisibleTagTypes(prev => ({ ...prev, relation: event.target.checked }))}
                 className="mr-1"
               />
-              ミーティング
+              Tag/Relation
             </label>
           </div>
           <label className="text-xs text-gray-600 flex items-center gap-1">
