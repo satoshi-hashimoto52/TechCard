@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
 import axios from 'axios';
 
 interface Contact {
@@ -15,6 +15,7 @@ interface Contact {
 }
 
 const Contacts: React.FC = () => {
+  const location = useLocation();
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [expandedCompanies, setExpandedCompanies] = useState<Record<string, boolean>>({});
 
@@ -29,9 +30,14 @@ const Contacts: React.FC = () => {
           initialExpanded[name] = false;
         }
       });
+      const storedCompany = (location.state as { openCompany?: string } | null)?.openCompany
+        || sessionStorage.getItem('contacts:lastCompany');
+      if (storedCompany && storedCompany in initialExpanded) {
+        initialExpanded[storedCompany] = true;
+      }
       setExpandedCompanies(initialExpanded);
     });
-  }, []);
+  }, [location.state]);
 
   const companyGroups = useMemo(() => {
     const grouped = new Map<string, Contact[]>();
@@ -88,6 +94,9 @@ const Contacts: React.FC = () => {
                     <Link
                       key={contact.id}
                       to={`/contacts/${contact.id}`}
+                      onClick={() => {
+                        sessionStorage.setItem('contacts:lastCompany', group.company);
+                      }}
                       className="bg-white p-4 rounded-lg shadow hover:shadow-lg transition border border-gray-100"
                     >
                       <h3 className="text-lg font-semibold">{contact.name}</h3>

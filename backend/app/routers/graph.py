@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, Query
+from collections import Counter, defaultdict
 from sqlalchemy.orm import Session, joinedload
 from ..database import SessionLocal
 from .. import models
@@ -76,6 +77,32 @@ def get_network_graph(
     node_ids: set[str] = set()
     link_keys: set[tuple[str, str, str]] = set()
     meeting_count = 0
+    company_postal_counts: dict[int, Counter[str]] = defaultdict(Counter)
+    company_address_counts: dict[int, Counter[str]] = defaultdict(Counter)
+
+    def pick_most_common(counter: Counter[str]) -> str:
+        if not counter:
+            return ""
+        most_common_count = counter.most_common(1)[0][1]
+        candidates = [value for value, count in counter.items() if count == most_common_count]
+        return sorted(candidates)[0]
+
+    for contact in contacts:
+        if contact.company_id is None:
+            continue
+        if contact.postal_code:
+            company_postal_counts[contact.company_id][contact.postal_code.strip()] += 1
+        if contact.address:
+            company_address_counts[contact.company_id][contact.address.strip()] += 1
+
+    company_top_postal = {
+        company_id: pick_most_common(counter)
+        for company_id, counter in company_postal_counts.items()
+    }
+    company_top_address = {
+        company_id: pick_most_common(counter)
+        for company_id, counter in company_address_counts.items()
+    }
 
     def add_node(payload: dict[str, str]) -> None:
         node_id = payload["id"]
@@ -145,6 +172,8 @@ def get_network_graph(
                     "id": f"company_{contact.company.id}",
                     "type": "company",
                     "label": contact.company.name,
+                    "postal_code": company_top_postal.get(contact.company.id, ""),
+                    "address": company_top_address.get(contact.company.id, ""),
                 }
             )
 

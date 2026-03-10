@@ -767,7 +767,7 @@ const ContactRegister: React.FC = () => {
         role: '',
         branch: '',
         notes: '',
-        first_met_at: todayString,
+        first_met_at: prev.first_met_at,
         company: prev.company,
         phone: prev.phone,
         postal_code: prev.postal_code,

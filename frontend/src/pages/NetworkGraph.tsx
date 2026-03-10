@@ -11,6 +11,8 @@ type GraphNode = {
   email?: string;
   phone?: string;
   mobile?: string;
+  postal_code?: string;
+  address?: string;
 };
 
 type NodeObject = {
@@ -48,6 +50,7 @@ const NetworkGraph: React.FC = () => {
   });
   const [highlightMode, setHighlightMode] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number }[]>([]);
 
   useEffect(() => {
     const params: Record<string, string | number> = {};
@@ -114,7 +117,7 @@ const NetworkGraph: React.FC = () => {
     if (!fg) return;
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
-      charge.strength(-120);
+      charge.strength((node: GraphNode) => (node.type === 'technology' ? -220 : -120));
     }
     const linkForce = fg.d3Force('link') as any;
     if (linkForce && typeof linkForce.distance === 'function') {
@@ -178,7 +181,7 @@ const NetworkGraph: React.FC = () => {
   const nodeSize = useMemo(() => {
     return (node: NodeObject) => {
       const typed = node as GraphNode;
-      if (typed.type === 'technology') return 10;
+      if (typed.type === 'technology') return 12;
       if (typed.type === 'meeting') return 3;
       return 6;
     };
@@ -202,7 +205,50 @@ const NetworkGraph: React.FC = () => {
     ctx.shadowBlur = 4 / globalScale;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 1 / globalScale;
-    ctx.fillText(typed.label, x, y);
+    const textWidth = ctx.measureText(typed.label).width;
+    const padding = 3 / globalScale;
+    const overlaps = (box: { x: number; y: number; w: number; h: number }) =>
+      labelBoxesRef.current.some(existing =>
+        box.x < existing.x + existing.w
+        && box.x + box.w > existing.x
+        && box.y < existing.y + existing.h
+        && box.y + box.h > existing.y,
+      );
+    const makeBox = (cx: number, cy: number) => ({
+      x: cx - textWidth / 2 - padding,
+      y: cy - fontSize / 2 - padding,
+      w: textWidth + padding * 2,
+      h: fontSize + padding * 2,
+    });
+    const offsets = [0, 10, 18, 26];
+    const directions = [
+      [0, 0],
+      [0, -1],
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [1, 1],
+      [-1, 1],
+      [1, -1],
+      [-1, -1],
+    ];
+    let placed = false;
+    for (const offset of offsets) {
+      for (const [dxDir, dyDir] of directions) {
+        const dx = (dxDir * offset) / globalScale;
+        const dy = (dyDir * offset) / globalScale;
+        const cx = x + dx;
+        const cy = y + dy;
+        const box = makeBox(cx, cy);
+        if (!overlaps(box)) {
+          labelBoxesRef.current.push(box);
+          ctx.fillText(typed.label, cx, cy);
+          placed = true;
+          break;
+        }
+      }
+      if (placed) break;
+    }
     ctx.restore();
   }, [nodeColor]);
 
@@ -338,6 +384,9 @@ const NetworkGraph: React.FC = () => {
         <ForceGraph2D
           ref={graphRef}
           graphData={graph}
+          onRenderFramePre={() => {
+            labelBoxesRef.current = [];
+          }}
           nodeLabel={(node: NodeObject) => {
             const typed = node as GraphNode;
             return `${typed.label} (${typed.type})`;
@@ -347,12 +396,12 @@ const NetworkGraph: React.FC = () => {
           nodeCanvasObjectMode={() => 'after'}
           nodeCanvasObject={drawNodeLabel}
           linkColor={(link: any) => {
-            if (!highlightMode || !selectedNodeId) return 'rgba(148, 163, 184, 0.5)';
+            if (!highlightMode || !selectedNodeId) return 'rgba(148, 163, 184, 0.3)';
             const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
             const targetId = typeof link.target === 'string' ? link.target : link.target.id;
             return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
               ? 'rgba(59, 130, 246, 0.8)'
-              : 'rgba(203, 213, 225, 0.25)';
+              : 'rgba(203, 213, 225, 0.15)';
           }}
           linkWidth={(link: any) => {
             if (!highlightMode || !selectedNodeId) return 1;
@@ -391,6 +440,11 @@ const NetworkGraph: React.FC = () => {
                 <div>役職・部署: {hoveredNode.role || '-'}</div>
                 <div>電話: {hoveredNode.mobile || hoveredNode.phone || '-'}</div>
                 <div>メール: {hoveredNode.email || '-'}</div>
+              </>
+            ) : hoveredNode.type === 'company' ? (
+              <>
+                <div>郵便番号: {hoveredNode.postal_code || '-'}</div>
+                <div>住所: {hoveredNode.address || '-'}</div>
               </>
             ) : (
               <div>{hoveredNode.type}</div>

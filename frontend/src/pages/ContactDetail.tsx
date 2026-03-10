@@ -79,7 +79,11 @@ const ContactDetail: React.FC = () => {
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={() => navigate('/contacts')}
+            onClick={() => {
+              const companyName = contact.company?.name?.trim() || '未設定';
+              sessionStorage.setItem('contacts:lastCompany', companyName);
+              navigate('/contacts', { state: { openCompany: companyName } });
+            }}
             className="text-sm text-gray-600 hover:text-gray-900"
           >
             一覧へ戻る
