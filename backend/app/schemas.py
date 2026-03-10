@@ -71,6 +71,7 @@ class ContactBase(BaseModel):
     phone: Optional[str] = None
     role: Optional[str] = None
     mobile: Optional[str] = None
+    postal_code: Optional[str] = None
     address: Optional[str] = None
     branch: Optional[str] = None
     company_id: Optional[int] = None
@@ -95,6 +96,7 @@ class ContactRegisterRequest(BaseModel):
     phone: Optional[str] = None
     role: Optional[str] = None
     mobile: Optional[str] = None
+    postal_code: Optional[str] = None
     address: Optional[str] = None
     branch: Optional[str] = None
     company_name: Optional[str] = None

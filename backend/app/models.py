@@ -13,10 +13,11 @@ class Contact(Base):
     __tablename__ = "contacts"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, index=True)
-    email = Column(String, unique=True, index=True, nullable=True)
-    phone = Column(String, unique=True, index=True, nullable=True)
+    email = Column(String, index=True, nullable=True)
+    phone = Column(String, index=True, nullable=True)
     role = Column(String, nullable=True)
     mobile = Column(String, nullable=True)
+    postal_code = Column(String, nullable=True)
     address = Column(Text, nullable=True)
     branch = Column(String, nullable=True)
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True)

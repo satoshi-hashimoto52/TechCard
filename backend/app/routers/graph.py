@@ -74,6 +74,7 @@ def get_network_graph(
     nodes: list[dict[str, str]] = []
     links: list[dict[str, str]] = []
     node_ids: set[str] = set()
+    link_keys: set[tuple[str, str, str]] = set()
     meeting_count = 0
 
     def add_node(payload: dict[str, str]) -> None:
@@ -83,28 +84,41 @@ def get_network_graph(
         nodes.append(payload)
         node_ids.add(node_id)
 
+    def add_link(source: str, target: str, link_type: str) -> None:
+        key = (source, target, link_type)
+        if key in link_keys:
+            return
+        links.append({"source": source, "target": target, "type": link_type})
+        link_keys.add(key)
+
     for contact in contacts:
         contact_id = contact.id
-        add_node({"id": f"contact_{contact_id}", "type": "person", "label": contact.name})
+        add_node(
+            {
+                "id": f"contact_{contact_id}",
+                "type": "person",
+                "label": contact.name or "",
+                "role": contact.role or "",
+                "email": contact.email or "",
+                "phone": contact.phone or "",
+                "mobile": contact.mobile or "",
+            }
+        )
 
         if contact.company_id is not None:
-            links.append(
-                {
-                    "source": f"contact_{contact_id}",
-                    "target": f"company_{contact.company_id}",
-                    "type": "works_at",
-                }
+            add_link(
+                f"contact_{contact_id}",
+                f"company_{contact.company_id}",
+                "works_at",
             )
 
         for tag in contact.tags:
             if tech_filter and (not tag.name or tech_filter.lower() not in tag.name.lower()):
                 continue
-            links.append(
-                {
-                    "source": f"contact_{contact_id}",
-                    "target": f"tag_{tag.id}",
-                    "type": "uses",
-                }
+            add_link(
+                f"contact_{contact_id}",
+                f"tag_{tag.id}",
+                "uses",
             )
 
         for meeting in contact.meetings:
@@ -118,12 +132,10 @@ def get_network_graph(
                     "timestamp": meeting.timestamp.isoformat(),
                 }
             )
-            links.append(
-                {
-                    "source": f"contact_{contact_id}",
-                    "target": f"meeting_{meeting.id}",
-                    "type": "met_at",
-                }
+            add_link(
+                f"contact_{contact_id}",
+                f"meeting_{meeting.id}",
+                "met_at",
             )
             meeting_count += 1
 
@@ -146,5 +158,11 @@ def get_network_graph(
                     "label": tag.name,
                 }
             )
+            if contact.company:
+                add_link(
+                    f"company_{contact.company.id}",
+                    f"tag_{tag.id}",
+                    "company_uses",
+                )
 
     return {"nodes": nodes, "links": links}

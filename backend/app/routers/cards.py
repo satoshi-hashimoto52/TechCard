@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from .. import crud, models, schemas
 from ..database import SessionLocal
-from ..ocr import preprocess_image, run_ocr, extract_fields, ocr_image_array
+from ..ocr import run_ocr, extract_fields, ocr_image_array
 
 router = APIRouter(prefix="/cards", tags=["cards"])
 
@@ -33,10 +33,8 @@ def _run_ocr_job(job_id: str, file_path: str) -> None:
     processed_path = None
     try:
         _update_job(job_id, status="processing", progress=30)
-        processed_path = preprocess_image(file_path)
-
         _update_job(job_id, status="processing", progress=60)
-        lines, raw_text = run_ocr(processed_path)
+        lines, raw_text = run_ocr(file_path)
 
         _update_job(job_id, status="processing", progress=90)
         result = extract_fields(lines, raw_text)
@@ -61,11 +59,7 @@ def _run_ocr_job(job_id: str, file_path: str) -> None:
     except Exception as exc:
         _update_job(job_id, status="error", progress=100, error=str(exc))
     finally:
-        if processed_path and processed_path != file_path:
-            try:
-                os.remove(processed_path)
-            except OSError:
-                pass
+        pass
 
 @router.post("/upload")
 async def upload_business_card(background_tasks: BackgroundTasks, file: UploadFile = File(...)):

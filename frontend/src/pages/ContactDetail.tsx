@@ -9,6 +9,7 @@ interface Contact {
   phone?: string;
   role?: string;
   mobile?: string;
+  postal_code?: string;
   address?: string;
   branch?: string;
   company?: { name: string };
@@ -92,6 +93,7 @@ const ContactDetail: React.FC = () => {
         <p><strong>支店 / Office:</strong> {contact.branch}</p>
         <p><strong>役職・部署:</strong> {contact.role}</p>
         <p><strong>携帯:</strong> {contact.mobile}</p>
+        <p><strong>郵便番号:</strong> {contact.postal_code}</p>
         <p><strong>住所:</strong> {contact.address}</p>
         <p><strong>会社:</strong> {contact.company?.name}</p>
         <div className="mt-2">

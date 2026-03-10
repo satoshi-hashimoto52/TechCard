@@ -21,7 +21,29 @@ type ContactRegisterResponse = {
   id: number;
 };
 
-type RoiField = 'name' | 'company' | 'branch' | 'role' | 'email' | 'phone' | 'mobile' | 'address';
+type MobileUploadSession = {
+  session_id: string;
+  server_base_url: string;
+  upload_url: string;
+  status_url: string;
+  image_url: string;
+  qr_url: string;
+};
+
+type MobileUploadStatus = {
+  status: 'waiting' | 'done' | 'error';
+  filename?: string | null;
+  image_url?: string | null;
+  error?: string | null;
+};
+
+type RoiField = 'name' | 'company' | 'branch' | 'role' | 'email' | 'phone' | 'mobile' | 'postal_code' | 'address';
+
+type CameraCapabilities = MediaTrackCapabilities & {
+  focusMode?: string[];
+  focusDistance?: { min: number; max: number; step?: number };
+  zoom?: { min: number; max: number; step?: number };
+};
 
 type RoiRect = {
   id: string;
@@ -46,6 +68,9 @@ const ContactRegister: React.FC = () => {
   const [initialTags, setInitialTags] = useState<string[]>([]);
   const [tagsTouched, setTagsTouched] = useState(false);
   const [customTag, setCustomTag] = useState('');
+  const [availableTags, setAvailableTags] = useState<string[]>([]);
+  const [selectedTagOption, setSelectedTagOption] = useState('');
+  const [deleteTagOption, setDeleteTagOption] = useState('');
   const [form, setForm] = useState({
     name: '',
     email: '',
@@ -54,14 +79,14 @@ const ContactRegister: React.FC = () => {
     role: '',
     company: '',
     branch: '',
+    postal_code: '',
     address: '',
     notes: '',
   });
   const [imageUrl, setImageUrl] = useState<string | null>(null);
-  const [konvaImage] = useImage(imageUrl || '');
+  const [konvaImage] = useImage(imageUrl || '', 'anonymous');
   const [imageSize, setImageSize] = useState({ width: 0, height: 0 });
   const [scale, setScale] = useState(1);
-  const [zoom, setZoom] = useState(1);
   const [containerWidth, setContainerWidth] = useState(0);
   const [rois, setRois] = useState<RoiRect[]>([]);
   const [selectedRoiId, setSelectedRoiId] = useState<string | null>(null);
@@ -71,9 +96,26 @@ const ContactRegister: React.FC = () => {
   const [lastTemplateCompany, setLastTemplateCompany] = useState<string | null>(null);
   const transformerRef = useRef<any>(null);
   const canvasContainerRef = useRef<HTMLDivElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [cameraStream, setCameraStream] = useState<MediaStream | null>(null);
+  const [isCameraActive, setIsCameraActive] = useState(false);
   const [templates, setTemplates] = useState<{ company_name: string; template_name: string }[]>([]);
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const isEdit = Boolean(id);
+  const [focusDistance, setFocusDistance] = useState(0);
+  const [zoomLevel, setZoomLevel] = useState(1);
+  const [focusMode, setFocusMode] = useState<string>('');
+  const [cameraCapabilities, setCameraCapabilities] = useState<any>(null);
+  const [cameraTrack, setCameraTrack] = useState<MediaStreamTrack | null>(null);
+  const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
+  const [selectedDeviceId, setSelectedDeviceId] = useState('');
+  const [mobileSession, setMobileSession] = useState<MobileUploadSession | null>(null);
+  const [mobileStatus, setMobileStatus] = useState<'idle' | 'waiting' | 'done' | 'error'>('idle');
+  const [mobileError, setMobileError] = useState<string | null>(null);
+  const targetWidth = 1200;
+  const targetHeight = 700;
+  const [bulkMoveStep, setBulkMoveStep] = useState(2);
+  const dragAllRef = useRef<{ x: number; y: number } | null>(null);
 
   const defaultRois = (width: number, height: number): RoiRect[] => [
     { id: 'name', field: 'name', x: width * 0.1, y: height * 0.45, w: width * 0.4, h: height * 0.1 },
@@ -83,7 +125,8 @@ const ContactRegister: React.FC = () => {
     { id: 'email', field: 'email', x: width * 0.1, y: height * 0.65, w: width * 0.5, h: height * 0.07 },
     { id: 'phone', field: 'phone', x: width * 0.1, y: height * 0.74, w: width * 0.35, h: height * 0.07 },
     { id: 'mobile', field: 'mobile', x: width * 0.5, y: height * 0.74, w: width * 0.35, h: height * 0.07 },
-    { id: 'address', field: 'address', x: width * 0.1, y: height * 0.83, w: width * 0.8, h: height * 0.08 },
+    { id: 'postal_code', field: 'postal_code', x: width * 0.1, y: height * 0.80, w: width * 0.3, h: height * 0.06 },
+    { id: 'address', field: 'address', x: width * 0.1, y: height * 0.88, w: width * 0.8, h: height * 0.08 },
   ];
   const roiLabels: Record<RoiField, string> = {
     name: '氏名',
@@ -93,6 +136,7 @@ const ContactRegister: React.FC = () => {
     email: 'メール',
     phone: '電話',
     mobile: '携帯',
+    postal_code: '郵便番号',
     address: '住所',
   };
 
@@ -100,13 +144,145 @@ const ContactRegister: React.FC = () => {
     setForm(prev => ({ ...prev, [field]: event.target.value }));
   };
 
+  const resizeImageFile = (inputFile: File) => {
+    return new Promise<{ blob: Blob; file: File }>((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = Math.max(targetWidth / img.width, targetHeight / img.height);
+        const drawWidth = img.width * scale;
+        const drawHeight = img.height * scale;
+        const offsetX = (targetWidth - drawWidth) / 2;
+        const offsetY = (targetHeight - drawHeight) / 2;
+        const canvas = document.createElement('canvas');
+        canvas.width = targetWidth;
+        canvas.height = targetHeight;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          reject(new Error('Canvas context missing'));
+          return;
+        }
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, targetWidth, targetHeight);
+        ctx.drawImage(img, offsetX, offsetY, drawWidth, drawHeight);
+        canvas.toBlob(blob => {
+          if (!blob) {
+            reject(new Error('Failed to resize image'));
+            return;
+          }
+          const normalizedName = inputFile.name.replace(/\.[^.]+$/, '') || 'upload';
+          const file = new File([blob], `${normalizedName}-1200x700.png`, { type: 'image/png' });
+          resolve({ blob, file });
+        }, 'image/png');
+      };
+      img.onerror = () => reject(new Error('Image load failed'));
+      img.src = URL.createObjectURL(inputFile);
+    });
+  };
+
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] || null;
     setFile(nextFile);
     if (!nextFile) return;
-    const url = URL.createObjectURL(nextFile);
-    setImageUrl(url);
-    setCardFilename(nextFile.name);
+    resizeImageFile(nextFile)
+      .then(({ blob, file }) => {
+        setFile(file);
+        const url = URL.createObjectURL(blob);
+        setImageUrl(url);
+        setCardFilename(file.name);
+      })
+      .catch(() => {
+        const url = URL.createObjectURL(nextFile);
+        setImageUrl(url);
+        setCardFilename(nextFile.name);
+      });
+  };
+
+  const startCamera = async (deviceId?: string) => {
+    try {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+      }
+      const targetDeviceId = deviceId || selectedDeviceId;
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+          frameRate: { ideal: 30 },
+          ...(targetDeviceId ? { deviceId: { exact: targetDeviceId } } : {}),
+        },
+      });
+      const track = stream.getVideoTracks()[0];
+      const capabilities = track.getCapabilities() as any;
+      console.log('Camera capabilities:', capabilities);
+      setCameraTrack(track);
+      setCameraCapabilities(capabilities);
+      if (capabilities.focusMode && capabilities.focusMode.length > 0) {
+        const preferred = capabilities.focusMode.includes('continuous')
+          ? 'continuous'
+          : capabilities.focusMode[0];
+        setFocusMode(preferred);
+        try {
+          await track.applyConstraints({
+            advanced: [{ focusMode: preferred } as MediaTrackConstraintSet],
+          });
+        } catch {
+          // ignore unsupported mode
+        }
+      }
+      if (capabilities.focusDistance) {
+        setFocusDistance(capabilities.focusDistance.min ?? 0);
+      }
+      if (capabilities.zoom) {
+        setZoomLevel(capabilities.zoom.min ?? 1);
+      }
+      setCameraStream(stream);
+      setIsCameraActive(true);
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const videoInputs = devices.filter(device => device.kind === 'videoinput');
+      setVideoDevices(videoInputs);
+    } catch (error) {
+      console.error('Camera access error', error);
+    }
+  };
+
+  const stopCamera = () => {
+    if (!cameraStream) return;
+    cameraStream.getTracks().forEach(track => track.stop());
+    setCameraStream(null);
+    setIsCameraActive(false);
+    setCameraTrack(null);
+    setCameraCapabilities(null);
+    setFocusMode('');
+  };
+
+  const captureImage = () => {
+    if (!videoRef.current) return;
+    const video = videoRef.current;
+    const canvas = document.createElement('canvas');
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob(blob => {
+      if (!blob) return;
+      const capturedFile = new File([blob], 'camera-business-card.png', { type: 'image/png' });
+      resizeImageFile(capturedFile)
+        .then(({ blob: resizedBlob, file }) => {
+          const url = URL.createObjectURL(resizedBlob);
+          setFile(file);
+          setImageUrl(url);
+          setCardFilename(file.name);
+          stopCamera();
+        })
+        .catch(() => {
+          const url = URL.createObjectURL(capturedFile);
+          setFile(capturedFile);
+          setImageUrl(url);
+          setCardFilename(capturedFile.name);
+          stopCamera();
+        });
+    });
   };
 
   const extractCompanyCandidate = (text: string): string | null => {
@@ -123,6 +299,79 @@ const ContactRegister: React.FC = () => {
     const first = lines[0] || null;
     if (first && first.length > 40) return null;
     return first;
+  };
+
+  const normalizeCompanyName = (text: string) => {
+    if (!text) return text;
+    let normalized = text.replace(/\u3000/g, ' ').trim();
+    normalized = normalized.replace(/\s+/g, ' ');
+    normalized = normalized.replace(/株\s*式\s*会\s*社/g, '株式会社');
+    normalized = normalized.replace(/有\s*限\s*会\s*社/g, '有限会社');
+    normalized = normalized.replace(/合\s*同\s*会\s*社/g, '合同会社');
+    normalized = normalized.replace(/\s*(株式会社|有限会社|合同会社|（株）|\(株\)|㈱)\s+/g, '$1');
+    normalized = normalized.replace(/\s+((株式会社|有限会社|合同会社|（株）|\(株\)|㈱))\s*/g, '$1');
+    return normalized.trim();
+  };
+
+  const normalizeEmail = (text: string) => {
+    if (!text) return text;
+    const cleaned = text.replace(/＠/g, '@').replace(/[．。]/g, '.').replace(/\s+/g, '').trim();
+    if (!cleaned.includes('@')) return cleaned;
+    const [local, domainRaw] = cleaned.split('@');
+    const domain = domainRaw.replace(/\.\.+/g, '.');
+    if (domain.includes('.')) return `${local}@${domain}`;
+    const lower = domain.toLowerCase();
+    const jpSuffixes = ['cojp', 'nejp', 'orjp', 'acjp', 'gojp', 'edjp', 'lgjp'];
+    for (const suffix of jpSuffixes) {
+      if (lower.endsWith(suffix) && domain.length > suffix.length) {
+        const base = domain.slice(0, -suffix.length);
+        return `${local}@${base}.${suffix.slice(0, 2)}.${suffix.slice(2)}`;
+      }
+    }
+    const genericSuffixes = ['com', 'net', 'org', 'jp', 'co', 'io'];
+    for (const suffix of genericSuffixes) {
+      if (lower.endsWith(suffix) && domain.length > suffix.length) {
+        const base = domain.slice(0, -suffix.length);
+        return `${local}@${base}.${suffix}`;
+      }
+    }
+    return `${local}@${domain}`;
+  };
+
+  const normalizePersonName = (text: string) => {
+    if (!text) return text;
+    let normalized = text.replace(/\u3000/g, ' ').trim();
+    normalized = normalized.replace(/\s+/g, ' ');
+    if (normalized.includes(' ')) {
+      return normalized.split(' ').filter(Boolean).join(' ');
+    }
+    if (/^[\u3040-\u309f\u30a0-\u30ff\u4e00-\u9fff]+$/.test(normalized)) {
+      const length = normalized.length;
+      if (length >= 2 && length <= 6) {
+        let splitAt = 1;
+        if (length === 4) splitAt = 2;
+        if (length === 5) splitAt = 2;
+        if (length === 6) splitAt = 3;
+        return `${normalized.slice(0, splitAt)} ${normalized.slice(splitAt)}`;
+      }
+    }
+    return normalized;
+  };
+
+  const parsePostalAndAddress = (text: string) => {
+    const match = text.match(/〒?\s*(\d{3})[-\s]?(\d{4})/);
+    if (!match) {
+      return { postalCode: '', address: text.trim() };
+    }
+    const postalCode = `${match[1]}-${match[2]}`;
+    const address = text.replace(match[0], '').replace(/\s+/g, ' ').trim();
+    return { postalCode, address };
+  };
+
+  const normalizePostalCode = (text: string) => {
+    const match = text.match(/(\d{3})[-\s]?(\d{4})/);
+    if (!match) return text.trim();
+    return `${match[1]}-${match[2]}`;
   };
 
   const matchTemplate = async (img: HTMLImageElement) => {
@@ -284,6 +533,16 @@ const ContactRegister: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    axios.get<{ name: string }[]>('http://localhost:8000/tags')
+      .then(response => {
+        const names = response.data.map(tag => tag.name).filter(Boolean);
+        names.sort((a, b) => a.localeCompare(b, 'ja'));
+        setAvailableTags(names);
+      })
+      .catch(() => setAvailableTags([]));
+  }, []);
+
+  useEffect(() => {
     if (!isEdit || !id) return;
     setMode('manual');
     axios.get(`http://localhost:8000/contacts/${id}`).then(response => {
@@ -296,6 +555,7 @@ const ContactRegister: React.FC = () => {
         role: data.role || '',
         company: data.company?.name || '',
         branch: data.branch || '',
+        postal_code: data.postal_code || '',
         address: data.address || '',
         notes: data.notes || '',
       });
@@ -307,16 +567,52 @@ const ContactRegister: React.FC = () => {
     });
   }, [isEdit, id]);
 
+  useEffect(() => {
+    if (!videoRef.current) return;
+    if (!cameraStream) return;
+    videoRef.current.srcObject = cameraStream;
+    videoRef.current.play().catch(() => {});
+  }, [cameraStream]);
+
+  useEffect(() => {
+    navigator.mediaDevices.enumerateDevices()
+      .then(devices => {
+        const videoInputs = devices.filter(device => device.kind === 'videoinput');
+        setVideoDevices(videoInputs);
+        if (!selectedDeviceId && videoInputs.length > 0) {
+          setSelectedDeviceId(videoInputs[0].deviceId);
+        }
+      })
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [cameraStream]);
+
   const runRoiOcr = async () => {
-    if (!konvaImage || rois.length === 0) return;
+    console.log('ROI OCR started');
+    if (!konvaImage || rois.length === 0) {
+      console.log('ROI OCR skipped: imageObj or rois missing');
+      return;
+    }
+    console.log('ROI count:', rois.length);
     setIsOcrRunning(true);
     try {
       for (const roi of rois) {
+        console.log('Processing ROI:', roi.field, roi);
         const canvas = document.createElement('canvas');
         canvas.width = roi.w;
         canvas.height = roi.h;
         const ctx = canvas.getContext('2d');
-        if (!ctx) continue;
+        if (!ctx) {
+          console.log('Canvas context missing');
+          continue;
+        }
         ctx.drawImage(
           konvaImage,
           roi.x,
@@ -330,29 +626,43 @@ const ContactRegister: React.FC = () => {
         );
         const blob: Blob | null = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
         if (!blob) continue;
+        console.log('ROI image blob created for:', roi.field);
         const formData = new FormData();
         formData.append('field', roi.field);
         formData.append('image', blob, `${roi.field}.png`);
+        console.log('Sending OCR request:', roi.field);
         const response = await axios.post<{ field: string; text: string }>(
           'http://localhost:8000/cards/ocr-region',
           formData,
         );
+        console.log('OCR response:', response.data);
         const text = response.data.text;
         setForm(prev => {
-          if (roi.field === 'name') return { ...prev, name: text };
-          if (roi.field === 'company') return { ...prev, company: text };
+          if (roi.field === 'name') return { ...prev, name: normalizePersonName(text) };
+          if (roi.field === 'company') return { ...prev, company: normalizeCompanyName(text) };
           if (roi.field === 'branch') return { ...prev, branch: text };
-          if (roi.field === 'email') return { ...prev, email: text };
           if (roi.field === 'phone') return { ...prev, phone: text };
           if (roi.field === 'mobile') return { ...prev, mobile: text };
           if (roi.field === 'role') return { ...prev, role: text };
-          if (roi.field === 'address') return { ...prev, address: text };
+          if (roi.field === 'email') return { ...prev, email: normalizeEmail(text) };
+          if (roi.field === 'postal_code') {
+            return { ...prev, postal_code: normalizePostalCode(text) };
+          }
+          if (roi.field === 'address') {
+            const parsed = parsePostalAndAddress(text);
+            return {
+              ...prev,
+              address: parsed.address || text,
+              postal_code: parsed.postalCode || prev.postal_code,
+            };
+          }
           return prev;
         });
       }
     } finally {
       setIsOcrRunning(false);
     }
+    console.log('ROI OCR finished');
   };
 
   const saveTemplate = async () => {
@@ -380,22 +690,23 @@ const ContactRegister: React.FC = () => {
     if (isSubmitting || isOcrRunning) return;
     setIsSubmitting(true);
     setSubmitError(null);
+    const tagsPayload = tagsTouched ? selectedTags : initialTags;
+    const payload = {
+      name: form.name,
+      email: form.email || null,
+      phone: form.phone || null,
+      role: form.role || null,
+      mobile: form.mobile || null,
+      postal_code: form.postal_code || null,
+      address: form.address || null,
+      branch: form.branch || null,
+      company_name: form.company || null,
+      tags: tagsPayload,
+      notes: form.notes || null,
+      card_filename: cardFilename,
+      ocr_text: ocrText,
+    };
     try {
-      const tagsPayload = tagsTouched ? selectedTags : initialTags;
-      const payload = {
-        name: form.name,
-        email: form.email || null,
-        phone: form.phone || null,
-        role: form.role || null,
-        mobile: form.mobile || null,
-        address: form.address || null,
-        branch: form.branch || null,
-        company_name: form.company || null,
-        tags: tagsPayload,
-        notes: form.notes || null,
-        card_filename: cardFilename,
-        ocr_text: ocrText,
-      };
       if (isEdit && id) {
         const response = await axios.put<ContactRegisterResponse>(`http://localhost:8000/contacts/${id}/register`, payload);
         navigate(`/contacts/${response.data.id}`);
@@ -405,10 +716,27 @@ const ContactRegister: React.FC = () => {
       }
     } catch (error: any) {
       const detail = error?.response?.data?.detail;
-      if (error?.response?.status === 409) {
-        setSubmitError(detail || '既に同じメールまたは電話番号の連絡先が存在します。');
+      const status = error?.response?.status;
+      if (status === 409 && !isEdit) {
+        const existingId = typeof detail === 'object' ? detail.existing_contact_id : null;
+        const message = typeof detail === 'object' ? detail.message : detail;
+        if (existingId) {
+          const confirmed = window.confirm(`${message || '同名・同会社の連絡先が存在します。'}\n上書きしますか？`);
+          if (confirmed) {
+            const response = await axios.put<ContactRegisterResponse>(`http://localhost:8000/contacts/${existingId}/register`, payload);
+            navigate(`/contacts/${response.data.id}`);
+            return;
+          }
+          setSubmitError('登録をキャンセルしました。');
+          return;
+        }
+        setSubmitError(message || '同名・同会社の連絡先が存在します。');
+        return;
+      }
+      if (status === 409) {
+        setSubmitError(detail?.message || detail || '既に同名の連絡先が存在します。');
       } else {
-        setSubmitError(detail || '登録に失敗しました。');
+        setSubmitError(detail?.message || detail || '登録に失敗しました。');
       }
     } finally {
       setIsSubmitting(false);
@@ -433,6 +761,104 @@ const ContactRegister: React.FC = () => {
   const updateRoi = (id: string, attrs: Partial<RoiRect>) => {
     setRois(prev => prev.map(roi => (roi.id === id ? { ...roi, ...attrs } : roi)));
   };
+
+  const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
+
+  const shiftAllRois = (dx: number, dy: number) => {
+    if (!imageSize.width || !imageSize.height) return;
+    setRois(prev => prev.map(roi => {
+      const nextX = clamp(roi.x + dx, 0, Math.max(0, imageSize.width - roi.w));
+      const nextY = clamp(roi.y + dy, 0, Math.max(0, imageSize.height - roi.h));
+      return { ...roi, x: nextX, y: nextY };
+    }));
+  };
+
+  const handleStageDragStart = (event: any) => {
+    const stage = event.target.getStage?.();
+    if (!stage || event.target !== stage) return;
+    const pos = stage.getPointerPosition?.();
+    if (!pos) return;
+    dragAllRef.current = { x: pos.x, y: pos.y };
+  };
+
+  const handleStageDragMove = (event: any) => {
+    if (!dragAllRef.current) return;
+    const stage = event.target.getStage?.();
+    if (!stage) return;
+    const pos = stage.getPointerPosition?.();
+    if (!pos) return;
+    if (!scale) return;
+    const dx = (pos.x - dragAllRef.current.x) / scale;
+    const dy = (pos.y - dragAllRef.current.y) / scale;
+    if (dx === 0 && dy === 0) return;
+    shiftAllRois(dx, dy);
+    dragAllRef.current = { x: pos.x, y: pos.y };
+  };
+
+  const handleStageDragEnd = () => {
+    dragAllRef.current = null;
+  };
+
+  const stageHeight = imageSize.width > 0 && containerWidth > 0
+    ? containerWidth * (imageSize.height / imageSize.width)
+    : 0;
+
+  const startMobileUploadSession = async () => {
+    setMobileError(null);
+    try {
+      const rawHost = window.location.hostname || 'localhost';
+      const mobileHost = rawHost === 'localhost' ? '127.0.0.1' : rawHost;
+      const baseUrl = `https://${mobileHost}:8443`;
+      const response = await axios.post<MobileUploadSession>(`${baseUrl}/mobile-upload/sessions?scheme=https&port=8443`);
+      setMobileSession(response.data);
+      setMobileStatus('waiting');
+    } catch (error) {
+      if (axios.isAxiosError(error)) {
+        const detail = (error.response?.data as { detail?: string } | undefined)?.detail;
+        if (detail) {
+          setMobileError(`QRの生成に失敗しました: ${detail}`);
+          return;
+        }
+        if (error.message) {
+          setMobileError(`QRの生成に失敗しました: ${error.message}`);
+          return;
+        }
+      }
+      setMobileError('QRの生成に失敗しました。');
+    }
+  };
+
+  useEffect(() => {
+    if (!mobileSession) return;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        const response = await axios.get<MobileUploadStatus>(mobileSession.status_url);
+        if (stopped) return;
+        setMobileStatus(response.data.status);
+        if (response.data.status === 'done' && response.data.image_url) {
+          const cacheBusted = `${response.data.image_url}?t=${Date.now()}`;
+          setImageUrl(cacheBusted);
+          setCardFilename(response.data.filename || 'mobile-upload.png');
+          stopped = true;
+        }
+        if (response.data.status === 'error') {
+          setMobileError(response.data.error || 'アップロードでエラーが発生しました。');
+          stopped = true;
+        }
+      } catch (error) {
+        if (!stopped) {
+          setMobileError('アップロード状況の取得に失敗しました。');
+        }
+      }
+    };
+    const timer = window.setInterval(poll, 1500);
+    poll().catch(() => undefined);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [mobileSession?.session_id]);
 
   return (
     <div className="p-6">
@@ -469,6 +895,158 @@ const ContactRegister: React.FC = () => {
             {cardFilename && (
               <p className="mt-2 text-sm text-gray-600">Loaded: {cardFilename}</p>
             )}
+            <div className="mt-4 border-t border-gray-200 pt-4">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  onClick={startMobileUploadSession}
+                  className="bg-emerald-600 text-white px-4 py-2 rounded"
+                >
+                  スマホで撮影（QR表示）
+                </button>
+                <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。</span>
+              </div>
+              {mobileError && (
+                <p className="mt-2 text-sm text-red-600">{mobileError}</p>
+              )}
+              {mobileSession && (
+                <div className="mt-3 flex flex-col md:flex-row gap-4">
+                  <div className="bg-white border rounded p-3 w-fit">
+                    <img
+                      src={mobileSession.qr_url}
+                      alt="QR"
+                      className="w-44 h-44"
+                    />
+                  </div>
+                  <div className="text-sm text-gray-600 space-y-2">
+                    <p>iPhoneでQRを読み取り、名刺を撮影してアップロードしてください。</p>
+                    <p className="text-xs text-gray-500 break-all">URL: {mobileSession.upload_url}</p>
+                    <p className="text-xs text-gray-500">
+                      状態: {mobileStatus === 'waiting' ? '待機中' : mobileStatus === 'done' ? '完了' : mobileStatus === 'error' ? 'エラー' : '準備中'}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {isCameraActive && (
+          <div className="relative mt-4">
+            <div className="relative w-full max-w-4xl mx-auto">
+              <video
+                ref={videoRef}
+                autoPlay
+                playsInline
+                muted
+                className="w-full max-w-4xl rounded bg-black"
+              />
+              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                <div className="w-[85%] aspect-[12/7] border-2 border-emerald-400 rounded-md shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]" />
+              </div>
+            </div>
+            <div className="mt-4 max-w-4xl mx-auto border rounded bg-gray-50 p-3 space-y-3">
+              <h3 className="text-sm font-semibold">Camera Controls</h3>
+              <p className="text-xs text-gray-600">
+                Focus control availability depends on the camera.
+              </p>
+              {cameraCapabilities?.focusMode && cameraStream && (
+                <div className="flex items-center gap-3">
+                  <label className="text-xs w-24">Focus Mode</label>
+                  <select
+                    value={focusMode}
+                    onChange={async e => {
+                      const value = e.target.value;
+                      setFocusMode(value);
+                      try {
+                        const track = cameraStream.getVideoTracks()[0];
+                        await track.applyConstraints({
+                          advanced: [{ focusMode: value } as MediaTrackConstraintSet],
+                        });
+                      } catch {
+                        // ignore unsupported mode
+                      }
+                    }}
+                    className="flex-1 border rounded px-2 py-1 text-xs"
+                  >
+                    {cameraCapabilities.focusMode.map((mode: string) => (
+                      <option key={mode} value={mode}>{mode}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
+              {cameraCapabilities?.focusDistance && cameraStream && (
+                <div className="flex items-center gap-3">
+                  <label className="text-xs w-24">Focus</label>
+                  <input
+                    type="range"
+                    min={cameraCapabilities.focusDistance.min}
+                    max={cameraCapabilities.focusDistance.max}
+                    step={cameraCapabilities.focusDistance.step || 1}
+                    value={focusDistance}
+                    onChange={async e => {
+                      const value = Number(e.target.value);
+                      setFocusDistance(value);
+                      try {
+                        const track = cameraStream.getVideoTracks()[0];
+                        await track.applyConstraints({
+                          advanced: [{ focusDistance: value } as MediaTrackConstraintSet],
+                        });
+                      } catch {
+                        // ignore unsupported constraint
+                      }
+                    }}
+                    className="flex-1"
+                  />
+                  <span className="text-xs tabular-nums w-12 text-right">{focusDistance}</span>
+                </div>
+              )}
+              {cameraCapabilities?.zoom && cameraStream && (
+                <div className="flex items-center gap-3">
+                  <label className="text-xs w-24">Zoom</label>
+                  <input
+                    type="range"
+                    min={cameraCapabilities.zoom.min}
+                    max={cameraCapabilities.zoom.max}
+                    step={cameraCapabilities.zoom.step || 0.1}
+                    value={zoomLevel}
+                    onChange={async e => {
+                      const value = Number(e.target.value);
+                      setZoomLevel(value);
+                      try {
+                        const track = cameraStream.getVideoTracks()[0];
+                        await track.applyConstraints({
+                          advanced: [{ zoom: value } as MediaTrackConstraintSet],
+                        });
+                      } catch {
+                        // ignore unsupported constraint
+                      }
+                    }}
+                    className="flex-1"
+                  />
+                  <span className="text-xs tabular-nums w-12 text-right">{zoomLevel.toFixed(1)}</span>
+                </div>
+              )}
+              <pre className="text-xs bg-black text-green-400 p-2 rounded overflow-auto">
+                {JSON.stringify(cameraCapabilities, null, 2)}
+              </pre>
+            </div>
+            <div className="flex gap-3 justify-center mt-4">
+              <button
+                type="button"
+                onClick={captureImage}
+                className="bg-green-600 text-white px-4 py-2 rounded"
+              >
+                Capture Card
+              </button>
+              <button
+                type="button"
+                onClick={stopCamera}
+                className="bg-gray-600 text-white px-4 py-2 rounded"
+              >
+                Cancel
+              </button>
+            </div>
           </div>
         )}
 
@@ -485,85 +1063,131 @@ const ContactRegister: React.FC = () => {
                 バッチスキャン
               </label>
             </div>
-            <div className="flex items-center gap-3 mb-3">
-              <label className="text-sm text-gray-600">ズーム</label>
-              <input
-                type="range"
-                min={0.5}
-                max={2}
-                step={0.1}
-                value={zoom}
-                onChange={e => setZoom(Number(e.target.value))}
-                className="w-48"
-              />
-              <span className="text-xs text-gray-500">{Math.round(zoom * 100)}%</span>
+            <div className="flex flex-wrap items-center gap-3 mb-3">
+              <span className="text-xs text-gray-600">一括移動</span>
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-gray-500">移動量(px)</label>
+                <input
+                  type="number"
+                  min={1}
+                  max={50}
+                  value={bulkMoveStep}
+                  onChange={e => setBulkMoveStep(Number(e.target.value) || 1)}
+                  className="w-20 border rounded px-2 py-1 text-xs"
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => shiftAllRois(-bulkMoveStep, 0)}
+                  className="px-2 py-1 text-xs border rounded"
+                >
+                  ←
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shiftAllRois(bulkMoveStep, 0)}
+                  className="px-2 py-1 text-xs border rounded"
+                >
+                  →
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shiftAllRois(0, -bulkMoveStep)}
+                  className="px-2 py-1 text-xs border rounded"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  onClick={() => shiftAllRois(0, bulkMoveStep)}
+                  className="px-2 py-1 text-xs border rounded"
+                >
+                  ↓
+                </button>
+              </div>
             </div>
             <div
               ref={canvasContainerRef}
               className="border rounded bg-white w-full max-w-[1280px] mx-auto overflow-hidden"
-              style={{ height: Math.floor(window.innerHeight * 0.7) }}
+              style={{ height: stageHeight || Math.floor(window.innerHeight * 0.7) }}
             >
               {imageSize.width > 0 && imageSize.height > 0 && containerWidth > 0 && (
                 <Stage
                   width={containerWidth}
-                  height={containerWidth * (imageSize.height / imageSize.width)}
+                  height={stageHeight}
+                  onMouseDown={handleStageDragStart}
+                  onMouseMove={handleStageDragMove}
+                  onMouseUp={handleStageDragEnd}
+                  onMouseLeave={handleStageDragEnd}
+                  onTouchStart={handleStageDragStart}
+                  onTouchMove={handleStageDragMove}
+                  onTouchEnd={handleStageDragEnd}
                 >
-                  <Layer scaleX={scale} scaleY={scale}>
+                  <Layer scaleX={scale} scaleY={scale} listening={false}>
                     {konvaImage && (
                       <KonvaImage
                         image={konvaImage}
                         width={imageSize.width}
                         height={imageSize.height}
+                        listening={false}
+                        perfectDrawEnabled={false}
+                        imageSmoothingEnabled={false}
                       />
                     )}
-                  {rois.map(roi => (
-                    <React.Fragment key={roi.id}>
-                      <Rect
-                        id={roi.id}
-                        x={roi.x}
-                        y={roi.y}
-                        width={roi.w}
-                        height={roi.h}
-                        stroke="#ef4444"
-                        strokeWidth={2}
-                        draggable
-                        onClick={() => setSelectedRoiId(roi.id)}
-                        onTap={() => setSelectedRoiId(roi.id)}
-                        onDragEnd={e => {
-                          updateRoi(roi.id, {
-                            x: e.target.x(),
-                            y: e.target.y(),
-                          });
-                        }}
-                        onTransformEnd={e => {
-                          const node = e.target;
-                          const scaleX = node.scaleX();
-                          const scaleY = node.scaleY();
-                          node.scaleX(1);
-                          node.scaleY(1);
-                          updateRoi(roi.id, {
-                            x: node.x(),
-                            y: node.y(),
-                            w: Math.max(10, node.width() * scaleX),
-                            h: Math.max(10, node.height() * scaleY),
-                          });
-                        }}
-                      />
-                      <Text
-                        x={roi.x + 4}
-                        y={roi.y + 4}
-                        text={roiLabels[roi.field]}
-                        fontSize={52}
-                        fill="#ef4444"
-                      />
-                    </React.Fragment>
-                  ))}
-                  <Transformer
-                    ref={transformerRef}
-                    rotateEnabled={false}
-                    keepRatio={false}
-                    enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
-                  />
+                  </Layer>
+                  <Layer scaleX={scale} scaleY={scale}>
+                    {rois.map(roi => (
+                      <React.Fragment key={roi.id}>
+                        <Rect
+                          id={roi.id}
+                          x={roi.x}
+                          y={roi.y}
+                          width={roi.w}
+                          height={roi.h}
+                          stroke="#ef4444"
+                          strokeWidth={2}
+                          draggable
+                          perfectDrawEnabled={false}
+                          shadowForStrokeEnabled={false}
+                          onClick={() => setSelectedRoiId(roi.id)}
+                          onTap={() => setSelectedRoiId(roi.id)}
+                          onDragEnd={e => {
+                            updateRoi(roi.id, {
+                              x: e.target.x(),
+                              y: e.target.y(),
+                            });
+                          }}
+                          onTransformEnd={e => {
+                            const node = e.target;
+                            const scaleX = node.scaleX();
+                            const scaleY = node.scaleY();
+                            node.scaleX(1);
+                            node.scaleY(1);
+                            updateRoi(roi.id, {
+                              x: node.x(),
+                              y: node.y(),
+                              w: Math.max(10, node.width() * scaleX),
+                              h: Math.max(10, node.height() * scaleY),
+                            });
+                          }}
+                        />
+                        <Text
+                          x={roi.x + 4}
+                          y={roi.y + 4}
+                          text={roiLabels[roi.field]}
+                          fontSize={16}
+                          fill="#ef4444"
+                          perfectDrawEnabled={false}
+                        />
+                      </React.Fragment>
+                    ))}
+                    <Transformer
+                      ref={transformerRef}
+                      rotateEnabled={false}
+                      keepRatio={false}
+                      enabledAnchors={['top-left', 'top-right', 'bottom-left', 'bottom-right']}
+                    />
                   </Layer>
                 </Stage>
               )}
@@ -747,6 +1371,16 @@ const ContactRegister: React.FC = () => {
             />
           </div>
           <div className="flex items-center gap-4">
+            <label className="w-32 text-sm font-medium">郵便番号</label>
+            <input
+              type="text"
+              value={form.postal_code}
+              onChange={handleChange('postal_code')}
+              className="flex-1 border rounded px-3 py-2"
+              placeholder="123-4567"
+            />
+          </div>
+          <div className="flex items-center gap-4">
             <label className="w-32 text-sm font-medium">住所</label>
             <input
               type="text"
@@ -757,51 +1391,117 @@ const ContactRegister: React.FC = () => {
           </div>
           <div className="flex items-start gap-4">
             <label className="w-32 text-sm font-medium pt-2">タグ</label>
-            <div className="flex flex-wrap gap-2 mb-2">
-              {selectedTags.map(tag => (
-                <span
-                  key={tag}
-                  className="inline-flex items-center gap-2 bg-blue-100 text-blue-800 px-2 py-1 rounded text-sm"
-                >
-                  {tag}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setTagsTouched(true);
-                      setSelectedTags(prev => prev.filter(item => item !== tag));
-                    }}
-                    className="text-blue-800 hover:text-blue-900"
+            <div className="flex-1 space-y-3">
+              <div className="flex flex-wrap gap-2">
+                {selectedTags.map(tag => (
+                  <span
+                    key={tag}
+                    className="inline-flex items-center gap-2 bg-blue-100 text-blue-800 px-2 py-1 rounded text-sm"
                   >
-                    ×
-                  </button>
-                </span>
-              ))}
-              {selectedTags.length === 0 && (
-                <span className="text-sm text-gray-500">タグが選択されていません。</span>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={customTag}
-                onChange={e => setCustomTag(e.target.value)}
-                className="flex-1 border rounded px-3 py-2"
-                placeholder="タグを追加"
-              />
-              <button
-                type="button"
-                onClick={() => {
-                  const normalized = customTag.trim();
-                  if (!normalized) return;
-                  if (selectedTags.includes(normalized)) return;
-                  setTagsTouched(true);
-                  setSelectedTags(prev => [...prev, normalized]);
-                  setCustomTag('');
-                }}
-                className="bg-gray-800 text-white px-3 py-2 rounded"
-              >
-                追加
-              </button>
+                    {tag}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setTagsTouched(true);
+                        setSelectedTags(prev => prev.filter(item => item !== tag));
+                      }}
+                      className="text-blue-800 hover:text-blue-900"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ))}
+                {selectedTags.length === 0 && (
+                  <span className="text-sm text-gray-500">タグが選択されていません。</span>
+                )}
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <select
+                  value={selectedTagOption}
+                  onChange={e => setSelectedTagOption(e.target.value)}
+                  className="border rounded px-3 py-2 text-sm min-w-[200px]"
+                >
+                  <option value="">既存タグを選択</option>
+                  {availableTags.map(tag => (
+                    <option key={tag} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const normalized = selectedTagOption.trim();
+                    if (!normalized) return;
+                    if (selectedTags.includes(normalized)) return;
+                    setTagsTouched(true);
+                    setSelectedTags(prev => [...prev, normalized]);
+                    setSelectedTagOption('');
+                  }}
+                  className="bg-blue-600 text-white px-3 py-2 rounded"
+                >
+                  追加
+                </button>
+                <select
+                  value={deleteTagOption}
+                  onChange={e => setDeleteTagOption(e.target.value)}
+                  className="border rounded px-3 py-2 text-sm min-w-[200px]"
+                >
+                  <option value="">既存タグを削除</option>
+                  {availableTags.map(tag => (
+                    <option key={`delete-${tag}`} value={tag}>
+                      {tag}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    const target = deleteTagOption.trim();
+                    if (!target) return;
+                    const confirmed = window.confirm(`タグ「${target}」を削除しますか？`);
+                    if (!confirmed) return;
+                    try {
+                      const tagsResponse = await axios.get<{ id: number; name: string }[]>('http://localhost:8000/tags');
+                      const match = tagsResponse.data.find(tag => tag.name === target);
+                      if (!match) {
+                        setSubmitError('タグが見つかりません。');
+                        return;
+                      }
+                      await axios.delete(`http://localhost:8000/tags/${match.id}`);
+                      setAvailableTags(prev => prev.filter(tag => tag !== target));
+                      setSelectedTags(prev => prev.filter(tag => tag !== target));
+                      setDeleteTagOption('');
+                    } catch {
+                      setSubmitError('タグの削除に失敗しました。');
+                    }
+                  }}
+                  className="bg-red-600 text-white px-3 py-2 rounded"
+                >
+                  削除
+                </button>
+                <input
+                  type="text"
+                  value={customTag}
+                  onChange={e => setCustomTag(e.target.value)}
+                  className="flex-1 border rounded px-3 py-2 min-w-[200px]"
+                  placeholder="タグを追加"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    const normalized = customTag.trim();
+                    if (!normalized) return;
+                    if (selectedTags.includes(normalized)) return;
+                    setTagsTouched(true);
+                    setSelectedTags(prev => [...prev, normalized]);
+                    setCustomTag('');
+                  }}
+                  className="bg-gray-800 text-white px-3 py-2 rounded"
+                >
+                  追加
+                </button>
+              </div>
             </div>
           </div>
           <div className="flex items-start gap-4">
