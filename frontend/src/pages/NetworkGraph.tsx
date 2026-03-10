@@ -13,6 +13,7 @@ type GraphNode = {
   mobile?: string;
   postal_code?: string;
   address?: string;
+  company_node_id?: string;
 };
 
 type NodeObject = {
@@ -68,7 +69,17 @@ const NetworkGraph: React.FC = () => {
         .filter(([, enabled]) => enabled)
         .map(([type]) => type),
     );
-    const nodes = rawGraph.nodes.filter(node => allowedTypes.has(node.type));
+    const nodes = rawGraph.nodes
+      .filter(node => allowedTypes.has(node.type))
+      .sort((a, b) => {
+        const order: Record<GraphNode['type'], number> = {
+          company: 0,
+          person: 1,
+          technology: 2,
+          meeting: 3,
+        };
+        return order[a.type] - order[b.type];
+      });
     const nodeIds = new Set(nodes.map(node => node.id));
     const links = rawGraph.links.filter(link => {
       const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
@@ -117,12 +128,57 @@ const NetworkGraph: React.FC = () => {
     if (!fg) return;
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
-      charge.strength((node: GraphNode) => (node.type === 'technology' ? -220 : -120));
+      charge.strength((node: GraphNode) => {
+        if (node.type === 'technology') return -220;
+        if (node.type === 'company') return -260;
+        if (node.type === 'person') return -140;
+        return -120;
+      });
     }
     const linkForce = fg.d3Force('link') as any;
     if (linkForce && typeof linkForce.distance === 'function') {
-      linkForce.distance(120);
+      linkForce.distance((link: any) => {
+        const sourceType = (link.source as GraphNode)?.type;
+        const targetType = (link.target as GraphNode)?.type;
+        if (link.type === 'works_at') return 90;
+        if (link.type === 'company_uses') return 140;
+        if (sourceType === 'company' || targetType === 'company') return 150;
+        return 120;
+      });
+      if (typeof linkForce.strength === 'function') {
+        linkForce.strength((link: any) => (link.type === 'works_at' ? 0.9 : 0.4));
+      }
     }
+    const personSeparationForce = () => {
+      let nodes: any[] = [];
+      const minDistance = 26;
+      const strength = 0.18;
+      const force = (alpha: number) => {
+        for (let i = 0; i < nodes.length; i += 1) {
+          const a = nodes[i] as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          if (a.type !== 'person' || !a.company_node_id) continue;
+          for (let j = i + 1; j < nodes.length; j += 1) {
+            const b = nodes[j] as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+            if (b.type !== 'person' || !b.company_node_id) continue;
+            if (a.company_node_id === b.company_node_id) continue;
+            const dx = (b.x ?? 0) - (a.x ?? 0);
+            const dy = (b.y ?? 0) - (a.y ?? 0);
+            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+            if (dist >= minDistance) continue;
+            const k = ((minDistance - dist) / dist) * strength * alpha;
+            a.vx = (a.vx ?? 0) - dx * k;
+            a.vy = (a.vy ?? 0) - dy * k;
+            b.vx = (b.vx ?? 0) + dx * k;
+            b.vy = (b.vy ?? 0) + dy * k;
+          }
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+      };
+      return force;
+    };
+    fg.d3Force('person-separation', personSeparationForce());
     fg.d3ReheatSimulation();
   }, [graph]);
 
