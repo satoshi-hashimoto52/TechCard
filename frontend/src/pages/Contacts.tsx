@@ -136,11 +136,14 @@ const Contacts: React.FC = () => {
                       }}
                       className="bg-white p-4 rounded-lg shadow hover:shadow-lg transition border border-gray-100"
                     >
-                      <h3 className="text-lg font-semibold">{contact.name}</h3>
+                      <h3 className="text-lg font-semibold">
+                        {contact.name}
+                        <span className="ml-2 text-xs font-normal text-gray-500">
+                          初回:{' '}
+                          {contact.first_met_at ? contact.first_met_at : '-'}
+                        </span>
+                      </h3>
                       <p className="text-sm font-medium text-emerald-700">{contact.role || '-'}</p>
-                      <p className="text-xs text-gray-500">
-                        初回: {contact.first_met_at ? contact.first_met_at : '-'}
-                      </p>
                       <p>{contact.email}</p>
                       <p>{contact.phone}</p>
                       <div className="mt-2">

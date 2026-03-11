@@ -77,9 +77,6 @@ const ContactRegister: React.FC = () => {
   const [customTag, setCustomTag] = useState('');
   const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
-  const [deleteTagOption, setDeleteTagOption] = useState('');
-  const [tagTypeTarget, setTagTypeTarget] = useState('');
-  const [tagTypeValue, setTagTypeValue] = useState<'technology' | 'relation'>('technology');
   const todayString = (() => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -1434,14 +1431,23 @@ const ContactRegister: React.FC = () => {
             <div className="text-sm text-red-600">{submitError}</div>
           )}
           <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">氏名</label>
-            <input
-              type="text"
-              value={form.name}
-              onChange={handleChange('name')}
-              className="flex-1 border rounded px-3 py-2"
-              required
-            />
+            <label className="w-32 text-sm font-medium">氏名 / 初回</label>
+            <div className="flex flex-1 gap-4">
+              <input
+                type="text"
+                value={form.name}
+                onChange={handleChange('name')}
+                className="flex-[7] border rounded px-3 py-2"
+                required
+                placeholder="氏名"
+              />
+              <input
+                type="date"
+                value={form.first_met_at}
+                onChange={handleChange('first_met_at')}
+                className="flex-[3] border rounded px-3 py-2"
+              />
+            </div>
           </div>
           <div className="flex items-center gap-4">
             <label className="w-32 text-sm font-medium">メール</label>
@@ -1453,31 +1459,42 @@ const ContactRegister: React.FC = () => {
             />
           </div>
           <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">電話</label>
-            <input
-              type="tel"
-              value={form.phone}
-              onChange={handleChange('phone')}
-              className="flex-1 border rounded px-3 py-2"
-            />
+            <label className="w-32 text-sm font-medium">電話 / 携帯</label>
+            <div className="flex flex-1 gap-4">
+              <input
+                type="tel"
+                value={form.phone}
+                onChange={handleChange('phone')}
+                className="flex-1 border rounded px-3 py-2"
+                placeholder="電話"
+              />
+              <input
+                type="text"
+                value={form.mobile}
+                onChange={handleChange('mobile')}
+                className="flex-1 border rounded px-3 py-2"
+                placeholder="携帯"
+              />
+            </div>
           </div>
           <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">会社</label>
-            <input
-              type="text"
-              value={form.company}
-              onChange={handleChange('company')}
-              className="flex-1 border rounded px-3 py-2"
-            />
-          </div>
-          <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">支店 / Office</label>
-            <input
-              type="text"
-              value={form.branch}
-              onChange={handleChange('branch')}
-              className="flex-1 border rounded px-3 py-2"
-            />
+            <label className="w-32 text-sm font-medium">会社 / 支店(Office)</label>
+            <div className="flex flex-1 gap-4">
+              <input
+                type="text"
+                value={form.company}
+                onChange={handleChange('company')}
+                className="flex-[4] border rounded px-3 py-2"
+                placeholder="会社"
+              />
+              <input
+                type="text"
+                value={form.branch}
+                onChange={handleChange('branch')}
+                className="flex-[6] border rounded px-3 py-2"
+                placeholder="支店 / Office"
+              />
+            </div>
           </div>
           <div className="flex items-center gap-4">
             <label className="w-32 text-sm font-medium">役職・部署</label>
@@ -1489,41 +1506,23 @@ const ContactRegister: React.FC = () => {
             />
           </div>
           <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">初回に会った日</label>
-            <input
-              type="date"
-              value={form.first_met_at}
-              onChange={handleChange('first_met_at')}
-              className="flex-1 border rounded px-3 py-2"
-            />
-          </div>
-          <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">携帯</label>
-            <input
-              type="text"
-              value={form.mobile}
-              onChange={handleChange('mobile')}
-              className="flex-1 border rounded px-3 py-2"
-            />
-          </div>
-          <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">郵便番号</label>
-            <input
-              type="text"
-              value={form.postal_code}
-              onChange={handleChange('postal_code')}
-              className="flex-1 border rounded px-3 py-2"
-              placeholder="123-4567"
-            />
-          </div>
-          <div className="flex items-center gap-4">
-            <label className="w-32 text-sm font-medium">住所</label>
-            <input
-              type="text"
-              value={form.address}
-              onChange={handleChange('address')}
-              className="flex-1 border rounded px-3 py-2"
-            />
+            <label className="w-32 text-sm font-medium">郵便番号 / 住所</label>
+            <div className="flex flex-1 gap-4">
+              <input
+                type="text"
+                value={form.postal_code}
+                onChange={handleChange('postal_code')}
+                className="flex-[2] border rounded px-3 py-2"
+                placeholder="123-4567"
+              />
+              <input
+                type="text"
+                value={form.address}
+                onChange={handleChange('address')}
+                className="flex-[8] border rounded px-3 py-2"
+                placeholder="住所"
+              />
+            </div>
           </div>
           <div className="flex items-start gap-4">
             <label className="w-32 text-sm font-medium pt-2">タグ</label>
@@ -1561,14 +1560,27 @@ const ContactRegister: React.FC = () => {
                 <select
                   value={selectedTagOption}
                   onChange={e => setSelectedTagOption(e.target.value)}
-                  className="border rounded px-3 py-2 text-sm min-w-[200px]"
+                  className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
                 >
                   <option value="">既存タグを選択</option>
-                  {availableTags.map(tag => (
-                    <option key={tag.id} value={tag.name}>
-                      {tag.type === 'relation' ? 'Tag/Relation' : 'Tag/Tech'}: {tag.name}
-                    </option>
-                  ))}
+                  <optgroup label="Tag/Tech">
+                    {availableTags
+                      .filter(tag => tag.type !== 'relation')
+                      .map(tag => (
+                        <option key={tag.id} value={tag.name}>
+                          {tag.name}
+                        </option>
+                      ))}
+                  </optgroup>
+                  <optgroup label="Tag/Relation">
+                    {availableTags
+                      .filter(tag => tag.type === 'relation')
+                      .map(tag => (
+                        <option key={tag.id} value={tag.name}>
+                          {tag.name}
+                        </option>
+                      ))}
+                  </optgroup>
                 </select>
                 <button
                   type="button"
@@ -1583,99 +1595,6 @@ const ContactRegister: React.FC = () => {
                   className="bg-blue-600 text-white px-3 py-2 rounded"
                 >
                   追加
-                </button>
-                <select
-                  value={deleteTagOption}
-                  onChange={e => setDeleteTagOption(e.target.value)}
-                  className="border rounded px-3 py-2 text-sm min-w-[200px]"
-                >
-                  <option value="">既存タグを削除</option>
-                  {availableTags.map(tag => (
-                    <option key={`delete-${tag.id}`} value={tag.name}>
-                      {tag.type === 'relation' ? 'Tag/Relation' : 'Tag/Tech'}: {tag.name}
-                    </option>
-                  ))}
-                </select>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const target = deleteTagOption.trim();
-                    if (!target) return;
-                    const confirmed = window.confirm(`タグ「${target}」を削除しますか？`);
-                    if (!confirmed) return;
-                    try {
-                      const match = availableTags.find(tag => tag.name === target);
-                      if (!match) {
-                        setSubmitError('タグが見つかりません。');
-                        return;
-                      }
-                      await axios.delete(`http://localhost:8000/tags/${match.id}`);
-                      setAvailableTags(prev => prev.filter(tag => tag.name !== target));
-                      setSelectedTags(prev => prev.filter(tag => tag !== target));
-                      setDeleteTagOption('');
-                    } catch {
-                      setSubmitError('タグの削除に失敗しました。');
-                    }
-                  }}
-                  className="bg-red-600 text-white px-3 py-2 rounded"
-                >
-                  削除
-                </button>
-                <select
-                  value={tagTypeTarget}
-                  onChange={e => setTagTypeTarget(e.target.value)}
-                  className="border rounded px-3 py-2 text-sm min-w-[200px]"
-                >
-                  <option value="">タグ種別を変更</option>
-                  {availableTags.map(tag => (
-                    <option key={`type-${tag.id}`} value={tag.name}>
-                      {tag.type === 'relation' ? 'Tag/Relation' : 'Tag/Tech'}: {tag.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={tagTypeValue}
-                  onChange={e => setTagTypeValue(e.target.value as 'technology' | 'relation')}
-                  className="border rounded px-3 py-2 text-sm"
-                >
-                  <option value="technology">Tag/Tech</option>
-                  <option value="relation">Tag/Relation</option>
-                </select>
-                <button
-                  type="button"
-                  onClick={async () => {
-                    const target = tagTypeTarget.trim();
-                    if (!target) return;
-                    const match = availableTags.find(tag => tag.name === target);
-                    if (!match) {
-                      setSubmitError('タグが見つかりません。');
-                      return;
-                    }
-                    try {
-                      const response = await axios.put(`http://localhost:8000/tags/${match.id}`, {
-                        name: match.name,
-                        type: tagTypeValue,
-                      });
-                      setAvailableTags(prev => {
-                        const updated = prev.map(tag => (
-                          tag.id === match.id ? { ...tag, type: response.data.type } : tag
-                        ));
-                        updated.sort((a, b) => {
-                          const typeOrder = (value: string) => (value === 'relation' ? 1 : 0);
-                          const diff = typeOrder(a.type) - typeOrder(b.type);
-                          if (diff !== 0) return diff;
-                          return a.name.localeCompare(b.name, 'ja');
-                        });
-                        return updated;
-                      });
-                      setTagTypeTarget('');
-                    } catch {
-                      setSubmitError('タグ種別の更新に失敗しました。');
-                    }
-                  }}
-                  className="bg-gray-700 text-white px-3 py-2 rounded"
-                >
-                  種別変更
                 </button>
                 <input
                   type="text"

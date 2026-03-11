@@ -418,6 +418,18 @@
   margin-bottom: 10px;
 }
 
+.tag-select optgroup {
+  font-weight: 600;
+}
+
+.tag-select optgroup[label='Tag/Tech'] {
+  color: rgba(245, 158, 11, 0.85);
+}
+
+.tag-select optgroup[label='Tag/Relation'] {
+  color: rgba(236, 72, 153, 0.85);
+}
+
 .geocode-progress__bar-fill {
   background: #22d3ee;
   height: 100%;
