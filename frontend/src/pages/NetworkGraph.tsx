@@ -13,6 +13,7 @@ type GraphNode = {
   mobile?: string;
   postal_code?: string;
   address?: string;
+  notes?: string;
   company_node_id?: string;
   is_self?: boolean;
   tag_type?: 'technology' | 'relation' | string;
@@ -859,6 +860,7 @@ const NetworkGraph: React.FC = () => {
                 <div>役職・部署: {hoveredNode.role || '-'}</div>
                 <div>電話: {hoveredNode.mobile || hoveredNode.phone || '-'}</div>
                 <div>メール: {hoveredNode.email || '-'}</div>
+                {hoveredNode.notes ? <div>メモ: {hoveredNode.notes}</div> : null}
               </>
             ) : hoveredNode.type === 'company' ? (
               <>

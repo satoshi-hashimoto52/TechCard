@@ -70,21 +70,6 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     [points],
   );
 
-  const heatFeatures = useMemo(
-    () =>
-      points.map(point => ({
-        type: 'Feature' as const,
-        properties: {
-          weight: point.count ?? 1,
-        },
-        geometry: {
-          type: 'Point' as const,
-          coordinates: [point.lon as number, point.lat as number],
-        },
-      })),
-    [points],
-  );
-
   const cluster = useMemo(() => {
     const instance = new Supercluster({ radius: 60, maxZoom: 16 });
     instance.load(geojson.features as any);
@@ -120,190 +105,112 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     (event: any) => {
       updateBounds();
       const map = event?.target;
-      if (map) {
-        mapLoadedRef.current = true;
-        map.on('error', (err: any) => {
-          console.error('map error', err?.error || err);
-        });
-        const ensureRegions = async () => {
-          if (map.getSource('regions')) {
-            return;
+      if (!map) return;
+      mapLoadedRef.current = true;
+      map.on('error', (err: any) => {
+        console.error('map error', err?.error || err);
+      });
+      const ensureRegions = async () => {
+        if (map.getSource('regions')) {
+          return;
+        }
+        let regionData: any = null;
+        let useRegions = true;
+        try {
+          const response = await fetch('/japan_regions.geojson', { cache: 'no-cache' });
+          const contentType = response.headers.get('content-type') || '';
+          if (!response.ok || !contentType.includes('application/json')) {
+            throw new Error(`regions status=${response.status} type=${contentType}`);
           }
-          let regionData: any = null;
-          let useRegions = true;
+          regionData = await response.json();
+        } catch (err) {
+          console.warn('region source load failed, fallback to japan.geojson', err);
+          useRegions = false;
           try {
-            const response = await fetch('/japan_regions.geojson', { cache: 'no-cache' });
+            const response = await fetch('/japan.geojson', { cache: 'no-cache' });
             const contentType = response.headers.get('content-type') || '';
-            if (!response.ok || !contentType.includes('application/json')) {
-              throw new Error(`regions status=${response.status} type=${contentType}`);
+            if (response.ok && contentType.includes('application/json')) {
+              regionData = await response.json();
+            } else {
+              throw new Error(`japan geojson status=${response.status} type=${contentType}`);
             }
-            regionData = await response.json();
-          } catch (err) {
-            console.warn('region source load failed, fallback to japan.geojson', err);
-            useRegions = false;
-            try {
-              const response = await fetch('/japan.geojson', { cache: 'no-cache' });
-              const contentType = response.headers.get('content-type') || '';
-              if (response.ok && contentType.includes('application/json')) {
-                regionData = await response.json();
-              } else {
-                throw new Error(`japan geojson status=${response.status} type=${contentType}`);
-              }
-            } catch (fallbackErr) {
-              console.warn('japan geojson load failed', fallbackErr);
-            }
+          } catch (fallbackErr) {
+            console.warn('japan geojson load failed', fallbackErr);
           }
-          if (!regionData) {
-            return;
-          }
-          map.addSource('regions', {
-            type: 'geojson',
-            data: regionData,
-          });
-          if (!map.getLayer('region-outline')) {
-            map.addLayer({
-              id: 'region-outline',
-              type: 'line',
-              source: 'regions',
-              maxzoom: 5,
-              paint: {
-                'line-width': 2,
-                'line-color': useRegions
-                  ? [
-                      'match',
-                      ['get', 'region'],
-                      'Hokkaido',
-                      '#60a5fa',
-                      'Tohoku',
-                      '#34d399',
-                      'Kanto',
-                      '#fbbf24',
-                      'Chubu',
-                      '#f97316',
-                      'Kinki',
-                      '#f43f5e',
-                      'Chugoku',
-                      '#a78bfa',
-                      'Shikoku',
-                      '#22d3ee',
-                      'Kyushu',
-                      '#84cc16',
-                      '#64748b',
-                    ]
-                  : '#64748b',
-              },
-            });
-          }
-          if (useRegions && !map.getLayer('region-label')) {
-            map.addLayer({
-              id: 'region-label',
-              type: 'symbol',
-              source: 'regions',
-              maxzoom: 5,
-              layout: {
-                'text-field': ['get', 'region'],
-                'text-size': 14,
-              },
-              paint: {
-                'text-color': '#94a3b8',
-                'text-halo-color': '#0f172a',
-                'text-halo-width': 1,
-              },
-            });
-          }
-        };
-
-        const onReady = () => {
-          console.log('regions source', map.getSource('regions'));
-          console.log('layers', map.getStyle()?.layers);
-          ensureRegions();
-          if (!map.getSource('contacts')) {
-            map.addSource('contacts', {
-              type: 'geojson',
-              data: {
-                type: 'FeatureCollection',
-                features: heatFeatures,
-              },
-            });
-          }
-          if (!map.getLayer('contact-heat')) {
-            const beforeId = map.getLayer('clusters')
-              ? 'clusters'
-              : map.getLayer('companies-circle')
-                ? 'companies-circle'
-                : undefined;
-            map.addLayer(
-              {
-                id: 'contact-heat',
-                type: 'heatmap',
-                source: 'contacts',
-                minzoom: 9,
-                maxzoom: 12,
-                paint: {
-                  'heatmap-weight': [
-                    'interpolate',
-                    ['linear'],
-                    ['zoom'],
-                    9,
-                    [
-                      '*',
-                      ['interpolate', ['linear'], ['get', 'weight'], 0, 0, 10, 1],
-                      0.35,
-                    ],
-                    12,
-                    [
-                      '*',
-                      ['interpolate', ['linear'], ['get', 'weight'], 0, 0, 10, 1],
-                      0.7,
-                    ],
-                  ],
-                  'heatmap-intensity': 1,
-                  'heatmap-radius': [
-                    'interpolate',
-                    ['linear'],
-                    ['zoom'],
-                    9,
-                    18,
-                    12,
-                    6,
-                  ],
-                  'heatmap-opacity': [
-                    'interpolate',
-                    ['linear'],
-                    ['zoom'],
-                    9,
-                    0.55,
-                    12,
-                    0.25,
-                  ],
-                  'heatmap-color': [
-                    'interpolate',
-                    ['linear'],
-                    ['heatmap-density'],
-                    0,
-                    '#1e3a8a',
-                    0.3,
-                    '#06b6d4',
-                    0.6,
-                    '#facc15',
-                  1,
-                  '#ef4444',
-                ],
-              },
+        }
+        if (!regionData) {
+          return;
+        }
+        map.addSource('regions', {
+          type: 'geojson',
+          data: regionData,
+        });
+        if (!map.getLayer('region-outline')) {
+          map.addLayer({
+            id: 'region-outline',
+            type: 'line',
+            source: 'regions',
+            maxzoom: 5,
+            paint: {
+              'line-width': 2,
+              'line-color': useRegions
+                ? [
+                    'match',
+                    ['get', 'region'],
+                    'Hokkaido',
+                    '#60a5fa',
+                    'Tohoku',
+                    '#34d399',
+                    'Kanto',
+                    '#fbbf24',
+                    'Chubu',
+                    '#f97316',
+                    'Kinki',
+                    '#f43f5e',
+                    'Chugoku',
+                    '#a78bfa',
+                    'Shikoku',
+                    '#22d3ee',
+                    'Kyushu',
+                    '#84cc16',
+                    '#64748b',
+                  ]
+                : '#64748b',
             },
-            beforeId,
-          );
+          });
+        }
+        if (useRegions && !map.getLayer('region-label')) {
+          map.addLayer({
+            id: 'region-label',
+            type: 'symbol',
+            source: 'regions',
+            maxzoom: 5,
+            layout: {
+              'text-field': ['get', 'region'],
+              'text-size': 14,
+            },
+            paint: {
+              'text-color': '#94a3b8',
+              'text-halo-color': '#0f172a',
+              'text-halo-width': 1,
+            },
+          });
         }
       };
 
-        if (map.isStyleLoaded()) {
-          onReady();
-        } else {
-          map.once('load', onReady);
-        }
+      const onReady = () => {
+        console.log('regions source', map.getSource('regions'));
+        console.log('layers', map.getStyle()?.layers);
+        ensureRegions();
+      };
+
+      if (map.isStyleLoaded()) {
+        onReady();
+      } else {
+        map.once('load', onReady);
       }
     },
-    [updateBounds, heatFeatures],
+    [updateBounds],
   );
 
   useEffect(() => {
@@ -322,17 +229,6 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     console.log('companies', companies);
     console.log('points', points);
   }, [companies, points]);
-
-  useEffect(() => {
-    const map = mapRef.current?.getMap();
-    if (!map || !mapLoadedRef.current) return;
-    const source = map.getSource('contacts') as maplibregl.GeoJSONSource | undefined;
-    if (!source) return;
-    source.setData({
-      type: 'FeatureCollection',
-      features: heatFeatures,
-    });
-  }, [heatFeatures]);
 
   const handleHover = useCallback((event: any) => {
     const features = event.features as any[] | undefined;
