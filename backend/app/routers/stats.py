@@ -16,6 +16,9 @@ from .. import models
 router = APIRouter(prefix="/stats", tags=["stats"])
 logger = logging.getLogger("techcard.geocode")
 _GEOCODE_SEMAPHORE = asyncio.Semaphore(1)
+_ADDRESS_GEOCODE_CACHE: dict[tuple[str, str], tuple[float, float]] = {}
+_ADDRESS_GEOCODE_INFLIGHT: set[tuple[str, str]] = set()
+_MAX_ADDRESS_GEOCODES_PER_REQUEST = 6
 
 
 def get_db():
@@ -308,6 +311,20 @@ async def _async_geocode(address: str, postal_code: str):
         return result
 
 
+async def _geocode_and_cache(address_key: tuple[str, str], address: str, postal_code: str):
+    try:
+        result, used_address, zip_address = await _async_geocode(address, postal_code)
+        if result:
+            lat, lon = result
+            _ADDRESS_GEOCODE_CACHE[address_key] = (lat, lon)
+            logger.info("[geocode cache] %s lat=%s lon=%s", address or zip_address or "", lat, lon)
+        else:
+            failed_address = used_address or address or zip_address or ""
+            logger.warning("[geocode failed] address=%s postal=%s", failed_address, postal_code)
+    finally:
+        _ADDRESS_GEOCODE_INFLIGHT.discard(address_key)
+
+
 @router.get("/company-map")
 async def get_company_map(refresh: bool = Query(False), db: Session = Depends(get_db)):
     contacts = (
@@ -479,43 +496,55 @@ async def get_company_map(refresh: bool = Query(False), db: Session = Depends(ge
             db.add(company)
             db.commit()
 
+    if refresh:
+        for address_key in address_groups.keys():
+            _ADDRESS_GEOCODE_CACHE.pop(address_key, None)
+            _ADDRESS_GEOCODE_INFLIGHT.discard(address_key)
+
     address_results: dict[tuple[str, str], tuple[float, float]] = {}
-    if not refresh:
-        for item in company_items:
-            company = item["company"]
-            cached_postal = (company.postal_code or "").strip()
-            cached_address = (company.address or "").strip()
-            if cached_postal or cached_address:
-                if company.latitude is not None and company.longitude is not None:
-                    address_results[(cached_postal, cached_address)] = (company.latitude, company.longitude)
+    for item in company_items:
+        company = item["company"]
+        cached_postal = (company.postal_code or "").strip()
+        cached_address = (company.address or "").strip()
+        if cached_postal or cached_address:
+            if company.latitude is not None and company.longitude is not None:
+                address_results[(cached_postal, cached_address)] = (company.latitude, company.longitude)
 
-    address_tasks = []
-    address_task_index: dict[tuple[str, str], int] = {}
-    for address_key in address_groups.keys():
-        postal, address = address_key
-        if not postal and not address:
-            continue
-        if not refresh and address_key in address_results:
-            continue
-        address_tasks.append(_async_geocode(address, postal))
-        address_task_index[address_key] = len(address_tasks) - 1
+    address_results.update(_ADDRESS_GEOCODE_CACHE)
 
-    if address_tasks:
-        async_address_results = await asyncio.gather(*address_tasks)
-        for address_key, task_index in address_task_index.items():
-            result, used_address, zip_address = async_address_results[task_index]
+    missing_keys = [
+        key
+        for key in address_groups.keys()
+        if key != ("", "") and key not in address_results and key not in _ADDRESS_GEOCODE_INFLIGHT
+    ]
+    keys_to_process = missing_keys[:_MAX_ADDRESS_GEOCODES_PER_REQUEST]
+
+    if refresh and keys_to_process:
+        for address_key in keys_to_process:
+            postal, address = address_key
+            _ADDRESS_GEOCODE_INFLIGHT.add(address_key)
+            result, used_address, zip_address = await _async_geocode(address, postal)
+            _ADDRESS_GEOCODE_INFLIGHT.discard(address_key)
             if result:
                 lat, lon = result
                 address_results[address_key] = (lat, lon)
+                _ADDRESS_GEOCODE_CACHE[address_key] = (lat, lon)
                 geocode_success += 1
             else:
                 geocode_fail += 1
-                failed_address = used_address or address_key[1] or zip_address or ""
+                failed_address = used_address or address or zip_address or ""
                 logger.warning(
                     "[geocode failed] address=%s postal=%s",
                     failed_address,
-                    address_key[0],
+                    postal,
                 )
+    else:
+        for address_key in keys_to_process:
+            postal, address = address_key
+            if address_key in _ADDRESS_GEOCODE_INFLIGHT:
+                continue
+            _ADDRESS_GEOCODE_INFLIGHT.add(address_key)
+            asyncio.create_task(_geocode_and_cache(address_key, address, postal))
 
     results = []
     locations_by_company: dict[int, list[dict]] = {}
@@ -567,10 +596,12 @@ async def get_company_map(refresh: bool = Query(False), db: Session = Depends(ge
             payload["locations"] = locations
         results.append(payload)
 
-    progress_success = sum(
+    address_total = sum(1 for key in address_groups.keys() if key != ("", ""))
+    address_success = sum(1 for key in address_groups.keys() if key in address_results)
+    progress_total = address_total if address_total > 0 else company_count
+    progress_success = address_success if address_total > 0 else sum(
         1 for item in company_items if item["company"].latitude is not None and item["company"].longitude is not None
     )
-    progress_total = company_count
     for item in results:
         item["geocode_progress"] = {"success": progress_success, "total": progress_total}
 
