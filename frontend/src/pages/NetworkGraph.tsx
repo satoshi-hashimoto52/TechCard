@@ -60,6 +60,8 @@ const NetworkGraph: React.FC = () => {
   const hasCenteredRef = useRef(false);
   const companyAnglesRef = useRef<Map<string, number>>(new Map());
   const companyRadiusRef = useRef(0);
+  const zoomScaleRef = useRef(1);
+  const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
 
   useEffect(() => {
     const params: Record<string, string | number> = {};
@@ -101,7 +103,23 @@ const NetworkGraph: React.FC = () => {
       return nodeIds.has(sourceId) && nodeIds.has(targetId);
     });
     return { nodes, links };
-  }, [rawGraph, visibleTypes]);
+  }, [rawGraph, visibleTypes, visibleTagTypes]);
+
+  const tagCompanyIds = useMemo(() => {
+    const map = new Map<string, string[]>();
+    graph.links.forEach(link => {
+      if (link.type !== 'company_uses') return;
+      const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+      const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+      const companyId = sourceId.startsWith('company_') ? sourceId : targetId.startsWith('company_') ? targetId : null;
+      const tagId = sourceId.startsWith('tag_') ? sourceId : targetId.startsWith('tag_') ? targetId : null;
+      if (!companyId || !tagId) return;
+      const list = map.get(tagId) || [];
+      list.push(companyId);
+      map.set(tagId, list);
+    });
+    return map;
+  }, [graph.links]);
 
   const selfNodeId = useMemo(() => {
     const selfNode = graph.nodes.find(node => node.type === 'person' && (node as GraphNode).is_self);
@@ -123,6 +141,31 @@ const NetworkGraph: React.FC = () => {
     });
     return ids;
   }, [graph.links, graph.nodes, selfNodeId]);
+
+  const personOverlapMap = useMemo(() => {
+    const map = new Map<string, number>();
+    if (!selfNodeId) return map;
+    graph.nodes.forEach(node => {
+      if (node.type === 'person' && node.id !== selfNodeId) {
+        map.set(node.id, 0);
+      }
+    });
+    graph.links.forEach(link => {
+      const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+      const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+      const isSourcePerson = map.has(sourceId);
+      const isTargetPerson = map.has(targetId);
+      const isSourceTag = connectedTagIds.has(sourceId);
+      const isTargetTag = connectedTagIds.has(targetId);
+      if (isSourcePerson && isTargetTag) {
+        map.set(sourceId, (map.get(sourceId) ?? 0) + 1);
+      }
+      if (isTargetPerson && isSourceTag) {
+        map.set(targetId, (map.get(targetId) ?? 0) + 1);
+      }
+    });
+    return map;
+  }, [connectedTagIds, graph.links, graph.nodes, selfNodeId]);
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -235,6 +278,9 @@ const NetworkGraph: React.FC = () => {
           if (typed.type === 'company' || typed.is_self) continue;
           let target = 0;
           if (typed.type === 'technology') {
+            if (!connectedTagIds.has(typed.id)) {
+              continue;
+            }
             target = connectedTagRadius;
           } else if (typed.type === 'person') {
             target = personRadius;
@@ -255,6 +301,94 @@ const NetworkGraph: React.FC = () => {
       return force;
     };
     fg.d3Force('rings', ringForce());
+    const personOverlapPullForce = () => {
+      let nodes: any[] = [];
+      const baseStrength = 0.012;
+      const force = (alpha: number) => {
+        for (const node of nodes) {
+          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          if (typed.type !== 'person' || typed.is_self) continue;
+          const overlap = personOverlapMap.get(typed.id) ?? 0;
+          if (overlap <= 0) continue;
+          const strength = Math.min(0.06, baseStrength + overlap * 0.006);
+          const dx = typed.x ?? 0;
+          const dy = typed.y ?? 0;
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          const k = (strength * alpha);
+          typed.vx = (typed.vx ?? 0) - (dx / dist) * k;
+          typed.vy = (typed.vy ?? 0) - (dy / dist) * k;
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+      };
+      return force;
+    };
+    fg.d3Force('person-overlap-pull', personOverlapPullForce());
+    const tagCompanyAttractForce = () => {
+      let nodes: any[] = [];
+      let nodeMap: Map<string, any> = new Map();
+      let tagCompanies: Map<string, any[]> = new Map();
+      const baseStrength = 0.5;
+      const baseDistance = 10;
+      const force = (alpha: number) => {
+        const zoomFactor = Math.max(0.7, Math.min(1.8, zoomScaleRef.current || 1));
+        const strength = baseStrength * zoomFactor;
+        const desiredDistance = baseDistance * zoomFactor;
+        for (const node of nodes) {
+          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          if (typed.type !== 'technology') continue;
+          if (connectedTagIds.has(typed.id)) continue;
+          const companies = tagCompanies.get(typed.id);
+          if (!companies || companies.length === 0) continue;
+          let avgX = 0;
+          let avgY = 0;
+          let count = 0;
+          for (const companyNode of companies) {
+            const cx = companyNode.x ?? 0;
+            const cy = companyNode.y ?? 0;
+            avgX += cx;
+            avgY += cy;
+            count += 1;
+          }
+          if (count === 0) continue;
+          avgX /= count;
+          avgY /= count;
+          const dx = avgX - (typed.x ?? 0);
+          const dy = avgY - (typed.y ?? 0);
+          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
+          if (dist < desiredDistance) continue;
+          const k = ((dist - desiredDistance) / dist) * strength * alpha;
+          typed.vx = (typed.vx ?? 0) + dx * k;
+          typed.vy = (typed.vy ?? 0) + dy * k;
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+        nodeMap = new Map(nodes.filter(n => n?.id).map(n => [n.id, n]));
+        tagCompanies = new Map();
+        graph.links.forEach(link => {
+          const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+          const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+          const sourceNode = nodeMap.get(sourceId);
+          const targetNode = nodeMap.get(targetId);
+          if (!sourceNode || !targetNode) return;
+          if (sourceNode.type === 'company' && targetNode.type === 'technology') {
+            const list = tagCompanies.get(targetId) || [];
+            list.push(sourceNode);
+            tagCompanies.set(targetId, list);
+            return;
+          }
+          if (targetNode.type === 'company' && sourceNode.type === 'technology') {
+            const list = tagCompanies.get(sourceId) || [];
+            list.push(targetNode);
+            tagCompanies.set(sourceId, list);
+          }
+        });
+      };
+      return force;
+    };
+    fg.d3Force('tag-company-attract', tagCompanyAttractForce());
     const personCompanySectorForce = () => {
       let nodes: any[] = [];
       const strength = 0.12;
@@ -316,7 +450,7 @@ const NetworkGraph: React.FC = () => {
       fg.centerAt(0, 0, 600);
       fg.zoom(1.15, 600);
     }
-  }, [graph]);
+  }, [graph, connectedTagIds, personOverlapMap]);
 
   const applySearch = (value: string, type: typeof searchType) => {
     const trimmed = value.trim();
@@ -388,6 +522,7 @@ const NetworkGraph: React.FC = () => {
     const fontSize = clampedScreenSize / globalScale;
     const x = (node as any).x ?? 0;
     const y = (node as any).y ?? 0;
+    const offsetFactor = Math.max(1, 1 / globalScale);
     ctx.save();
     ctx.font = `${fontSize}px "Segoe UI", sans-serif`;
     ctx.textAlign = 'center';
@@ -398,7 +533,7 @@ const NetworkGraph: React.FC = () => {
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 1 / globalScale;
     const textWidth = ctx.measureText(typed.label).width;
-    const padding = 3 / globalScale;
+    const padding = (3 * offsetFactor) / globalScale;
     const overlaps = (box: { x: number; y: number; w: number; h: number; groupId?: string | null }) =>
       labelBoxesRef.current.some(existing =>
         box.x < existing.x + existing.w
@@ -406,11 +541,15 @@ const NetworkGraph: React.FC = () => {
         && box.y < existing.y + existing.h
         && box.y + box.h > existing.y,
       );
-    const groupId = typed.type === 'company'
-      ? typed.id
-      : typed.type === 'person'
-      ? typed.company_node_id
-      : null;
+    let groupId: string | null = null;
+    if (typed.type === 'company') {
+      groupId = typed.id;
+    } else if (typed.type === 'person') {
+      groupId = typed.company_node_id || null;
+    } else if (typed.type === 'technology') {
+      const companies = tagCompanyIds.get(typed.id);
+      groupId = companies && companies.length > 0 ? companies[0] : null;
+    }
     const makeBox = (cx: number, cy: number) => ({
       x: cx - textWidth / 2 - padding,
       y: cy - fontSize / 2 - padding,
@@ -418,7 +557,8 @@ const NetworkGraph: React.FC = () => {
       h: fontSize + padding * 2,
       groupId,
     });
-    const offsets = [0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168, 180, 192];
+    const offsets = [0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168, 180, 192]
+      .map(offset => offset * offsetFactor);
     const directions = [
       [0, 0],
       [0, -1],
@@ -431,8 +571,40 @@ const NetworkGraph: React.FC = () => {
       [-1, -1],
     ];
     let placed = false;
+    let orderedDirections = directions;
+    if (typed.type === 'technology') {
+      const companyIds = tagCompanyIds.get(typed.id) || [];
+      let vx = x;
+      let vy = y;
+      if (companyIds.length > 0) {
+        let avgX = 0;
+        let avgY = 0;
+        let count = 0;
+        companyIds.forEach(companyId => {
+          const pos = nodePositionsRef.current.get(companyId);
+          if (!pos) return;
+          avgX += pos.x;
+          avgY += pos.y;
+          count += 1;
+        });
+        if (count > 0) {
+          avgX /= count;
+          avgY /= count;
+          vx = x - avgX;
+          vy = y - avgY;
+        }
+      }
+      const len = Math.hypot(vx, vy) || 1;
+      const nx = vx / len;
+      const ny = vy / len;
+      orderedDirections = [...directions].sort((a, b) => {
+        const da = a[0] * nx + a[1] * ny;
+        const db = b[0] * nx + b[1] * ny;
+        return db - da;
+      });
+    }
     for (const offset of offsets) {
-      for (const [dxDir, dyDir] of directions) {
+      for (const [dxDir, dyDir] of orderedDirections) {
         const dx = (dxDir * offset) / globalScale;
         const dy = (dyDir * offset) / globalScale;
         const cx = x + dx;
@@ -464,7 +636,7 @@ const NetworkGraph: React.FC = () => {
       if (placed) break;
     }
     ctx.restore();
-  }, [nodeColor]);
+  }, [nodeColor, tagCompanyIds]);
 
   const handleNodeClick = (node: NodeObject) => {
     const typed = node as GraphNode;
@@ -600,6 +772,16 @@ const NetworkGraph: React.FC = () => {
           graphData={graph}
           onRenderFramePre={(ctx, globalScale) => {
             labelBoxesRef.current = [];
+            zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
+            const nextPositions = new Map<string, { x: number; y: number }>();
+            graph.nodes.forEach(node => {
+              const nx = (node as any).x;
+              const ny = (node as any).y;
+              if (typeof nx === 'number' && typeof ny === 'number') {
+                nextPositions.set(node.id, { x: nx, y: ny });
+              }
+            });
+            nodePositionsRef.current = nextPositions;
             const companies = graph.nodes.filter(node => node.type === 'company');
             if (companies.length > 0) {
               const nextAngles = new Map<string, number>();

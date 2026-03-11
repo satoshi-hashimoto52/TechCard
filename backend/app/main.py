@@ -73,12 +73,18 @@ with engine.begin() as connection:
         connection.execute(text("PRAGMA foreign_keys=ON"))
 
     company_columns = connection.execute(text("PRAGMA table_info(companies)")).fetchall()
+    if company_columns and not any(column[1] == "postal_code" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN postal_code TEXT"))
+    if company_columns and not any(column[1] == "address" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN address TEXT"))
     if company_columns and not any(column[1] == "latitude" for column in company_columns):
         connection.execute(text("ALTER TABLE companies ADD COLUMN latitude REAL"))
     if company_columns and not any(column[1] == "longitude" for column in company_columns):
         connection.execute(text("ALTER TABLE companies ADD COLUMN longitude REAL"))
     if company_columns and not any(column[1] == "geocoded_at" for column in company_columns):
         connection.execute(text("ALTER TABLE companies ADD COLUMN geocoded_at DATETIME"))
+    if company_columns and not any(column[1] == "geocode_note" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN geocode_note TEXT"))
 
     tag_columns = connection.execute(text("PRAGMA table_info(tags)")).fetchall()
     if tag_columns and not any(column[1] == "type" for column in tag_columns):

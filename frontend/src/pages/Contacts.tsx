@@ -8,10 +8,12 @@ interface Contact {
   email?: string;
   phone?: string;
   role?: string;
-  company?: { name: string };
+  company?: { name: string; postal_code?: string | null; address?: string | null };
   tags: { name: string; type?: string }[];
   first_met_at?: string;
   notes?: string;
+  postal_code?: string;
+  address?: string;
 }
 
 const Contacts: React.FC = () => {
@@ -50,7 +52,39 @@ const Contacts: React.FC = () => {
     });
     const entries = Array.from(grouped.entries()).map(([company, items]) => {
       const sorted = [...items].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
-      return { company, contacts: sorted };
+      const postalCounts = new Map<string, number>();
+      const addressCounts = new Map<string, number>();
+      items.forEach(item => {
+        const postal = (item.postal_code || '').trim();
+        const address = (item.address || '').trim();
+        if (postal) {
+          postalCounts.set(postal, (postalCounts.get(postal) || 0) + 1);
+        }
+        if (address) {
+          addressCounts.set(address, (addressCounts.get(address) || 0) + 1);
+        }
+      });
+      const pickMostCommon = (counts: Map<string, number>) => {
+        let best = '';
+        let bestCount = 0;
+        counts.forEach((count, value) => {
+          if (count > bestCount) {
+            best = value;
+            bestCount = count;
+            return;
+          }
+          if (count === bestCount && value && value < best) {
+            best = value;
+          }
+        });
+        return best || null;
+      };
+      return {
+        company,
+        contacts: sorted,
+        postal_code: pickMostCommon(postalCounts),
+        address: pickMostCommon(addressCounts),
+      };
     });
     entries.sort((a, b) => {
       if (a.company === '未設定') return 1;
@@ -81,8 +115,11 @@ const Contacts: React.FC = () => {
                 className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50"
               >
                 <div>
-                  <p className="text-xs text-gray-500">会社</p>
                   <h2 className="text-lg font-semibold">{group.company}</h2>
+                  <div className="mt-1 text-xs text-gray-500 space-y-1">
+                    <div>〒：{group.postal_code || '-'}</div>
+                    <div>住所：{group.address || '-'}</div>
+                  </div>
                 </div>
                 <div className="text-sm text-gray-600">
                   {group.contacts.length}件 {expanded ? '▲' : '▼'}

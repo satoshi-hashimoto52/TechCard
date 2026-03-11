@@ -25,6 +25,10 @@ class TechExtractResponse(BaseModel):
 # Company schemas
 class CompanyBase(BaseModel):
     name: str
+    postal_code: Optional[str] = None
+    address: Optional[str] = None
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
 
 class CompanyCreate(CompanyBase):
     pass

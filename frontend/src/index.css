@@ -1,3 +1,301 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+.company-map .maplibregl-canvas {
+  outline: none;
+}
+
+.company-led-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+}
+
+.company-led-wrapper {
+  position: relative;
+  width: 14px;
+  height: 14px;
+  --led-color: #2563eb;
+  --led-glow: rgba(37, 99, 235, 0.9);
+}
+
+.company-led-marker--self .company-led-wrapper {
+  --led-color: #ef4444;
+  --led-glow: rgba(239, 68, 68, 0.85);
+}
+
+.company-led-core {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  background: var(--led-color);
+  box-shadow: 0 0 6px var(--led-glow), 0 0 12px var(--led-glow);
+}
+
+.company-led-pulse {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 8px;
+  height: 8px;
+  transform: translate(-50%, -50%);
+  border-radius: 9999px;
+  border: 2px solid var(--led-glow);
+  animation: companyLedPulse 2.2s ease-out infinite;
+  opacity: 0.8;
+}
+
+.company-led-label {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.1;
+  color: #111827;
+  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
+  white-space: nowrap;
+}
+
+.company-led-label__name {
+  font-weight: 600;
+}
+
+.company-led-label__city {
+  font-size: 10px;
+  color: #374151;
+}
+
+.company-led-popup {
+  font-size: 12px;
+  color: #0f172a;
+}
+
+.company-led-popup__name {
+  font-weight: 600;
+  margin-bottom: 2px;
+}
+
+.company-led-popup__address {
+  color: #334155;
+}
+
+@keyframes companyLedPulse {
+  0% {
+    transform: translate(-50%, -50%) scale(1);
+    opacity: 0.75;
+  }
+  70% {
+    transform: translate(-50%, -50%) scale(2.6);
+    opacity: 0;
+  }
+  100% {
+    transform: translate(-50%, -50%) scale(2.6);
+    opacity: 0;
+  }
+}
+
+.led-japan-map {
+  position: relative;
+  background: #05070c;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.led-japan-map__dots {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  mix-blend-mode: screen;
+  z-index: 1;
+}
+
+.led-company-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: #7df9ff;
+  text-shadow: 0 0 6px rgba(0, 255, 255, 0.8);
+  z-index: 2;
+}
+
+.led-company-marker__led {
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border-radius: 9999px;
+  background: #00ffff;
+  box-shadow: 0 0 8px rgba(0, 255, 255, 0.9), 0 0 14px rgba(0, 255, 255, 0.7);
+}
+
+.led-company-marker--self .led-company-marker__led {
+  background: #ff4d6d;
+  box-shadow: 0 0 10px rgba(255, 77, 109, 0.9), 0 0 18px rgba(255, 77, 109, 0.7);
+}
+
+.led-company-marker__pulse {
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 2px solid rgba(0, 255, 255, 0.7);
+  animation: ledPulse 2s ease-out infinite;
+}
+
+.led-company-marker--self .led-company-marker__pulse {
+  border-color: rgba(255, 77, 109, 0.7);
+}
+
+.led-company-marker__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.led-company-marker__name {
+  font-weight: 600;
+}
+
+.led-company-marker__city {
+  font-size: 10px;
+  color: rgba(125, 249, 255, 0.85);
+}
+
+.led-company-popup {
+  font-size: 12px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.led-company-popup__name {
+  font-weight: 600;
+  margin-bottom: 2px;
+  color: #7df9ff;
+}
+
+.led-company-popup__address {
+  color: #cbd5f5;
+}
+
+@keyframes ledPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  70% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+  100% {
+    transform: scale(2.6);
+    opacity: 0;
+  }
+}
+
+.geocode-progress {
+  margin-top: 16px;
+  border: 1px solid #e5e7eb;
+  border-radius: 10px;
+  background: #f8fafc;
+  padding: 12px;
+}
+
+.geocode-progress__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+  color: #1f2937;
+  font-weight: 600;
+  margin-bottom: 10px;
+}
+
+.geocode-progress__summary {
+  font-weight: 500;
+  color: #475569;
+}
+
+.geocode-progress__list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.geocode-progress__row {
+  display: grid;
+  grid-template-columns: minmax(120px, 1.4fr) minmax(120px, 2fr) auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+}
+
+.geocode-progress__name {
+  color: #0f172a;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.geocode-progress__bar {
+  position: relative;
+  height: 8px;
+  border-radius: 9999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.geocode-progress__fill {
+  height: 100%;
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+}
+
+.geocode-progress__status {
+  font-weight: 600;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.geocode-progress__fill.geocode-progress--success {
+  background: #16a34a;
+}
+
+.geocode-progress__fill.geocode-progress--failed {
+  background: #dc2626;
+}
+
+.geocode-progress__fill.geocode-progress--pending {
+  background: #94a3b8;
+}
+
+.geocode-progress__status.geocode-progress--success {
+  color: #16a34a;
+}
+
+.geocode-progress__status.geocode-progress--failed {
+  color: #dc2626;
+}
+
+.geocode-progress__status.geocode-progress--pending {
+  color: #64748b;
+}

@@ -2,15 +2,20 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from datetime import datetime
+import asyncio
 import json
 import re
+import socket
 import time
 import urllib.parse
 import urllib.request
+import logging
 from ..database import SessionLocal
 from .. import models
 
 router = APIRouter(prefix="/stats", tags=["stats"])
+logger = logging.getLogger("techcard.geocode")
+_GEOCODE_SEMAPHORE = asyncio.Semaphore(1)
 
 
 def get_db():
@@ -111,124 +116,200 @@ def get_summary(db: Session = Depends(get_db)):
     }
 
 
-PREFECTURES = [
-    "北海道",
-    "青森県",
-    "岩手県",
-    "宮城県",
-    "秋田県",
-    "山形県",
-    "福島県",
-    "茨城県",
-    "栃木県",
-    "群馬県",
-    "埼玉県",
-    "千葉県",
-    "東京都",
-    "神奈川県",
-    "新潟県",
-    "富山県",
-    "石川県",
-    "福井県",
-    "山梨県",
-    "長野県",
-    "岐阜県",
-    "静岡県",
-    "愛知県",
-    "三重県",
-    "滋賀県",
-    "京都府",
-    "大阪府",
-    "兵庫県",
-    "奈良県",
-    "和歌山県",
-    "鳥取県",
-    "島根県",
-    "岡山県",
-    "広島県",
-    "山口県",
-    "徳島県",
-    "香川県",
-    "愛媛県",
-    "高知県",
-    "福岡県",
-    "佐賀県",
-    "長崎県",
-    "熊本県",
-    "大分県",
-    "宮崎県",
-    "鹿児島県",
-    "沖縄県",
-]
-
-
-def _detect_prefecture(address: str):
-    if not address:
-        return None
-    for pref in PREFECTURES:
-        if pref in address:
-            return pref
+def _request_json(url: str, headers: dict[str, str], timeout: int = 10, retries: int = 3, label: str = ""):
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:
+            reason = "timeout" if isinstance(exc, socket.timeout) or "timed out" in str(exc).lower() else "error"
+            logger.warning("[geocode %s %s] %s", label or "request", reason, exc)
+            if attempt >= retries:
+                return None
+            time.sleep(1.1)
     return None
 
 
-def _geocode_japan(query: str, expected_prefecture: str | None = None):
+def _zipcloud_lookup(postal_code: str):
+    cleaned = re.sub(r"[^0-9]", "", postal_code or "")
+    if len(cleaned) != 7:
+        return None
+    url = f"https://zipcloud.ibsnet.co.jp/api/search?zipcode={cleaned}"
+    data = _request_json(
+        url,
+        headers={"User-Agent": "techcard-geocoder/1.0 (contact@techcard.local)"},
+        timeout=10,
+        retries=3,
+        label="zipcloud",
+    )
+    if not data:
+        return None
+    if data.get("status") != 200:
+        logger.warning("[geocode zipcloud error] %s", data.get("message") or "status not 200")
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    top = results[0]
+    logger.info(
+        "[zipcloud result] %s %s%s%s",
+        cleaned,
+        top.get("address1", ""),
+        top.get("address2", ""),
+        top.get("address3", ""),
+    )
+    return top
+
+
+def _build_address_from_zipcloud(result: dict) -> str:
+    return f"{result.get('address1','')}{result.get('address2','')}{result.get('address3','')}".strip()
+
+
+def _normalize_postal(value: str) -> str:
+    return re.sub(r"[^0-9]", "", value or "")
+
+
+def _normalize_address(value: str) -> str:
+    if not value:
+        return ""
+    cleaned = value.replace("　", " ").strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    cleaned = re.sub(r"\s*\d+\s*(F|Ｆ|階|フロア)\b.*$", "", cleaned)
+    building_match = re.search(
+        r"^(.*?)(\s*(ビル|タワー|別館|号館|本館|支店|営業所|工場|センター|研究所|プラザ|ビルディング|棟|館).*)$",
+        cleaned,
+    )
+    if building_match:
+        cleaned = building_match.group(1).strip()
+    return cleaned
+
+
+def _geocode_nominatim(query: str):
     if not query:
         return None
+    logger.info("[nominatim query] %s", query)
     params = urllib.parse.urlencode(
         {
             "q": query,
             "format": "json",
             "limit": 1,
             "countrycodes": "jp",
-            "addressdetails": 1,
             "accept-language": "ja",
+            "addressdetails": 1,
         }
     )
     url = f"https://nominatim.openstreetmap.org/search?{params}"
-    req = urllib.request.Request(
+    data = _request_json(
         url,
-        headers={"User-Agent": "TechCard/1.0 (local)"},
+        headers={"User-Agent": "techcard-geocoder/1.0 (contact@techcard.local)"},
+        timeout=10,
+        retries=3,
+        label="nominatim",
     )
-    with urllib.request.urlopen(req, timeout=6) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
     if not data:
         return None
-    top = data[0]
-    address = top.get("address") or {}
-    if address.get("country_code") not in (None, "jp"):
+    top = data[0] if isinstance(data, list) and data else None
+    if not top:
         return None
-    if expected_prefecture:
-        address_blob = " ".join(str(value) for value in address.values())
-        display_name = top.get("display_name") or ""
-        if expected_prefecture not in address_blob and expected_prefecture not in display_name:
-            return None
-    return float(top["lat"]), float(top["lon"])
+    try:
+        lat = float(top.get("lat"))
+        lon = float(top.get("lon"))
+    except (TypeError, ValueError):
+        return None
+    if lat == 0 or lon == 0:
+        return None
+    logger.info("[nominatim success] %s lat=%s lon=%s", query, lat, lon)
+    return lat, lon
 
 
-def _geocode_postal_code(postal_code: str, expected_prefecture: str | None = None):
-    cleaned = re.sub(r"[^0-9]", "", postal_code or "")
-    if len(cleaned) != 7:
+def _extract_city(address: str) -> str:
+    if not address:
+        return ""
+    match = re.search(r"(東京都|北海道|(?:京都|大阪)府|.{2}県)([^0-9\\s]{1,12}?(市|区|町|村))", address)
+    if match:
+        return match.group(2)
+    return ""
+
+
+def _geocode_gsi(address: str):
+    if not address:
         return None
-    url = f"https://geoapi.heartrails.com/api/json?method=searchByPostal&postal={cleaned}"
-    req = urllib.request.Request(
+    logger.info("[gsi query] %s", address)
+    url = "https://msearch.gsi.go.jp/address-search/AddressSearch?q=" + urllib.parse.quote(address)
+    data = _request_json(
         url,
-        headers={"User-Agent": "TechCard/1.0 (local)"},
+        headers={"User-Agent": "techcard-geocoder/1.0 (contact@techcard.local)"},
+        timeout=10,
+        retries=3,
+        label="gsi",
     )
-    with urllib.request.urlopen(req, timeout=6) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    locations = data.get("response", {}).get("location", [])
-    if not locations:
+    if not data:
         return None
-    loc = locations[0]
-    if expected_prefecture:
-        pref = loc.get("prefecture") or ""
-        if expected_prefecture not in pref:
+    try:
+        lon, lat = data[0]["geometry"]["coordinates"]
+        if lat == 0 or lon == 0:
             return None
-    return float(loc["y"]), float(loc["x"])
+        logger.info("[gsi success] %s lat=%s lon=%s", address, lat, lon)
+        return lat, lon
+    except Exception:
+        return None
+
+
+def _select_best_address(addresses: dict[tuple[str, str], int] | None):
+    if not addresses:
+        return "", ""
+    scored = []
+    for (postal_code, address), count in addresses.items():
+        addr_text = (address or "").strip()
+        postal_text = (postal_code or "").strip()
+        length_score = len(addr_text.replace(" ", "").replace("　", ""))
+        info_score = length_score + (100 if postal_text else 0)
+        scored.append((info_score, count, length_score, postal_text, addr_text))
+    scored.sort(reverse=True)
+    _, _, _, postal, address = scored[0]
+    return postal, address
+
+
+def _geocode_company(address: str, postal_code: str):
+    normalized_address = _normalize_address(address)
+    zip_address = ""
+    if postal_code:
+        zip_result = _zipcloud_lookup(postal_code)
+        if zip_result:
+            zip_address = _build_address_from_zipcloud(zip_result)
+
+    if zip_address:
+        latlon = _geocode_gsi(zip_address)
+        if latlon:
+            return latlon, zip_address, zip_address
+    if zip_address and address:
+        combined = f"{zip_address} {address}"
+        latlon = _geocode_gsi(combined)
+        if latlon:
+            return latlon, combined, zip_address
+    if normalized_address:
+        latlon = _geocode_gsi(normalized_address)
+        if latlon:
+            return latlon, normalized_address, zip_address
+    if address:
+        latlon = _geocode_nominatim(address)
+        if latlon:
+            return latlon, address, zip_address
+
+    return None, "", zip_address
+
+
+async def _async_geocode(address: str, postal_code: str):
+    async with _GEOCODE_SEMAPHORE:
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(None, _geocode_company, address, postal_code)
+        await asyncio.sleep(1.1)
+        return result
 
 
 @router.get("/company-map")
-def get_company_map(refresh: bool = Query(False), db: Session = Depends(get_db)):
+async def get_company_map(refresh: bool = Query(False), db: Session = Depends(get_db)):
     contacts = (
         db.query(models.Contact)
         .options(joinedload(models.Contact.company))
@@ -258,10 +339,34 @@ def get_company_map(refresh: bool = Query(False), db: Session = Depends(get_db))
             entry["addresses"][address_key] = entry["addresses"].get(address_key, 0) + 1
 
     results = []
+    company_count = len(company_entries)
+    geocode_success = 0
+    geocode_fail = 0
+    company_items = []
+
     for entry in company_entries.values():
         company = entry["company"]
         count = entry["count"]
         addresses = entry["addresses"]
+        needs_commit = False
+
+        selected_postal = (company.postal_code or "").strip()
+        selected_address = (company.address or "").strip()
+        if addresses:
+            best_postal, best_address = _select_best_address(addresses)
+            if best_postal or best_address:
+                selected_postal = best_postal or selected_postal
+                selected_address = best_address or selected_address
+            if (
+                (best_postal and best_postal != (company.postal_code or "").strip())
+                or (best_address and best_address != (company.address or "").strip())
+                or (refresh and (best_postal or best_address))
+            ):
+                if selected_postal:
+                    company.postal_code = selected_postal
+                if selected_address:
+                    company.address = selected_address
+                needs_commit = True
 
         geocoded_at = company.geocoded_at
         if isinstance(geocoded_at, str):
@@ -282,64 +387,185 @@ def get_company_map(refresh: bool = Query(False), db: Session = Depends(get_db))
             elif (datetime.utcnow() - geocoded_at).days >= 7:
                 should_retry = True
 
-        if should_retry:
-            address_key = max(addresses.items(), key=lambda item: item[1])[0] if addresses else None
-            if address_key:
-                postal_code, address = address_key
-                expected_prefecture = _detect_prefecture(address)
-                candidates = []
-                query_parts = []
-                if address:
-                    candidates.append(address)
-                if postal_code:
-                    query_parts.append(postal_code)
-                if address:
-                    query_parts.append(address)
-                if query_parts:
-                    combined = " ".join(query_parts)
-                    if combined not in candidates:
-                        candidates.append(combined)
-                if postal_code and postal_code not in candidates:
-                    candidates.append(postal_code)
+        company_items.append(
+            {
+                "company": company,
+                "count": count,
+                "selected_postal": selected_postal,
+                "selected_address": selected_address,
+                "needs_commit": needs_commit,
+                "should_retry": should_retry,
+                "task_index": None,
+            }
+        )
 
-                result = None
-                if postal_code:
-                    try:
-                        result = _geocode_postal_code(postal_code, expected_prefecture)
-                    except Exception:
-                        result = None
-                    time.sleep(0.6)
-                for candidate in candidates:
-                    if result:
-                        break
-                    try:
-                        result = _geocode_japan(candidate, expected_prefecture)
-                    except Exception:
-                        result = None
-                    time.sleep(1.1)
-                if result:
-                    lat, lon = result
-                    company.latitude = lat
-                    company.longitude = lon
-                    company.geocoded_at = datetime.utcnow()
-                else:
-                    if refresh:
-                        company.latitude = None
-                        company.longitude = None
-                        company.geocoded_at = datetime.utcnow()
-                    elif company.id != self_company_id:
-                        company.geocoded_at = datetime.utcnow()
-                db.add(company)
-                db.commit()
+    tasks = []
+    for item in company_items:
+        if not item["should_retry"]:
+            continue
+        company = item["company"]
+        if refresh:
+            company.latitude = None
+            company.longitude = None
+        address = item["selected_address"]
+        postal_code = item["selected_postal"]
+        if not address and not postal_code:
+            item["task_index"] = None
+            continue
+        tasks.append(_async_geocode(address, postal_code))
+        item["task_index"] = len(tasks) - 1
 
+    async_results = []
+    if tasks:
+        async_results = await asyncio.gather(*tasks)
+
+    for item in company_items:
+        company = item["company"]
+        count = item["count"]
+        selected_postal = item["selected_postal"]
+        selected_address = item["selected_address"]
+        needs_commit = item["needs_commit"]
+        used_address = ""
+        zip_address = ""
+        result = None
+
+        if item["should_retry"]:
+            task_index = item["task_index"]
+            if task_index is not None:
+                result, used_address, zip_address = async_results[task_index]
+            if result:
+                lat, lon = result
+                company.latitude = lat
+                company.longitude = lon
+                company.geocoded_at = datetime.utcnow()
+                company.geocode_note = None
+                needs_commit = True
+                geocode_success += 1
+                logger.info(
+                    "[geocode success] %s lat=%s lon=%s query=%s",
+                    company.name,
+                    lat,
+                    lon,
+                    used_address or "",
+                )
+            else:
+                if refresh or company.latitude is None or company.longitude is None:
+                    company.latitude = None
+                    company.longitude = None
+                company.geocoded_at = datetime.utcnow()
+                company.geocode_note = "geocode_failed"
+                needs_commit = True
+                geocode_fail += 1
+                failed_address = used_address or selected_address or zip_address or ""
+                logger.warning(
+                    "[geocode failed] %s address=%s postal=%s",
+                    company.name,
+                    failed_address,
+                    selected_postal,
+                )
+
+            if zip_address and not company.address:
+                company.address = zip_address
+                needs_commit = True
+            if selected_postal and not company.postal_code:
+                company.postal_code = selected_postal
+                needs_commit = True
+
+        if needs_commit:
+            db.add(company)
+            db.commit()
+
+        display_address = (company.address or selected_address).strip()
+        if not display_address and selected_postal:
+            display_address = selected_postal
+        city = _extract_city(display_address)
+        if not city and selected_address:
+            city = _extract_city(selected_address)
         results.append(
             {
+                "company_id": company.id,
                 "name": company.name,
                 "count": count,
                 "lat": company.latitude,
                 "lon": company.longitude,
                 "is_self": company.id == self_company_id,
+                "postal_code": company.postal_code,
+                "address": display_address,
+                "city": city,
             }
         )
 
+    progress_success = sum(
+        1 for item in company_items if item["company"].latitude is not None and item["company"].longitude is not None
+    )
+    progress_total = company_count
+    for item in results:
+        item["geocode_progress"] = {"success": progress_success, "total": progress_total}
+
+    logger.info(
+        "[geocode summary] company=%s success=%s fail=%s",
+        company_count,
+        geocode_success,
+        geocode_fail,
+    )
     return results
+
+
+@router.get("/company-map/diagnostics")
+def get_company_map_diagnostics(db: Session = Depends(get_db)):
+    contacts = (
+        db.query(models.Contact)
+        .options(joinedload(models.Contact.company))
+        .all()
+    )
+    company_entries = {}
+    for contact in contacts:
+        if not contact.company:
+            continue
+        entry = company_entries.setdefault(
+            contact.company.id,
+            {
+                "company": contact.company,
+                "addresses": {},
+            },
+        )
+        address_key = (
+            (contact.postal_code or "").strip(),
+            (contact.address or "").strip(),
+        )
+        if address_key != ("", ""):
+            entry["addresses"][address_key] = entry["addresses"].get(address_key, 0) + 1
+
+    missing = []
+    invalidated = []
+    short_address = []
+    for entry in company_entries.values():
+        company = entry["company"]
+        best_postal, best_address = _select_best_address(entry["addresses"])
+        postal = best_postal or (company.postal_code or "").strip()
+        address = best_address or (company.address or "").strip()
+        if not postal and not address:
+            missing.append({"company_id": company.id, "name": company.name})
+            continue
+        if address and not _extract_city(address):
+            short_address.append({"company_id": company.id, "name": company.name})
+        if company.latitude is None and company.longitude is None and company.geocoded_at is not None:
+            note = (company.geocode_note or "").strip()
+            if note == "prefecture_mismatch":
+                reason = "都道府県不一致"
+            elif note == "postal_pref_mismatch":
+                reason = "郵便番号と都道府県不一致"
+            elif note == "geocode_failed":
+                reason = "ジオコーディング失敗"
+            else:
+                reason = "不明"
+            invalidated.append({"company_id": company.id, "name": company.name, "reason": reason})
+
+    missing.sort(key=lambda item: item["name"])
+    invalidated.sort(key=lambda item: item["name"])
+    short_address.sort(key=lambda item: item["name"])
+    return {
+        "missing_addresses": missing,
+        "invalidated_coords": invalidated,
+        "short_addresses": short_address,
+    }

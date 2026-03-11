@@ -34,9 +34,12 @@ class Company(Base):
     __tablename__ = "companies"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    postal_code = Column(String, nullable=True)
+    address = Column(Text, nullable=True)
     latitude = Column(Float, nullable=True)
     longitude = Column(Float, nullable=True)
     geocoded_at = Column(DateTime, nullable=True)
+    geocode_note = Column(Text, nullable=True)
 
     contacts = relationship("Contact", back_populates="company")
 

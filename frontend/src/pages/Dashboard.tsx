@@ -1,5 +1,7 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import axios from 'axios';
+import LedJapanMap, { CompanyMapPoint } from '../components/LedJapanMap';
+import GeocodeProgress from '../components/GeocodeProgress';
 
 type Summary = {
   counts: {
@@ -16,93 +18,12 @@ type Summary = {
   };
 };
 
-type CompanyMapPoint = {
-  name: string;
-  count: number;
-  lat: number | null;
-  lon: number | null;
-  is_self: boolean;
+type CompanyDiagnostics = {
+  missing_addresses: { company_id: number; name: string }[];
+  invalidated_coords: { company_id: number; name: string; reason: string }[];
+  short_addresses: { company_id: number; name: string }[];
 };
 
-type GeoJSONGeometry = {
-  type: string;
-  coordinates: any;
-};
-
-type GeoJSONFeature = {
-  type: string;
-  geometry: GeoJSONGeometry;
-};
-
-type GeoJSONData = {
-  type: string;
-  features: GeoJSONFeature[];
-};
-
-const MAP_WIDTH = 900;
-const MAP_HEIGHT = 520;
-const MAP_PAD = 16;
-const MAP_SCALE_MIN = 0.6;
-const MAP_SCALE_MAX = 3.0;
-
-const collectCoords = (coords: any, acc: [number, number][]) => {
-  if (!coords) return;
-  if (typeof coords[0] === 'number' && typeof coords[1] === 'number') {
-    acc.push([coords[0], coords[1]]);
-    return;
-  }
-  if (Array.isArray(coords)) {
-    coords.forEach(item => collectCoords(item, acc));
-  }
-};
-
-const computeBounds = (geojson: GeoJSONData) => {
-  const coords: [number, number][] = [];
-  geojson.features.forEach(feature => {
-    collectCoords(feature.geometry.coordinates, coords);
-  });
-  if (!coords.length) return null;
-  let minLon = Infinity;
-  let maxLon = -Infinity;
-  let minLat = Infinity;
-  let maxLat = -Infinity;
-  coords.forEach(([lon, lat]) => {
-    minLon = Math.min(minLon, lon);
-    maxLon = Math.max(maxLon, lon);
-    minLat = Math.min(minLat, lat);
-    maxLat = Math.max(maxLat, lat);
-  });
-  const lonSpan = maxLon - minLon || 1;
-  const latSpan = maxLat - minLat || 1;
-  const scale = Math.min((MAP_WIDTH - MAP_PAD * 2) / lonSpan, (MAP_HEIGHT - MAP_PAD * 2) / latSpan);
-  return { minLon, maxLon, minLat, maxLat, scale };
-};
-
-const buildPathFromRings = (
-  rings: number[][][],
-  project: (lon: number, lat: number) => { x: number; y: number },
-) => (
-  rings
-    .map(ring => ring.map(([lon, lat], index) => {
-      const { x, y } = project(lon, lat);
-      return `${index === 0 ? 'M' : 'L'}${x} ${y}`;
-    }).join(' ') + ' Z')
-    .join(' ')
-);
-
-const buildGeometryPath = (
-  geometry: GeoJSONGeometry,
-  project: (lon: number, lat: number) => { x: number; y: number },
-) => {
-  if (!geometry) return '';
-  if (geometry.type === 'Polygon') {
-    return buildPathFromRings(geometry.coordinates, project);
-  }
-  if (geometry.type === 'MultiPolygon') {
-    return geometry.coordinates.map((rings: number[][][]) => buildPathFromRings(rings, project)).join(' ');
-  }
-  return '';
-};
 
 const Dashboard: React.FC = () => {
   const [summary, setSummary] = useState<Summary>({
@@ -126,12 +47,8 @@ const Dashboard: React.FC = () => {
     meetings: false,
   });
   const [companyMap, setCompanyMap] = useState<CompanyMapPoint[]>([]);
-  const [geojson, setGeojson] = useState<GeoJSONData | null>(null);
   const [companyMapLoading, setCompanyMapLoading] = useState(false);
-  const [mapScale, setMapScale] = useState(1);
-  const [mapOffset, setMapOffset] = useState({ x: 0, y: 0 });
-  const isPanningRef = useRef(false);
-  const lastPointRef = useRef<{ x: number; y: number } | null>(null);
+  const [companyDiagnostics, setCompanyDiagnostics] = useState<CompanyDiagnostics | null>(null);
   const totalContacts = summary.counts.contacts || 1;
 
   useEffect(() => {
@@ -161,71 +78,21 @@ const Dashboard: React.FC = () => {
       .catch(() => setCompanyMap([]));
   }, []);
 
+  useEffect(() => {
+    axios.get<CompanyDiagnostics>('http://localhost:8000/stats/company-map/diagnostics')
+      .then(response => setCompanyDiagnostics(response.data))
+      .catch(() => setCompanyDiagnostics(null));
+  }, []);
+
   const refreshCompanyMap = () => {
     setCompanyMapLoading(true);
     axios.get<CompanyMapPoint[]>('http://localhost:8000/stats/company-map?refresh=1')
       .then(response => setCompanyMap(response.data))
       .catch(() => setCompanyMap([]))
       .finally(() => setCompanyMapLoading(false));
-  };
-
-  useEffect(() => {
-    fetch('/japan.geojson')
-      .then(response => response.json())
-      .then(data => setGeojson(data))
-      .catch(() => setGeojson(null));
-  }, []);
-
-  const mapConfig = React.useMemo(() => {
-    if (!geojson) return null;
-    const bounds = computeBounds(geojson);
-    if (!bounds) return null;
-    const project = (lon: number, lat: number) => ({
-      x: MAP_PAD + (lon - bounds.minLon) * bounds.scale,
-      y: MAP_PAD + (bounds.maxLat - lat) * bounds.scale,
-    });
-    const paths = geojson.features
-      .map(feature => buildGeometryPath(feature.geometry, project))
-      .filter(Boolean);
-    return { project, paths };
-  }, [geojson]);
-
-  const visiblePoints = companyMap.filter(point => point.lat != null && point.lon != null);
-  const selfPoint = visiblePoints.find(point => point.is_self) || null;
-
-  const zoomBy = (factor: number) => {
-    setMapScale(prev => Math.min(MAP_SCALE_MAX, Math.max(MAP_SCALE_MIN, prev * factor)));
-  };
-
-  const resetMapView = () => {
-    setMapScale(1);
-    setMapOffset({ x: 0, y: 0 });
-  };
-
-  const handleWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    const factor = event.deltaY < 0 ? 1.1 : 0.9;
-    zoomBy(factor);
-  };
-
-  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
-    (event.currentTarget as HTMLDivElement).setPointerCapture?.(event.pointerId);
-    isPanningRef.current = true;
-    lastPointRef.current = { x: event.clientX, y: event.clientY };
-  };
-
-  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
-    if (!isPanningRef.current || !lastPointRef.current) return;
-    const dx = event.clientX - lastPointRef.current.x;
-    const dy = event.clientY - lastPointRef.current.y;
-    setMapOffset(prev => ({ x: prev.x + dx, y: prev.y + dy }));
-    lastPointRef.current = { x: event.clientX, y: event.clientY };
-  };
-
-  const handlePointerUp = (event: React.PointerEvent<HTMLDivElement>) => {
-    (event.currentTarget as HTMLDivElement).releasePointerCapture?.(event.pointerId);
-    isPanningRef.current = false;
-    lastPointRef.current = null;
+    axios.get<CompanyDiagnostics>('http://localhost:8000/stats/company-map/diagnostics')
+      .then(response => setCompanyDiagnostics(response.data))
+      .catch(() => setCompanyDiagnostics(null));
   };
 
   return (
@@ -338,100 +205,49 @@ const Dashboard: React.FC = () => {
             {companyMapLoading ? '再取得中...' : '位置情報を再取得'}
           </button>
         </div>
-        {!mapConfig && (
-          <p className="text-sm text-gray-500">地図データを読み込み中...</p>
-        )}
-        {mapConfig && (
-          <>
-            <div className="flex items-center gap-2 mb-2">
-              <button
-                type="button"
-                onClick={() => zoomBy(1.2)}
-                className="text-xs text-gray-600 border rounded px-2 py-1 hover:bg-gray-100"
-              >
-                拡大
-              </button>
-              <button
-                type="button"
-                onClick={() => zoomBy(0.85)}
-                className="text-xs text-gray-600 border rounded px-2 py-1 hover:bg-gray-100"
-              >
-                縮小
-              </button>
-              <button
-                type="button"
-                onClick={resetMapView}
-                className="text-xs text-gray-600 border rounded px-2 py-1 hover:bg-gray-100"
-              >
-                リセット
-              </button>
-              <span className="text-xs text-gray-400">ホイール/ドラッグで操作</span>
-            </div>
-            <div
-              className="w-full overflow-hidden border rounded"
-              onWheel={handleWheel}
-              onPointerDown={handlePointerDown}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              onPointerLeave={handlePointerUp}
-              style={{ touchAction: 'none', cursor: isPanningRef.current ? 'grabbing' : 'grab' }}
-            >
-              <svg viewBox={`0 0 ${MAP_WIDTH} ${MAP_HEIGHT}`} className="w-full h-auto">
-                <g transform={`translate(${mapOffset.x} ${mapOffset.y}) scale(${mapScale})`}>
-                  <g>
-                    {mapConfig.paths.map((d, index) => (
-                      <path key={`jp-${index}`} d={d} fill="#f8fafc" stroke="#cbd5f5" strokeWidth="0.7" />
-                    ))}
-                  </g>
-                  {selfPoint && visiblePoints.filter(point => !point.is_self).map(point => {
-                    const start = mapConfig.project(selfPoint.lon as number, selfPoint.lat as number);
-                    const end = mapConfig.project(point.lon as number, point.lat as number);
-                    return (
-                      <line
-                        key={`line-${point.name}`}
-                        x1={start.x}
-                        y1={start.y}
-                        x2={end.x}
-                        y2={end.y}
-                        stroke="#f87171"
-                        strokeOpacity="0.35"
-                        strokeWidth="1"
-                      />
-                    );
-                  })}
-                  {visiblePoints.map(point => {
-                    const { x, y } = mapConfig.project(point.lon as number, point.lat as number);
-                    const radius = Math.min(12, Math.max(4, 3 + Math.sqrt(point.count)));
-                    const fill = point.is_self ? '#ef4444' : '#2563eb';
-                    const labelOffset = radius + 4;
-                    return (
-                      <g key={`pt-${point.name}`}>
-                        <circle cx={x} cy={y} r={point.is_self ? radius + 2 : radius} fill={fill} opacity="0.85">
-                          <title>{`${point.name} (${point.count})`}</title>
-                        </circle>
-                        <text
-                          x={x + labelOffset}
-                          y={y - labelOffset}
-                          fontSize={10}
-                          fill="#0f172a"
-                          stroke="#ffffff"
-                          strokeWidth={2}
-                          paintOrder="stroke"
-                          dominantBaseline="middle"
-                        >
-                          {point.name}
-                        </text>
-                      </g>
-                    );
-                  })}
-                </g>
-              </svg>
-            </div>
-            {visiblePoints.length === 0 && (
-              <p className="mt-2 text-sm text-gray-500">会社の位置情報がまだありません。</p>
+        <div className="w-full overflow-hidden border rounded bg-slate-950">
+          <LedJapanMap points={companyMap} loading={companyMapLoading} />
+        </div>
+        <GeocodeProgress companies={companyMap} />
+        {companyDiagnostics && (
+          <div className="mt-4 space-y-3 text-sm text-gray-600">
+            {companyDiagnostics.invalidated_coords.length > 0 && (
+              <div>
+                <p className="font-semibold text-gray-700">誤座標（無効化）</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {companyDiagnostics.invalidated_coords.map(item => (
+                    <span key={item.company_id} className="px-2 py-1 rounded bg-rose-50 text-rose-700">
+                      {item.name}（{item.reason}）
+                    </span>
+                  ))}
+                </div>
+              </div>
             )}
-            <p className="mt-2 text-xs text-gray-500">※会社住所（郵便番号/住所）を元に自動配置しています。</p>
-          </>
+            {companyDiagnostics.short_addresses.length > 0 && (
+              <div>
+                <p className="font-semibold text-gray-700">住所が短すぎる（市区町村未満）</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {companyDiagnostics.short_addresses.map(item => (
+                    <span key={item.company_id} className="px-2 py-1 rounded bg-slate-100 text-slate-700">
+                      {item.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {companyDiagnostics.missing_addresses.length > 0 && (
+              <div>
+                <p className="font-semibold text-gray-700">住所未登録の会社</p>
+                <div className="mt-1 flex flex-wrap gap-2">
+                  {companyDiagnostics.missing_addresses.map(item => (
+                    <span key={item.company_id} className="px-2 py-1 rounded bg-amber-50 text-amber-700">
+                      {item.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         )}
       </div>
     </div>

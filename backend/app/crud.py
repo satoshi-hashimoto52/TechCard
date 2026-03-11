@@ -1,4 +1,4 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from . import models, schemas
 from typing import List
 
@@ -42,10 +42,21 @@ def create_contact(db: Session, contact: schemas.ContactCreate) -> models.Contac
     return db_contact
 
 def get_contact(db: Session, contact_id: int) -> models.Contact:
-    return db.query(models.Contact).filter(models.Contact.id == contact_id).first()
+    return (
+        db.query(models.Contact)
+        .options(joinedload(models.Contact.company))
+        .filter(models.Contact.id == contact_id)
+        .first()
+    )
 
 def get_contacts(db: Session, skip: int = 0, limit: int = 100) -> List[models.Contact]:
-    return db.query(models.Contact).offset(skip).limit(limit).all()
+    return (
+        db.query(models.Contact)
+        .options(joinedload(models.Contact.company))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 def update_contact(db: Session, contact_id: int, contact: schemas.ContactBase) -> models.Contact:
     db_contact = db.query(models.Contact).filter(models.Contact.id == contact_id).first()
