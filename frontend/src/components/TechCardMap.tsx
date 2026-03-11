@@ -137,7 +137,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             id: 'region-outline',
             type: 'line',
             source: 'regions',
-            maxzoom: 6,
+            maxzoom: 5,
             paint: {
               'line-width': 2,
               'line-color': [
@@ -169,7 +169,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             id: 'region-label',
             type: 'symbol',
             source: 'regions',
-            maxzoom: 6,
+            maxzoom: 5,
             layout: {
               'text-field': ['get', 'region'],
               'text-size': 14,
@@ -305,7 +305,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
           <Layer
             id="companies-circle"
             type="circle"
-            minzoom={6}
+            minzoom={7}
             paint={{
               'circle-radius': 4,
               'circle-color': '#00ffff',
@@ -315,7 +315,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
           />
         </Source>
 
-        {viewState.zoom >= 6 && viewState.zoom < 8 &&
+        {viewState.zoom >= 5 && viewState.zoom < 7 &&
           clusters.map((clusterItem: any) => {
             const [longitude, latitude] = clusterItem.geometry.coordinates;
             if (clusterItem.properties.cluster) {
@@ -336,7 +336,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             return null;
           })}
 
-        {viewState.zoom >= 8 &&
+        {viewState.zoom >= 7 &&
           points.map((company, index) => (
             <Marker
               key={`${company.company_id}-${index}`}

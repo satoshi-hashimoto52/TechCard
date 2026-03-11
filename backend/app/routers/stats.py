@@ -319,6 +319,7 @@ async def get_company_map(refresh: bool = Query(False), db: Session = Depends(ge
     self_company_id = self_contact.company_id if self_contact else None
 
     company_entries = {}
+    address_groups: dict[tuple[str, str], dict] = {}
     for contact in contacts:
         if not contact.company:
             continue
@@ -331,14 +332,17 @@ async def get_company_map(refresh: bool = Query(False), db: Session = Depends(ge
             },
         )
         entry["count"] += 1
-        address_key = (
-            (contact.postal_code or "").strip(),
-            (contact.address or "").strip(),
-        )
+        postal = (contact.postal_code or "").strip()
+        address = (contact.address or "").strip()
+        address_key = (postal, address)
         if address_key != ("", ""):
             entry["addresses"][address_key] = entry["addresses"].get(address_key, 0) + 1
+            group = address_groups.setdefault(
+                address_key,
+                {"postal_code": postal, "address": address, "companies": set()},
+            )
+            group["companies"].add(contact.company.id)
 
-    results = []
     company_count = len(company_entries)
     geocode_success = 0
     geocode_fail = 0
@@ -475,25 +479,93 @@ async def get_company_map(refresh: bool = Query(False), db: Session = Depends(ge
             db.add(company)
             db.commit()
 
+    address_results: dict[tuple[str, str], tuple[float, float]] = {}
+    if not refresh:
+        for item in company_items:
+            company = item["company"]
+            cached_postal = (company.postal_code or "").strip()
+            cached_address = (company.address or "").strip()
+            if cached_postal or cached_address:
+                if company.latitude is not None and company.longitude is not None:
+                    address_results[(cached_postal, cached_address)] = (company.latitude, company.longitude)
+
+    address_tasks = []
+    address_task_index: dict[tuple[str, str], int] = {}
+    for address_key in address_groups.keys():
+        postal, address = address_key
+        if not postal and not address:
+            continue
+        if not refresh and address_key in address_results:
+            continue
+        address_tasks.append(_async_geocode(address, postal))
+        address_task_index[address_key] = len(address_tasks) - 1
+
+    if address_tasks:
+        async_address_results = await asyncio.gather(*address_tasks)
+        for address_key, task_index in address_task_index.items():
+            result, used_address, zip_address = async_address_results[task_index]
+            if result:
+                lat, lon = result
+                address_results[address_key] = (lat, lon)
+                geocode_success += 1
+            else:
+                geocode_fail += 1
+                failed_address = used_address or address_key[1] or zip_address or ""
+                logger.warning(
+                    "[geocode failed] address=%s postal=%s",
+                    failed_address,
+                    address_key[0],
+                )
+
+    results = []
+    locations_by_company: dict[int, list[dict]] = {}
+    for entry in company_entries.values():
+        company = entry["company"]
+        for (postal, address), address_count in entry["addresses"].items():
+            latlon = address_results.get((postal, address))
+            if not latlon:
+                continue
+            lat, lon = latlon
+            display_address = address or postal or ""
+            city = _extract_city(display_address)
+            locations_by_company.setdefault(company.id, []).append(
+                {
+                    "lat": lat,
+                    "lon": lon,
+                    "address": display_address,
+                    "postal_code": postal,
+                    "city": city,
+                    "count": address_count,
+                }
+            )
+
+    for item in company_items:
+        company = item["company"]
+        count = item["count"]
+        selected_postal = item["selected_postal"]
+        selected_address = item["selected_address"]
         display_address = (company.address or selected_address).strip()
         if not display_address and selected_postal:
             display_address = selected_postal
         city = _extract_city(display_address)
         if not city and selected_address:
             city = _extract_city(selected_address)
-        results.append(
-            {
-                "company_id": company.id,
-                "name": company.name,
-                "count": count,
-                "lat": company.latitude,
-                "lon": company.longitude,
-                "is_self": company.id == self_company_id,
-                "postal_code": company.postal_code,
-                "address": display_address,
-                "city": city,
-            }
-        )
+        payload = {
+            "company_id": company.id,
+            "company_name": company.name,
+            "name": company.name,
+            "count": count,
+            "lat": company.latitude,
+            "lon": company.longitude,
+            "is_self": company.id == self_company_id,
+            "postal_code": company.postal_code,
+            "address": display_address,
+            "city": city,
+        }
+        locations = locations_by_company.get(company.id) or []
+        if locations:
+            payload["locations"] = locations
+        results.append(payload)
 
     progress_success = sum(
         1 for item in company_items if item["company"].latitude is not None and item["company"].longitude is not None
