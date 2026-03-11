@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import axios from 'axios';
-import LedJapanMap, { CompanyMapPoint } from '../components/LedJapanMap';
+import TechCardMap from '../components/TechCardMap';
+import { CompanyMapPoint } from '../components/LedJapanMap';
 import GeocodeProgress from '../components/GeocodeProgress';
 
 type Summary = {
@@ -72,10 +73,24 @@ const Dashboard: React.FC = () => {
       });
   }, []);
 
-  useEffect(() => {
-    axios.get<CompanyMapPoint[]>('http://localhost:8000/stats/company-map')
+  const fetchCompanyMap = (withRefresh = false) => {
+    const url = withRefresh
+      ? 'http://localhost:8000/stats/company-map?refresh=1'
+      : 'http://localhost:8000/stats/company-map';
+    return axios.get<CompanyMapPoint[]>(url)
       .then(response => setCompanyMap(response.data))
-      .catch(() => setCompanyMap([]));
+      .catch(err => {
+        console.warn('company-map load failed', err);
+        setCompanyMap([]);
+      });
+  };
+
+  useEffect(() => {
+    fetchCompanyMap();
+    const timer = window.setInterval(() => {
+      fetchCompanyMap();
+    }, 3000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -86,9 +101,7 @@ const Dashboard: React.FC = () => {
 
   const refreshCompanyMap = () => {
     setCompanyMapLoading(true);
-    axios.get<CompanyMapPoint[]>('http://localhost:8000/stats/company-map?refresh=1')
-      .then(response => setCompanyMap(response.data))
-      .catch(() => setCompanyMap([]))
+    fetchCompanyMap(true)
       .finally(() => setCompanyMapLoading(false));
     axios.get<CompanyDiagnostics>('http://localhost:8000/stats/company-map/diagnostics')
       .then(response => setCompanyDiagnostics(response.data))
@@ -96,7 +109,7 @@ const Dashboard: React.FC = () => {
   };
 
   return (
-    <div className="p-6">
+    <div className="p-6 min-h-screen flex flex-col">
       <h1 className="text-2xl font-bold mb-4">ダッシュボード</h1>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white p-4 rounded-lg shadow">
@@ -193,7 +206,7 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
       </div>
-      <div className="mt-8 bg-white p-4 rounded-lg shadow">
+      <div className="mt-8 bg-white p-4 rounded-lg shadow flex flex-col flex-1 min-h-[520px]">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">会社分布（日本地図）</h2>
           <button
@@ -205,8 +218,8 @@ const Dashboard: React.FC = () => {
             {companyMapLoading ? '再取得中...' : '位置情報を再取得'}
           </button>
         </div>
-        <div className="w-full overflow-hidden border rounded bg-slate-950">
-          <LedJapanMap points={companyMap} loading={companyMapLoading} />
+        <div className="w-full flex-1 overflow-hidden border rounded bg-slate-950 min-h-[360px]">
+          <TechCardMap companies={companyMap} loading={companyMapLoading} />
         </div>
         <GeocodeProgress companies={companyMap} />
         {companyDiagnostics && (

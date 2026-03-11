@@ -299,3 +299,133 @@
 .geocode-progress__status.geocode-progress--pending {
   color: #64748b;
 }
+
+.techcard-map {
+  position: relative;
+  background: #05070c;
+  height: 100%;
+  min-height: 360px;
+}
+
+.techcard-map__canvas {
+  position: absolute;
+  inset: 0;
+}
+
+.led-marker-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: #7df9ff;
+  text-shadow: 0 0 6px rgba(0, 255, 255, 0.8);
+}
+
+.led-marker-wrap--self {
+  color: #ff7a92;
+  text-shadow: 0 0 6px rgba(255, 122, 146, 0.8);
+}
+
+.led-marker {
+  position: relative;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #00ffff;
+  box-shadow: 0 0 6px #00ffff, 0 0 12px #00ffff, 0 0 20px #00ffff;
+  animation: ledPulse 2s infinite;
+}
+
+.led-marker-wrap--self .led-marker {
+  background: #ff4d6d;
+  box-shadow: 0 0 6px #ff4d6d, 0 0 12px #ff4d6d, 0 0 20px #ff4d6d;
+}
+
+.led-marker__core {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+}
+
+.led-marker__pulse {
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 2px solid rgba(0, 255, 255, 0.6);
+  animation: ledPulse 2s infinite;
+}
+
+.led-marker-wrap--self .led-marker__pulse {
+  border-color: rgba(255, 77, 109, 0.7);
+}
+
+.led-marker__label {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.led-marker__name {
+  font-weight: 600;
+}
+
+.led-marker__city {
+  font-size: 10px;
+  color: rgba(125, 249, 255, 0.85);
+}
+
+.cluster-marker {
+  background: #0ea5e9;
+  color: #ffffff;
+  border-radius: 9999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(0, 255, 255, 0.5);
+}
+
+.techcard-popup {
+  font-size: 12px;
+  color: #e2e8f0;
+  background: rgba(15, 23, 42, 0.9);
+}
+
+.techcard-popup__name {
+  font-weight: 600;
+  margin-bottom: 2px;
+  color: #7df9ff;
+}
+
+.techcard-popup__address {
+  color: #cbd5f5;
+}
+
+.geocode-progress__bar {
+  width: 100%;
+  background: #1e293b;
+  height: 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+.geocode-progress__bar-fill {
+  background: #22d3ee;
+  height: 100%;
+  transition: width 0.3s ease;
+}
+
+.geocode-progress__bar-mini {
+  position: relative;
+  height: 8px;
+  border-radius: 9999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}

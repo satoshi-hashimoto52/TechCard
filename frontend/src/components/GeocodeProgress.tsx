@@ -27,17 +27,26 @@ const GeocodeProgress: React.FC<GeocodeProgressProps> = ({ companies }) => {
     () => [...companies].sort((a, b) => a.name.localeCompare(b.name, 'ja')),
     [companies],
   );
-  const total = sortedCompanies.length || 1;
-  const successCount = sortedCompanies.filter(company => company.lat != null && company.lon != null).length;
-  const overall = Math.round((successCount / total) * 100);
+  const progress = companies[0]?.geocode_progress;
+  const derivedSuccess = companies.filter(company => company.lat != null && company.lon != null).length;
+  const total = progress?.total ?? companies.length;
+  const success = progress?.success ?? derivedSuccess;
+  const percent = total > 0 ? Math.round((success / total) * 100) : 0;
+
+  if (total > 0 && success >= total) {
+    return null;
+  }
 
   return (
     <div className="geocode-progress">
       <div className="geocode-progress__header">
-        <span>会社ごとの取得進捗</span>
+        <span>ジオコーディング進捗</span>
         <span className="geocode-progress__summary">
-          {successCount}/{sortedCompanies.length} ({overall}%)
+          {success}/{total} ({percent}%)
         </span>
+      </div>
+      <div className="geocode-progress__bar">
+        <div className="geocode-progress__bar-fill" style={{ width: `${percent}%` }} />
       </div>
       <div className="geocode-progress__list">
         {sortedCompanies.map(company => {
@@ -47,7 +56,7 @@ const GeocodeProgress: React.FC<GeocodeProgressProps> = ({ companies }) => {
               <div className="geocode-progress__name" title={company.name}>
                 {company.name}
               </div>
-              <div className="geocode-progress__bar">
+              <div className="geocode-progress__bar-mini">
                 <div
                   className={`geocode-progress__fill ${status.className}`}
                   style={{ width: `${status.percent}%` }}

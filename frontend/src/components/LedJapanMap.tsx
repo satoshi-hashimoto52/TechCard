@@ -15,6 +15,10 @@ export type CompanyMapPoint = {
   postal_code?: string | null;
   address?: string | null;
   city?: string | null;
+  geocode_progress?: {
+    success: number;
+    total: number;
+  };
 };
 
 type LedJapanMapProps = {
