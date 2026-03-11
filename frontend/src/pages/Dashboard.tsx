@@ -206,7 +206,7 @@ const Dashboard: React.FC = () => {
           </div>
         </div>
       </div>
-      <div className="mt-8 bg-white p-4 rounded-lg shadow flex flex-col flex-1 min-h-[520px]">
+      <div className="mt-8 bg-white p-4 rounded-lg shadow flex flex-col">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">会社分布（日本地図）</h2>
           <button
@@ -218,7 +218,7 @@ const Dashboard: React.FC = () => {
             {companyMapLoading ? '再取得中...' : '位置情報を再取得'}
           </button>
         </div>
-        <div className="w-full flex-1 overflow-hidden border rounded bg-slate-950 min-h-[360px]">
+        <div className="w-full overflow-hidden border rounded bg-slate-950">
           <TechCardMap companies={companyMap} loading={companyMapLoading} />
         </div>
         <GeocodeProgress companies={companyMap} />

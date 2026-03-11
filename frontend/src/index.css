@@ -303,8 +303,8 @@
 .techcard-map {
   position: relative;
   background: #05070c;
-  height: 100%;
-  min-height: 360px;
+  height: 420px;
+  width: 100%;
 }
 
 .techcard-map__canvas {
