@@ -6,7 +6,6 @@ import Supercluster from 'supercluster';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import LedMarker from './LedMarker';
 import CompanyCluster from './CompanyCluster';
-import HeatmapLayer from './HeatmapLayer';
 import GeocodeProgress from './GeocodeProgress';
 import { CompanyMapPoint } from './LedJapanMap';
 
@@ -15,6 +14,7 @@ const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.j
 const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }> = ({ companies, loading }) => {
   const mapRef = useRef<MapRef | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const mapLoadedRef = useRef(false);
   const navigate = useNavigate();
   const [hovered, setHovered] = useState<CompanyMapPoint | null>(null);
   const [viewState, setViewState] = useState({ longitude: 138, latitude: 37, zoom: 5 });
@@ -70,6 +70,21 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     [points],
   );
 
+  const heatFeatures = useMemo(
+    () =>
+      points.map(point => ({
+        type: 'Feature' as const,
+        properties: {
+          weight: point.count ?? 1,
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [point.lon as number, point.lat as number],
+        },
+      })),
+    [points],
+  );
+
   const cluster = useMemo(() => {
     const instance = new Supercluster({ radius: 60, maxZoom: 16 });
     instance.load(geojson.features as any);
@@ -107,12 +122,114 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       console.log('Map loaded');
       const map = event?.target;
       if (map) {
+        mapLoadedRef.current = true;
         map.on('error', (err: any) => {
           console.error('map error', err?.error || err);
         });
+        if (!map.getSource('regions')) {
+          map.addSource('regions', {
+            type: 'geojson',
+            data: '/japan_regions.geojson',
+          });
+        }
+        if (!map.getLayer('region-outline')) {
+          map.addLayer({
+            id: 'region-outline',
+            type: 'line',
+            source: 'regions',
+            maxzoom: 6,
+            paint: {
+              'line-width': 2,
+              'line-color': [
+                'match',
+                ['get', 'region'],
+                'Hokkaido',
+                '#60a5fa',
+                'Tohoku',
+                '#34d399',
+                'Kanto',
+                '#fbbf24',
+                'Chubu',
+                '#f97316',
+                'Kinki',
+                '#f43f5e',
+                'Chugoku',
+                '#a78bfa',
+                'Shikoku',
+                '#22d3ee',
+                'Kyushu',
+                '#84cc16',
+                '#64748b',
+              ],
+            },
+          });
+        }
+        if (!map.getLayer('region-label')) {
+          map.addLayer({
+            id: 'region-label',
+            type: 'symbol',
+            source: 'regions',
+            maxzoom: 6,
+            layout: {
+              'text-field': ['get', 'region'],
+              'text-size': 14,
+            },
+            paint: {
+              'text-color': '#94a3b8',
+              'text-halo-color': '#0f172a',
+              'text-halo-width': 1,
+            },
+          });
+        }
+        if (!map.getSource('contacts')) {
+          map.addSource('contacts', {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: heatFeatures,
+            },
+          });
+        }
+        if (!map.getLayer('contact-heat')) {
+          map.addLayer(
+            {
+              id: 'contact-heat',
+              type: 'heatmap',
+              source: 'contacts',
+              minzoom: 9,
+              paint: {
+                'heatmap-weight': [
+                  'interpolate',
+                  ['linear'],
+                  ['get', 'weight'],
+                  0,
+                  0,
+                  10,
+                  1,
+                ],
+                'heatmap-intensity': 1,
+                'heatmap-radius': 22,
+                'heatmap-color': [
+                  'interpolate',
+                  ['linear'],
+                  ['heatmap-density'],
+                  0,
+                  '#1e3a8a',
+                  0.3,
+                  '#06b6d4',
+                  0.6,
+                  '#facc15',
+                  1,
+                  '#ef4444',
+                ],
+              },
+            },
+            'clusters',
+          );
+        }
       }
     },
-    [updateBounds],
+    [updateBounds, heatFeatures],
   );
 
   useEffect(() => {
@@ -131,6 +248,17 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     console.log('companies', companies);
     console.log('points', points);
   }, [companies, points]);
+
+  useEffect(() => {
+    const map = mapRef.current?.getMap();
+    if (!map || !mapLoadedRef.current) return;
+    const source = map.getSource('contacts') as maplibregl.GeoJSONSource | undefined;
+    if (!source) return;
+    source.setData({
+      type: 'FeatureCollection',
+      features: heatFeatures,
+    });
+  }, [heatFeatures]);
 
   const handleHover = useCallback((event: any) => {
     const features = event.features as any[] | undefined;
@@ -185,10 +313,9 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               'circle-opacity': 0.85,
             }}
           />
-          <HeatmapLayer sourceId="companies" />
         </Source>
 
-        {viewState.zoom < 6 &&
+        {viewState.zoom >= 6 && viewState.zoom < 8 &&
           clusters.map((clusterItem: any) => {
             const [longitude, latitude] = clusterItem.geometry.coordinates;
             if (clusterItem.properties.cluster) {
@@ -209,7 +336,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             return null;
           })}
 
-        {viewState.zoom >= 6 &&
+        {viewState.zoom >= 8 &&
           points.map((company, index) => (
             <Marker
               key={`${company.company_id}-${index}`}
