@@ -46,6 +46,8 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
   const transformerRef = useRef<any>(null);
   const [selectedField, setSelectedField] = useState<RoiField | null>(null);
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
+  const [isPanning, setIsPanning] = useState(false);
+  const [lastPanPos, setLastPanPos] = useState<{ x: number; y: number } | null>(null);
   const [roiImage] = useImage(imageUrl);
 
   useEffect(() => {
@@ -82,6 +84,50 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
 
   const scaleX = stageSize.width / baseWidth;
   const scaleY = stageSize.height / baseHeight;
+
+  const shiftAll = (dx: number, dy: number) => {
+    onChange(
+      (Object.keys(template) as RoiField[]).reduce((acc, field) => {
+        const rect = template[field];
+        const nextX = Math.min(Math.max(0, rect.x + dx), baseWidth - rect.w);
+        const nextY = Math.min(Math.max(0, rect.y + dy), baseHeight - rect.h);
+        acc[field] = { ...rect, x: nextX, y: nextY };
+        return acc;
+      }, {} as RoiTemplate),
+    );
+  };
+
+  const handleStagePointerDown = (event: any) => {
+    const stage = event.target?.getStage?.();
+    if (!stage) return;
+    const target = event.target;
+    if (target === stage || target.name?.() === 'roi-image') {
+      const pos = stage.getPointerPosition();
+      if (!pos) return;
+      setSelectedField(null);
+      setIsPanning(true);
+      setLastPanPos({ x: pos.x, y: pos.y });
+    }
+  };
+
+  const handleStagePointerMove = (event: any) => {
+    if (!isPanning) return;
+    const stage = event.target?.getStage?.();
+    if (!stage || !lastPanPos) return;
+    const pos = stage.getPointerPosition();
+    if (!pos) return;
+    const dx = (pos.x - lastPanPos.x) / scaleX;
+    const dy = (pos.y - lastPanPos.y) / scaleY;
+    if (Math.abs(dx) > 0 || Math.abs(dy) > 0) {
+      shiftAll(dx, dy);
+    }
+    setLastPanPos({ x: pos.x, y: pos.y });
+  };
+
+  const handleStagePointerUp = () => {
+    setIsPanning(false);
+    setLastPanPos(null);
+  };
 
   const updateTemplate = (field: RoiField, next: { x: number; y: number; w: number; h: number }) => {
     onChange({
@@ -146,9 +192,24 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
       <div className="text-xs text-gray-500 mb-3">ROIをドラッグ/リサイズして調整してください。</div>
       <div ref={containerRef} className="w-full border rounded bg-white overflow-hidden">
         {roiImage && stageSize.width > 0 ? (
-          <Stage width={stageSize.width} height={stageSize.height}>
+          <Stage
+            width={stageSize.width}
+            height={stageSize.height}
+            onMouseDown={handleStagePointerDown}
+            onMouseMove={handleStagePointerMove}
+            onMouseUp={handleStagePointerUp}
+            onMouseLeave={handleStagePointerUp}
+            onTouchStart={handleStagePointerDown}
+            onTouchMove={handleStagePointerMove}
+            onTouchEnd={handleStagePointerUp}
+          >
             <Layer>
-              <KonvaImage image={roiImage} width={stageSize.width} height={stageSize.height} />
+              <KonvaImage
+                name="roi-image"
+                image={roiImage}
+                width={stageSize.width}
+                height={stageSize.height}
+              />
               {(Object.keys(template) as RoiField[]).map(field => renderRect(field))}
               <Transformer
                 ref={transformerRef}

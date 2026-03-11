@@ -1371,7 +1371,7 @@ const ContactRegister: React.FC = () => {
           {flashMessage}
         </div>
       )}
-      <div className="bg-white p-6 rounded-lg shadow w-full max-w-[1280px] mx-auto overflow-hidden">
+      <div className="bg-white p-6 rounded-lg shadow w-full max-w-none mx-auto overflow-hidden">
         {!isEdit && (
           <div className="flex gap-2 mb-6">
             <button
