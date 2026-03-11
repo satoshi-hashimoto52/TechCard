@@ -18,6 +18,10 @@ class CropRequest(BaseModel):
     points: List[CropPoint]
 
 
+class DetectRequest(BaseModel):
+    image: str
+
+
 def _decode_image(data_url: str) -> np.ndarray:
     if not data_url:
         raise HTTPException(status_code=400, detail="image is required")
@@ -47,6 +51,26 @@ def _order_points(pts: np.ndarray) -> np.ndarray:
     rect[1] = pts[np.argmin(diff)]  # top-right
     rect[3] = pts[np.argmax(diff)]  # bottom-left
     return rect
+
+
+def _detect_card_points(image: np.ndarray) -> np.ndarray | None:
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blurred, 50, 150)
+    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    image_area = image.shape[0] * image.shape[1]
+    min_area = image_area * 0.1
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+        perimeter = cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+        if len(approx) == 4:
+            return approx.reshape(4, 2).astype("float32")
+    return None
 
 
 @router.post("/crop")
@@ -90,3 +114,26 @@ def crop_card(payload: CropRequest):
         raise HTTPException(status_code=500, detail="failed to encode image")
     encoded = base64.b64encode(buffer.tobytes()).decode("utf-8")
     return {"cropped_image": encoded}
+
+
+@router.post("/detect")
+def detect_card(payload: DetectRequest):
+    image = _decode_image(payload.image)
+    detected = _detect_card_points(image)
+    if detected is None:
+        height, width = image.shape[:2]
+        detected = np.array(
+            [
+                [0, 0],
+                [width - 1, 0],
+                [width - 1, height - 1],
+                [0, height - 1],
+            ],
+            dtype="float32",
+        )
+        source = "fallback"
+    else:
+        source = "contour"
+    rect = _order_points(detected)
+    points = [{"x": float(pt[0]), "y": float(pt[1])} for pt in rect]
+    return {"points": points, "source": source}

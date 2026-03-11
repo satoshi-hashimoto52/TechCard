@@ -7,12 +7,23 @@ type CardCropperProps = {
   imageUrl: string;
   imageFile?: File | null;
   onCropped?: (dataUrl: string) => void;
+  onPointCountChange?: (count: number) => void;
+  initialPoints?: Point[] | null;
+  extraActions?: React.ReactNode;
 };
 
 const POINT_RADIUS = 6;
 const HIT_RADIUS = 10;
+const FALLBACK_RATIO = 700 / 1200;
 
-const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCropped }) => {
+const CardCropper: React.FC<CardCropperProps> = ({
+  imageUrl,
+  imageFile,
+  onCropped,
+  onPointCountChange,
+  initialPoints,
+  extraActions,
+}) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [image, setImage] = useState<HTMLImageElement | null>(null);
@@ -37,11 +48,19 @@ const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCroppe
   }, [imageUrl, resetPoints]);
 
   useEffect(() => {
+    if (!image || !initialPoints || initialPoints.length !== 4) return;
+    setPoints(prev => (prev.length === 0 ? initialPoints : prev));
+    setDragIndex(null);
+  }, [image, initialPoints]);
+
+  useEffect(() => {
     const node = containerRef.current;
-    if (!node || !image) return;
+    if (!node) return;
     const updateSize = () => {
       const width = node.clientWidth;
-      const height = Math.round(width * (image.height / image.width));
+      if (!width) return;
+      const ratio = image ? image.height / image.width : FALLBACK_RATIO;
+      const height = Math.round(width * ratio);
       setCanvasSize({ width, height });
     };
     updateSize();
@@ -78,12 +97,21 @@ const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCroppe
 
   const drawCanvas = useCallback(() => {
     const canvas = canvasRef.current;
-    if (!canvas || !image) return;
+    if (!canvas) return;
     canvas.width = canvasSize.width;
     canvas.height = canvasSize.height;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    if (!image) {
+      ctx.fillStyle = '#f8fafc';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '12px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('画像を読み込み中です', canvas.width / 2, canvas.height / 2);
+      return;
+    }
     ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
 
     if (points.length > 0) {
@@ -120,6 +148,10 @@ const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCroppe
   useEffect(() => {
     drawCanvas();
   }, [drawCanvas]);
+
+  useEffect(() => {
+    onPointCountChange?.(points.length);
+  }, [onPointCountChange, points.length]);
 
   const findHitPoint = useCallback(
     (clientX: number, clientY: number) => {
@@ -215,10 +247,6 @@ const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCroppe
 
   return (
     <div className="space-y-3" ref={containerRef}>
-      <div className="flex items-center justify-between text-xs text-gray-600">
-        <span>4点をクリックして指定（ドラッグで調整可）</span>
-        <span>{points.length}/4</span>
-      </div>
       <canvas
         ref={canvasRef}
         className="w-full rounded border bg-white"
@@ -230,7 +258,7 @@ const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCroppe
       {error && (
         <div className="text-xs text-red-600">{error}</div>
       )}
-      <div className="flex flex-wrap gap-2">
+      <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={resetPoints}
@@ -246,6 +274,7 @@ const CardCropper: React.FC<CardCropperProps> = ({ imageUrl, imageFile, onCroppe
         >
           {isCropping ? 'クロップ中...' : 'クロップ実行'}
         </button>
+        {extraActions}
       </div>
     </div>
   );

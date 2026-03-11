@@ -51,11 +51,11 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
   const [roiImage] = useImage(imageUrl);
 
   useEffect(() => {
-    if (!containerRef.current || !roiImage) return;
+    if (!containerRef.current) return;
     const updateSize = () => {
       const width = containerRef.current?.clientWidth || 0;
       if (!width) return;
-      const ratio = roiImage.height / roiImage.width;
+      const ratio = roiImage ? roiImage.height / roiImage.width : baseHeight / baseWidth;
       const height = Math.round(width * ratio);
       setStageSize({ width, height });
     };
@@ -63,7 +63,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
     const observer = new ResizeObserver(updateSize);
     observer.observe(containerRef.current);
     return () => observer.disconnect();
-  }, [roiImage]);
+  }, [roiImage, baseHeight, baseWidth]);
 
   useEffect(() => {
     const transformer = transformerRef.current;
@@ -226,7 +226,12 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
             </Layer>
           </Stage>
         ) : (
-          <div className="p-4 text-xs text-gray-500">画像を読み込み中です。</div>
+          <div
+            className="flex items-center justify-center text-xs text-gray-500"
+            style={{ height: stageSize.height || Math.round((baseHeight / baseWidth) * 200) }}
+          >
+            画像を読み込み中です。
+          </div>
         )}
       </div>
     </div>

@@ -91,7 +91,7 @@ const ContactRegister: React.FC = () => {
     const dd = String(today.getDate()).padStart(2, '0');
     return `${yyyy}-${mm}-${dd}`;
   })();
-  const [form, setForm] = useState({
+  const buildInitialForm = () => ({
     name: '',
     email: '',
     phone: '',
@@ -104,6 +104,7 @@ const ContactRegister: React.FC = () => {
     first_met_at: todayString,
     notes: '',
   });
+  const [form, setForm] = useState(buildInitialForm);
   const [originalImage, setOriginalImage] = useState<string | null>(null);
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -127,9 +128,24 @@ const ContactRegister: React.FC = () => {
   const [lastMobileUploadCount, setLastMobileUploadCount] = useState(0);
   const [flashMessage, setFlashMessage] = useState<string | null>(null);
   const [mobileSessionLoading, setMobileSessionLoading] = useState(false);
+  const [cropPointCount, setCropPointCount] = useState(0);
+  const [autoCropPoints, setAutoCropPoints] = useState<{ x: number; y: number }[] | null>(null);
+  const detectSeqRef = useRef(0);
   const isBlank = (value?: string) => !value || value.trim() === '';
   const targetWidth = ROI_BASE_WIDTH;
   const targetHeight = ROI_BASE_HEIGHT;
+  const resetFormInputs = () => {
+    setForm(buildInitialForm());
+    setDetectedTags([]);
+    setSelectedTags([]);
+    setSelectedTagOption('');
+    setCustomTag('');
+    setTagsTouched(false);
+    setManageTagId('');
+    setManageTagType('technology');
+    setOcrText(null);
+    setSubmitError(null);
+  };
 
   const handleChange = (field: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setForm(prev => ({ ...prev, [field]: event.target.value }));
@@ -170,6 +186,51 @@ const ContactRegister: React.FC = () => {
     });
   };
 
+  const readFileAsDataUrl = (inputFile: File) =>
+    new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error('Failed to read image'));
+      reader.readAsDataURL(inputFile);
+    });
+
+  const fetchImageAsDataUrl = async (url: string) => {
+    if (url.startsWith('data:')) return url;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(url, { signal: controller.signal });
+      if (!response.ok) {
+        throw new Error(`image fetch failed (${response.status})`);
+      }
+      const blob = await response.blob();
+      return await readFileAsDataUrl(new File([blob], 'detect-source.png', { type: blob.type || 'image/png' }));
+    } finally {
+      window.clearTimeout(timeoutId);
+    }
+  };
+
+  const detectCardPointsFrom = async (url: string, inputFile?: File | null) => {
+    const seq = ++detectSeqRef.current;
+    try {
+      const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
+      const response = await axios.post<{ points?: { x: number; y: number }[] }>(
+        'http://localhost:8000/card/detect',
+        { image: dataUrl },
+        { timeout: 15000 },
+      );
+      if (seq !== detectSeqRef.current) return;
+      const points = response.data?.points;
+      if (Array.isArray(points) && points.length === 4) {
+        setAutoCropPoints(points.map(point => ({ x: Number(point.x), y: Number(point.y) })));
+      }
+    } catch (error) {
+      if (seq === detectSeqRef.current) {
+        setAutoCropPoints(null);
+      }
+    }
+  };
+
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const nextFile = event.target.files?.[0] || null;
     setFile(nextFile);
@@ -184,6 +245,8 @@ const ContactRegister: React.FC = () => {
         setIsCropActive(true);
         setOcrText(null);
         setCardFilename(file.name);
+        setAutoCropPoints(null);
+        detectCardPointsFrom(url, file);
       })
       .catch(() => {
         const url = URL.createObjectURL(nextFile);
@@ -193,6 +256,8 @@ const ContactRegister: React.FC = () => {
         setIsCropActive(true);
         setOcrText(null);
         setCardFilename(nextFile.name);
+        setAutoCropPoints(null);
+        detectCardPointsFrom(url, nextFile);
       });
   };
 
@@ -276,6 +341,8 @@ const ContactRegister: React.FC = () => {
           setIsCropActive(true);
           setOcrText(null);
           setCardFilename(file.name);
+          setAutoCropPoints(null);
+          detectCardPointsFrom(url, file);
           stopCamera();
         })
         .catch(() => {
@@ -287,6 +354,8 @@ const ContactRegister: React.FC = () => {
           setIsCropActive(true);
           setOcrText(null);
           setCardFilename(capturedFile.name);
+          setAutoCropPoints(null);
+          detectCardPointsFrom(url, capturedFile);
           stopCamera();
         });
     });
@@ -744,6 +813,13 @@ const ContactRegister: React.FC = () => {
     }
   };
 
+  const closeMobileUploadSession = () => {
+    setMobileSession(null);
+    setMobileStatus('idle');
+    setMobileError(null);
+    setLastMobileUploadCount(0);
+  };
+
   useEffect(() => {
     if (!mobileSession) return;
     let stopped = false;
@@ -763,6 +839,8 @@ const ContactRegister: React.FC = () => {
             setOcrText(null);
             setCardFilename(response.data.filename || 'mobile-upload.png');
             setLastMobileUploadCount(uploadCount);
+            setAutoCropPoints(null);
+            detectCardPointsFrom(cacheBusted, null);
           }
           if (!mobileContinuous) {
             stopped = true;
@@ -788,69 +866,8 @@ const ContactRegister: React.FC = () => {
 
   const canRunOcr = mode === 'upload' && !isCropActive && Boolean(selectedImage);
 
-  const leftColumn = mode === 'upload' ? (
+  const uploadColumn = mode === 'upload' ? (
     <div className="space-y-4">
-      <div className="border border-dashed border-gray-300 rounded p-4">
-        <div className="flex items-center gap-4">
-          <input
-            type="file"
-            onChange={handleFileChange}
-            className="block"
-          />
-        </div>
-        {cardFilename && (
-          <p className="mt-2 text-sm text-gray-600">Loaded: {cardFilename}</p>
-        )}
-        <div className="mt-4 border-t border-gray-200 pt-4">
-          <div className="flex flex-wrap items-center gap-3">
-            <button
-              type="button"
-              onClick={startMobileUploadSession}
-              disabled={mobileSessionLoading}
-              className="bg-emerald-600 text-white px-4 py-2 rounded cursor-pointer relative z-10 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {mobileSessionLoading ? 'QR生成中...' : 'スマホで撮影（QR表示）'}
-            </button>
-            <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。OCRは空欄のみ取得します。</span>
-            <label
-              className={`text-xs font-semibold flex items-center gap-2 border rounded px-2 py-1 transition-colors ${
-                mobileContinuous
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-400'
-                  : 'bg-amber-50 text-amber-700 border-amber-400'
-              }`}
-            >
-              <input
-                type="checkbox"
-                checked={mobileContinuous}
-                onChange={event => setMobileContinuous(event.target.checked)}
-              />
-              連続登録モード
-            </label>
-          </div>
-          {mobileError && (
-            <p className="mt-2 text-sm text-red-600">{mobileError}</p>
-          )}
-          {mobileSession && (
-            <div className="mt-3 flex flex-col md:flex-row gap-4">
-              <div className="bg-white border rounded p-3 w-fit">
-                <img
-                  src={mobileSession.qr_url}
-                  alt="QR"
-                  className="w-44 h-44"
-                />
-              </div>
-              <div className="text-sm text-gray-600 space-y-2">
-                <p>iPhoneでQRを読み取り、名刺を撮影してアップロードしてください。</p>
-                <p className="text-xs text-gray-500 break-all">URL: {mobileSession.upload_url}</p>
-                <p className="text-xs text-gray-500">
-                  状態: {mobileStatus === 'waiting' ? '待機中' : mobileStatus === 'done' ? '完了' : mobileStatus === 'error' ? 'エラー' : '準備中'}
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
-
       {isCameraActive && (
         <div className="relative">
           <div className="relative w-full max-w-4xl mx-auto">
@@ -972,40 +989,51 @@ const ContactRegister: React.FC = () => {
 
       {originalImage && isCropActive && (
         <div className="bg-gray-50 border border-gray-200 rounded p-4">
-          <h2 className="text-sm font-semibold mb-3">名刺手動クロップ</h2>
+          <div className="flex flex-wrap items-center gap-2 text-xs text-gray-600 mb-2">
+            <span className="text-sm font-semibold text-gray-800">名刺手動クロップ</span>
+            <span>4点をクリックして指定（ドラッグで調整可）</span>
+            <span className="ml-auto tabular-nums">{cropPointCount}/4</span>
+          </div>
           <CardCropper
             imageUrl={originalImage}
             imageFile={file}
             onCropped={setCroppedImage}
+            onPointCountChange={setCropPointCount}
+            initialPoints={autoCropPoints}
+            extraActions={(
+              <>
+                <button
+                  type="button"
+                  className="px-3 py-2 text-sm rounded border bg-white"
+                  onClick={() => {
+                    setSelectedImage(originalImage);
+                    setDetectedTags([]);
+                    setOcrText(null);
+                    setIsCropActive(false);
+                  }}
+                >
+                  元画像を使用
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
+                  disabled={!croppedImage}
+                  onClick={() => {
+                    if (!croppedImage) return;
+                    setSelectedImage(croppedImage);
+                    setDetectedTags([]);
+                    setOcrText(null);
+                    setIsCropActive(false);
+                  }}
+                >
+                  クロップ後を使用
+                </button>
+                {cardFilename && (
+                  <span className="ml-auto text-xs text-gray-500">Loaded: {cardFilename}</span>
+                )}
+              </>
+            )}
           />
-          <div className="mt-4 flex flex-wrap gap-2">
-            <button
-              type="button"
-              className="px-3 py-2 text-sm rounded border bg-white"
-              onClick={() => {
-                setSelectedImage(originalImage);
-                setDetectedTags([]);
-                setOcrText(null);
-                setIsCropActive(false);
-              }}
-            >
-              元画像を使用
-            </button>
-            <button
-              type="button"
-              className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
-              disabled={!croppedImage}
-              onClick={() => {
-                if (!croppedImage) return;
-                setSelectedImage(croppedImage);
-                setDetectedTags([]);
-                setOcrText(null);
-                setIsCropActive(false);
-              }}
-            >
-              クロップ後を使用
-            </button>
-          </div>
         </div>
       )}
 
@@ -1018,69 +1046,132 @@ const ContactRegister: React.FC = () => {
           baseHeight={ROI_BASE_HEIGHT}
         />
       )}
-    </div>
-  ) : null;
-
-  const rightColumn = (
-    <div className="space-y-4">
-      {mode === 'upload' && (
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            type="button"
-            className="px-3 py-2 text-sm rounded bg-emerald-600 text-white disabled:opacity-50"
-            onClick={runOcrFromRoi}
-            disabled={!canRunOcr || isOcrRunning}
-          >
-            {isOcrRunning ? 'OCR処理中...' : 'OCR実行'}
-          </button>
-          <button
-            type="button"
-            className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
-            onClick={resetRoiTemplate}
-            disabled={!selectedImage}
-          >
-            ROIをデフォルトに戻す
-          </button>
+      {!originalImage && !selectedImage && !isCropActive && (
+        <div className="border rounded bg-gray-50 text-xs text-gray-400 flex items-center justify-center aspect-[12/7]">
+          画像のプレビュー領域
         </div>
       )}
 
-      {mode === 'upload' && (
-        <div className="bg-gray-50 border border-gray-200 rounded p-4">
-          <h2 className="text-sm font-semibold mb-3">検出された技術</h2>
-          {detectedTags.length === 0 ? (
-            <p className="text-sm text-gray-500">技術はまだ検出されていません。</p>
-          ) : (
-            <div className="flex flex-wrap gap-2">
-              {detectedTags.map(tag => {
-                const added = selectedTags.includes(tag);
-                return (
-                  <button
-                    key={tag}
-                    type="button"
-                    onClick={() => {
-                      if (added) return;
-                      setTagsTouched(true);
-                      setSelectedTags(prev => [...prev, tag]);
-                    }}
-                    className={`px-2 py-1 rounded text-sm border ${
-                      added
-                        ? 'bg-green-100 text-green-800 border-green-200'
-                        : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
-                    }`}
-                  >
-                    {tag} {added ? '✓' : 'Add'}
-                  </button>
-                );
-              })}
+      <div className="border border-dashed border-gray-300 rounded p-4">
+        <div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={mobileSession ? closeMobileUploadSession : startMobileUploadSession}
+              disabled={mobileSessionLoading}
+              className={`px-4 py-2 rounded cursor-pointer relative z-10 disabled:opacity-50 disabled:cursor-not-allowed ${
+                mobileSession ? 'bg-gray-700 text-white' : 'bg-emerald-600 text-white'
+              }`}
+            >
+              {mobileSessionLoading
+                ? 'QR生成中...'
+                : mobileSession
+                  ? 'QRを閉じる'
+                  : 'スマホで撮影（QR表示）'}
+            </button>
+            <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。OCRは空欄のみ取得します。</span>
+            <label
+              className={`text-xs font-semibold flex items-center gap-2 border rounded px-2 py-1 transition-colors ${
+                mobileContinuous
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-400'
+                  : 'bg-amber-50 text-amber-700 border-amber-400'
+              }`}
+            >
+              <input
+                type="checkbox"
+                checked={mobileContinuous}
+                onChange={event => setMobileContinuous(event.target.checked)}
+              />
+              連続登録モード
+            </label>
+            <div className="ml-auto">
+              <input
+                type="file"
+                onChange={handleFileChange}
+                className="block"
+              />
+            </div>
+          </div>
+          {mobileError && (
+            <p className="mt-2 text-sm text-red-600">{mobileError}</p>
+          )}
+          {mobileSession && (
+            <div className="mt-3 flex flex-col md:flex-row gap-4">
+              <div className="bg-white border rounded p-3 w-fit">
+                <img
+                  src={mobileSession.qr_url}
+                  alt="QR"
+                  className="w-44 h-44"
+                />
+              </div>
+              <div className="text-sm text-gray-600 space-y-2">
+                <p>iPhoneでQRを読み取り、名刺を撮影してアップロードしてください。</p>
+                <p className="text-xs text-gray-500 break-all">URL: {mobileSession.upload_url}</p>
+                <p className="text-xs text-gray-500">
+                  状態: {mobileStatus === 'waiting' ? '待機中' : mobileStatus === 'done' ? '完了' : mobileStatus === 'error' ? 'エラー' : '準備中'}
+                </p>
+              </div>
             </div>
           )}
         </div>
-      )}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          className="px-3 py-2 text-sm rounded bg-emerald-600 text-white disabled:opacity-50"
+          onClick={runOcrFromRoi}
+          disabled={!canRunOcr || isOcrRunning}
+        >
+          {isOcrRunning ? 'OCR処理中...' : 'OCR実行'}
+        </button>
+        <button
+          type="button"
+          className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
+          onClick={resetRoiTemplate}
+          disabled={!selectedImage}
+        >
+          ROIをデフォルトに戻す
+        </button>
+      </div>
 
-      <form onSubmit={handleSubmit} className="space-y-4">
-        {submitError && (
-          <div className="text-sm text-red-600">{submitError}</div>
+      <div className="bg-gray-50 border border-gray-200 rounded p-4">
+        <h2 className="text-sm font-semibold mb-3">検出された技術</h2>
+        {detectedTags.length === 0 ? (
+          <p className="text-sm text-gray-500">技術はまだ検出されていません。</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            {detectedTags.map(tag => {
+              const added = selectedTags.includes(tag);
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  onClick={() => {
+                    if (added) return;
+                    setTagsTouched(true);
+                    setSelectedTags(prev => [...prev, tag]);
+                  }}
+                  className={`px-2 py-1 rounded text-sm border ${
+                    added
+                      ? 'bg-green-100 text-green-800 border-green-200'
+                      : 'bg-white text-gray-700 border-gray-300 hover:bg-gray-100'
+                  }`}
+                >
+                  {tag} {added ? '✓' : 'Add'}
+                </button>
+              );
+            })}
+          </div>
         )}
+      </div>
+    </div>
+  ) : null;
+
+  const formColumn = (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      {submitError && (
+        <div className="text-sm text-red-600">{submitError}</div>
+      )}
         <div className="flex items-center gap-4">
             <label className="w-32 text-sm font-medium">会社 / 支店(Office)</label>
             <div className="flex flex-1 gap-4">
@@ -1350,7 +1441,7 @@ const ContactRegister: React.FC = () => {
               className="flex-1 border rounded px-3 py-2 h-28"
             />
           </div>
-          <div className="pt-2">
+          <div className="pt-2 flex items-center gap-6">
             <button
               type="submit"
               disabled={isSubmitting || isOcrRunning}
@@ -1358,9 +1449,15 @@ const ContactRegister: React.FC = () => {
             >
               {isOcrRunning ? 'OCR処理中...' : isSubmitting ? '登録中...' : '登録する'}
             </button>
+            <button
+              type="button"
+              onClick={resetFormInputs}
+              className="px-4 py-2 rounded border border-gray-300 text-gray-700 bg-white"
+            >
+              クリア
+            </button>
           </div>
-        </form>
-    </div>
+    </form>
   );
 
   return (
@@ -1392,12 +1489,12 @@ const ContactRegister: React.FC = () => {
         )}
 
         {mode === 'upload' ? (
-          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(0,520px)] gap-6">
-            {leftColumn}
-            {rightColumn}
+          <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,640px)_minmax(0,1fr)] gap-6">
+            <div>{formColumn}</div>
+            {uploadColumn}
           </div>
         ) : (
-          <div className="max-w-[720px]">{rightColumn}</div>
+          <div className="max-w-[720px]">{formColumn}</div>
         )}
       </div>
     </div>
