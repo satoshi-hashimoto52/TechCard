@@ -4,7 +4,7 @@ from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine
 from . import models
-from .routers import contacts, companies, tags, meetings, cards, graph, stats, mobile_upload, admin, card_crop, events
+from .routers import contacts, companies, tags, meetings, cards, graph, stats, mobile_upload, admin, card_crop, events, company_groups
 
 pillow_heif.register_heif_opener()
 
@@ -151,5 +151,6 @@ app.include_router(graph.router)
 app.include_router(card_crop.router)
 app.include_router(stats.router)
 app.include_router(events.router)
+app.include_router(company_groups.router)
 app.include_router(mobile_upload.router)
 app.include_router(admin.router)

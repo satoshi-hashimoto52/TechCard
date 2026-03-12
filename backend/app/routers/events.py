@@ -38,6 +38,41 @@ def read_events(db: Session = Depends(get_db)):
     return [_event_payload(event) for event in events]
 
 
+@router.get("/{event_id}", response_model=schemas.EventDetail)
+def read_event(event_id: int, db: Session = Depends(get_db)):
+    event = (
+        db.query(models.Event)
+        .options(joinedload(models.Event.contacts).joinedload(models.Contact.company))
+        .filter(models.Event.id == event_id)
+        .first()
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    participants = []
+    companies = {}
+    for contact in event.contacts or []:
+        participants.append(
+            {
+                "id": contact.id,
+                "name": contact.name,
+                "company_name": contact.company.name if contact.company else None,
+            }
+        )
+        if contact.company:
+            companies.setdefault(contact.company.id, contact.company.name or "")
+    company_items = [{"id": cid, "name": name} for cid, name in companies.items()]
+    return schemas.EventDetail(
+        id=event.id,
+        name=event.name,
+        start_date=event.start_date,
+        end_date=event.end_date,
+        location=event.location,
+        year=event.year,
+        participants=participants,
+        companies=company_items,
+    )
+
+
 @router.post("/", response_model=schemas.EventRead)
 def create_event(payload: schemas.EventCreate, db: Session = Depends(get_db)):
     name = (payload.name or "").strip()
@@ -61,3 +96,43 @@ def create_event(payload: schemas.EventCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(event)
     return _event_payload(event)
+
+
+@router.post("/{event_id}/participants")
+def add_participants(event_id: int, contact_ids: list[int], db: Session = Depends(get_db)):
+    event = (
+        db.query(models.Event)
+        .options(joinedload(models.Event.contacts))
+        .filter(models.Event.id == event_id)
+        .first()
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    if not contact_ids:
+        return {"added": 0}
+    contacts = db.query(models.Contact).filter(models.Contact.id.in_(contact_ids)).all()
+    added = 0
+    for contact in contacts:
+        if contact not in (event.contacts or []):
+            event.contacts.append(contact)
+            added += 1
+    db.commit()
+    return {"added": added}
+
+
+@router.delete("/{event_id}/participants/{contact_id}")
+def remove_participant(event_id: int, contact_id: int, db: Session = Depends(get_db)):
+    event = (
+        db.query(models.Event)
+        .options(joinedload(models.Event.contacts))
+        .filter(models.Event.id == event_id)
+        .first()
+    )
+    if not event:
+        raise HTTPException(status_code=404, detail="Event not found")
+    contact = next((item for item in (event.contacts or []) if item.id == contact_id), None)
+    if not contact:
+        raise HTTPException(status_code=404, detail="Participant not found")
+    event.contacts.remove(contact)
+    db.commit()
+    return {"removed": True}

@@ -31,6 +31,16 @@ class CompanyGroup(Base):
     description = Column(Text, nullable=True)
 
     companies = relationship("Company", back_populates="group")
+    aliases = relationship("CompanyGroupAlias", back_populates="group", cascade="all, delete-orphan")
+
+
+class CompanyGroupAlias(Base):
+    __tablename__ = "company_group_alias"
+    id = Column(Integer, primary_key=True, index=True)
+    group_id = Column(Integer, ForeignKey("company_groups.id"))
+    alias = Column(String, index=True)
+
+    group = relationship("CompanyGroup", back_populates="aliases")
 
 
 class Event(Base):

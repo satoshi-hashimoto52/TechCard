@@ -27,7 +27,7 @@ type NodeObject = {
 type GraphLink = {
   source: string | { id: string };
   target: string | { id: string };
-  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'relation' | 'company_relation';
+  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'relation' | 'company_relation' | 'group_contact';
   count?: number;
 };
 
@@ -50,7 +50,7 @@ const NetworkGraph: React.FC = () => {
   const [contactFilter, setContactFilter] = useState<string | null>(null);
   const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
   const [hoveredPos, setHoveredPos] = useState<{ x: number; y: number } | null>(null);
-  const [searchType, setSearchType] = useState<'tech' | 'company' | 'contact'>('tech');
+  const [searchType, setSearchType] = useState<'tech' | 'company' | 'contact' | 'event'>('tech');
   const [searchValue, setSearchValue] = useState('');
   const [visibleTypes, setVisibleTypes] = useState({
     contact: true,
@@ -62,12 +62,13 @@ const NetworkGraph: React.FC = () => {
   });
   const [highlightMode, setHighlightMode] = useState(true);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [groupCollapsed, setGroupCollapsed] = useState(false);
+  const [searchFocus, setSearchFocus] = useState<{ type: 'tech' | 'company' | 'contact' | 'event'; value: string } | null>(null);
   const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number; groupId?: string | null }[]>([]);
   const hasCenteredRef = useRef(false);
-  const companyAnglesRef = useRef<Map<string, number>>(new Map());
-  const companyRadiusRef = useRef(0);
   const zoomScaleRef = useRef(1);
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const orbitAnglesRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
     const params: Record<string, string | number> = {};
@@ -98,7 +99,49 @@ const NetworkGraph: React.FC = () => {
         };
         return order[a.type] - order[b.type];
       });
-    const nodeIds = new Set(nodes.map(node => node.id));
+    const collapsed = groupCollapsed;
+    const filteredNodes = collapsed
+      ? nodes.filter(node => node.type !== 'company' && node.type !== 'tech')
+      : nodes;
+    const nodeIds = new Set(filteredNodes.map(node => node.id));
+
+    if (collapsed) {
+      const contactCompany = new Map<string, string>();
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'employment') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const companyId = sourceId.startsWith('company_') ? sourceId : targetId.startsWith('company_') ? targetId : null;
+        const contactId = sourceId.startsWith('contact_') ? sourceId : targetId.startsWith('contact_') ? targetId : null;
+        if (!companyId || !contactId) return;
+        contactCompany.set(contactId, companyId);
+      });
+      const companyGroup = new Map<string, string>();
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'company_group') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const companyId = sourceId.startsWith('company_') ? sourceId : targetId.startsWith('company_') ? targetId : null;
+        const groupId = sourceId.startsWith('group_') ? sourceId : targetId.startsWith('group_') ? targetId : null;
+        if (!companyId || !groupId) return;
+        companyGroup.set(companyId, groupId);
+      });
+      const links: GraphLink[] = [];
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'event_attendance' && edge.type !== 'relation') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
+        links.push(edge);
+      });
+      contactCompany.forEach((companyId, contactId) => {
+        const groupId = companyGroup.get(companyId);
+        if (!groupId) return;
+        if (!nodeIds.has(groupId) || !nodeIds.has(contactId)) return;
+        links.push({ source: groupId, target: contactId, type: 'group_contact' });
+      });
+      return { nodes: filteredNodes, links };
+    }
 
     const contactHidden = !visibleTypes.contact;
     if (contactHidden) {
@@ -148,7 +191,7 @@ const NetworkGraph: React.FC = () => {
           count: item.count,
         });
       });
-      return { nodes, links };
+      return { nodes: filteredNodes, links };
     }
 
     const links = rawGraph.edges.filter(edge => {
@@ -156,8 +199,8 @@ const NetworkGraph: React.FC = () => {
       const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
       return nodeIds.has(sourceId) && nodeIds.has(targetId);
     });
-    return { nodes, links };
-  }, [rawGraph, visibleTypes]);
+    return { nodes: filteredNodes, links };
+  }, [rawGraph, visibleTypes, groupCollapsed]);
 
   const tagCompanyIds = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -179,47 +222,179 @@ const NetworkGraph: React.FC = () => {
     return map;
   }, [graph.links]);
 
-  const selfNodeId = useMemo(() => {
-    const selfNode = graph.nodes.find(node => node.type === 'contact' && (node as GraphNode).is_self);
-    return selfNode?.id ?? null;
-  }, [graph.nodes]);
-  const connectedTagIds = useMemo(() => {
-    const ids = new Set<string>();
-    if (!selfNodeId) return ids;
-    graph.links.forEach(link => {
-      const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-      const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-      if (link.type !== 'relation') return;
-      if (sourceId === selfNodeId && targetId.startsWith('relation_')) ids.add(targetId);
-      if (targetId === selfNodeId && sourceId.startsWith('relation_')) ids.add(sourceId);
-    });
-    return ids;
-  }, [graph.links, graph.nodes, selfNodeId]);
-
-    const personOverlapMap = useMemo(() => {
+  const nodeDegreeMap = useMemo(() => {
     const map = new Map<string, number>();
-    if (!selfNodeId) return map;
-    graph.nodes.forEach(node => {
-      if (node.type === 'contact' && node.id !== selfNodeId) {
-        map.set(node.id, 0);
-      }
-    });
     graph.links.forEach(link => {
       const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
       const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-      const isSourcePerson = map.has(sourceId);
-      const isTargetPerson = map.has(targetId);
-      const isSourceTag = connectedTagIds.has(sourceId);
-      const isTargetTag = connectedTagIds.has(targetId);
-      if (isSourcePerson && isTargetTag) {
-        map.set(sourceId, (map.get(sourceId) ?? 0) + 1);
-      }
-      if (isTargetPerson && isSourceTag) {
-        map.set(targetId, (map.get(targetId) ?? 0) + 1);
+      map.set(sourceId, (map.get(sourceId) ?? 0) + 1);
+      map.set(targetId, (map.get(targetId) ?? 0) + 1);
+    });
+    return map;
+  }, [graph.links]);
+
+  const rawNodeById = useMemo(() => {
+    return new Map(rawGraph.nodes.map(node => [node.id, node]));
+  }, [rawGraph.nodes]);
+
+  const contactRelations = useMemo(() => {
+    const map = new Map<string, string[]>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'relation') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const contactId = sourceId.startsWith('contact_')
+        ? sourceId
+        : targetId.startsWith('contact_')
+        ? targetId
+        : null;
+      const relationId = sourceId.startsWith('relation_')
+        ? sourceId
+        : targetId.startsWith('relation_')
+        ? targetId
+        : null;
+      if (!contactId || !relationId) return;
+      const label = rawNodeById.get(relationId)?.label || '';
+      if (!label) return;
+      const list = map.get(contactId) || [];
+      if (!list.includes(label)) {
+        list.push(label);
+        map.set(contactId, list);
       }
     });
     return map;
-  }, [connectedTagIds, graph.links, graph.nodes, selfNodeId]);
+  }, [rawGraph.edges, rawNodeById]);
+
+  const contactEvents = useMemo(() => {
+    const map = new Map<string, string[]>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'event_attendance') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const contactId = sourceId.startsWith('contact_')
+        ? sourceId
+        : targetId.startsWith('contact_')
+        ? targetId
+        : null;
+      const eventId = sourceId.startsWith('event_')
+        ? sourceId
+        : targetId.startsWith('event_')
+        ? targetId
+        : null;
+      if (!contactId || !eventId) return;
+      const label = rawNodeById.get(eventId)?.label || '';
+      if (!label) return;
+      const list = map.get(contactId) || [];
+      if (!list.includes(label)) {
+        list.push(label);
+        map.set(contactId, list);
+      }
+    });
+    return map;
+  }, [rawGraph.edges, rawNodeById]);
+
+  const companyTechs = useMemo(() => {
+    const map = new Map<string, string[]>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'company_tech') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const companyId = sourceId.startsWith('company_')
+        ? sourceId
+        : targetId.startsWith('company_')
+        ? targetId
+        : null;
+      const techId = sourceId.startsWith('tech_')
+        ? sourceId
+        : targetId.startsWith('tech_')
+        ? targetId
+        : null;
+      if (!companyId || !techId) return;
+      const label = rawNodeById.get(techId)?.label || '';
+      if (!label) return;
+      const list = map.get(companyId) || [];
+      if (!list.includes(label)) {
+        list.push(label);
+        map.set(companyId, list);
+      }
+    });
+    return map;
+  }, [rawGraph.edges, rawNodeById]);
+
+  const companyGroupName = useMemo(() => {
+    const map = new Map<string, string>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'company_group') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const companyId = sourceId.startsWith('company_')
+        ? sourceId
+        : targetId.startsWith('company_')
+        ? targetId
+        : null;
+      const groupId = sourceId.startsWith('group_')
+        ? sourceId
+        : targetId.startsWith('group_')
+        ? targetId
+        : null;
+      if (!companyId || !groupId) return;
+      const label = rawNodeById.get(groupId)?.label || '';
+      if (!label) return;
+      map.set(companyId, label);
+    });
+    return map;
+  }, [rawGraph.edges, rawNodeById]);
+
+  const companyContactsCount = useMemo(() => {
+    const map = new Map<string, number>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'employment') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const companyId = sourceId.startsWith('company_')
+        ? sourceId
+        : targetId.startsWith('company_')
+        ? targetId
+        : null;
+      if (!companyId) return;
+      map.set(companyId, (map.get(companyId) ?? 0) + 1);
+    });
+    return map;
+  }, [rawGraph.edges]);
+
+  const eventParticipantCount = useMemo(() => {
+    const map = new Map<string, number>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'event_attendance') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const eventId = sourceId.startsWith('event_')
+        ? sourceId
+        : targetId.startsWith('event_')
+        ? targetId
+        : null;
+      if (!eventId) return;
+      map.set(eventId, (map.get(eventId) ?? 0) + 1);
+    });
+    return map;
+  }, [rawGraph.edges]);
+
+  const groupCompanyCount = useMemo(() => {
+    const map = new Map<string, number>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'company_group') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const groupId = sourceId.startsWith('group_')
+        ? sourceId
+        : targetId.startsWith('group_')
+        ? targetId
+        : null;
+      if (!groupId) return;
+      map.set(groupId, (map.get(groupId) ?? 0) + 1);
+    });
+    return map;
+  }, [rawGraph.edges]);
 
   useEffect(() => {
     if (!selectedNodeId) return;
@@ -259,7 +434,7 @@ const NetworkGraph: React.FC = () => {
     const fg = graphRef.current;
     if (!fg) return;
     graph.nodes.forEach(node => {
-      if (node.type !== 'company' && !(node as GraphNode).is_self) {
+      if (!(node as GraphNode).is_self) {
         (node as any).fx = undefined;
         (node as any).fy = undefined;
       }
@@ -269,128 +444,49 @@ const NetworkGraph: React.FC = () => {
       (selfNode as any).fx = 0;
       (selfNode as any).fy = 0;
     }
+
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
       charge.strength((node: GraphNode) => {
-        if (node.type === 'tech') return -200;
-        if (node.type === 'relation') return -180;
-        if (node.type === 'event') return -160;
-        if (node.type === 'company') return -260;
-        if (node.type === 'group') return -240;
-        if (node.type === 'contact') return -140;
-        return -120;
+        if (node.type === 'group') return -280;
+        if (node.type === 'company') return -240;
+        if (node.type === 'event') return -200;
+        if (node.type === 'tech') return -180;
+        if (node.type === 'relation') return -170;
+        if (node.type === 'contact') return -160;
+        return -140;
       });
     }
+
     const linkForce = fg.d3Force('link') as any;
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance((link: any) => {
-        if (link.type === 'employment') return 80;
-        if (link.type === 'company_group') return 160;
+        if (link.type === 'employment') return 180;
+        if (link.type === 'company_group') return 210;
         if (link.type === 'company_tech') return 120;
         if (link.type === 'relation') return 120;
-        if (link.type === 'company_relation') return 140;
-        if (link.type === 'event_attendance') return 140;
-        return 130;
+        if (link.type === 'group_contact') return 170;
+        if (link.type === 'event_attendance') return 160;
+        return 150;
       });
       if (typeof linkForce.strength === 'function') {
-        linkForce.strength((link: any) => (link.type === 'employment' ? 1.0 : 0.4));
+        linkForce.strength((link: any) => (link.type === 'employment' ? 0.9 : 0.5));
       }
     }
-    const personCompanyAttractForce = () => {
+
+    const typeXForce = () => {
       let nodes: any[] = [];
-      let nodeMap: Map<string, any> = new Map();
       const strength = 0.06;
       const force = (alpha: number) => {
         for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type !== 'contact' || typed.is_self || !typed.company_node_id) continue;
-          const companyNode = nodeMap.get(typed.company_node_id);
-          if (!companyNode) continue;
-          const dx = (companyNode.x ?? 0) - (typed.x ?? 0);
-          const dy = (companyNode.y ?? 0) - (typed.y ?? 0);
-          typed.vx = (typed.vx ?? 0) + dx * strength * alpha;
-          typed.vy = (typed.vy ?? 0) + dy * strength * alpha;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-        nodeMap = new Map(nodes.filter(n => n?.id).map(n => [n.id, n]));
-      };
-      return force;
-    };
-    fg.d3Force('person-company-attract', personCompanyAttractForce());
-    const ringForce = () => {
-      let nodes: any[] = [];
-      const strength = 0.08;
-      const resolveRadii = () => {
-        const companyRadius = companyRadiusRef.current || 320;
-        const connectedTagRadius = Math.min(220, Math.max(120, companyRadius * 0.45));
-        const personRadius = Math.min(280, Math.max(170, companyRadius * 0.7));
-        return { connectedTagRadius, personRadius };
-      };
-      const force = (alpha: number) => {
-        const { connectedTagRadius, personRadius } = resolveRadii();
-        for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type === 'company' || typed.is_self) continue;
-          let target = 0;
-          if (typed.type === 'relation') {
-            if (!connectedTagIds.has(typed.id)) continue;
-            target = connectedTagRadius;
-          } else if (typed.type === 'contact') {
-            target = personRadius;
-          }
-          const dx = typed.x ?? 0;
-          const dy = typed.y ?? 0;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const k = ((target - dist) / dist) * strength * alpha;
-          typed.vx = (typed.vx ?? 0) + dx * k;
-          typed.vy = (typed.vy ?? 0) + dy * k;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-      };
-      return force;
-    };
-    fg.d3Force('rings', ringForce());
-    const personOverlapPullForce = () => {
-      let nodes: any[] = [];
-      const baseStrength = 0.012;
-      const force = (alpha: number) => {
-        for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type !== 'contact' || typed.is_self) continue;
-          const overlap = personOverlapMap.get(typed.id) ?? 0;
-          if (overlap <= 0) continue;
-          const strength = Math.min(0.06, baseStrength + overlap * 0.006);
-          const dx = typed.x ?? 0;
-          const dy = typed.y ?? 0;
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          const k = (strength * alpha);
-          typed.vx = (typed.vx ?? 0) - (dx / dist) * k;
-          typed.vy = (typed.vy ?? 0) - (dy / dist) * k;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-      };
-      return force;
-    };
-    fg.d3Force('person-overlap-pull', personOverlapPullForce());
-    const typeXForce = () => {
-      let nodes: any[] = [];
-      const strength = 0.04;
-      const force = (alpha: number) => {
-        for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          const typed = node as GraphNode & { x?: number; vx?: number };
           let targetX = 0;
-          if (typed.type === 'event') targetX = -320;
+          if (typed.type === 'event') targetX = -360;
           if (typed.type === 'contact') targetX = 0;
-          if (typed.type === 'relation') targetX = 60;
+          if (typed.type === 'relation') targetX = 80;
           if (typed.type === 'company') targetX = 260;
           if (typed.type === 'tech') targetX = 300;
-          if (typed.type === 'group') targetX = 480;
+          if (typed.type === 'group') targetX = 520;
           const x = typed.x ?? 0;
           typed.vx = (typed.vx ?? 0) + (targetX - x) * strength * alpha;
         }
@@ -401,116 +497,125 @@ const NetworkGraph: React.FC = () => {
       return force;
     };
     fg.d3Force('type-x', typeXForce());
-    const tagCompanyAttractForce = () => {
+
+    const typeYForce = () => {
+      let nodes: any[] = [];
+      const strength = 0.04;
+      const force = (alpha: number) => {
+        for (const node of nodes) {
+          const typed = node as GraphNode & { y?: number; vy?: number };
+          if (typed.type === 'tech' || typed.type === 'relation') continue;
+          const y = typed.y ?? 0;
+          typed.vy = (typed.vy ?? 0) + (0 - y) * strength * alpha;
+        }
+      };
+      (force as any).initialize = (newNodes: any[]) => {
+        nodes = newNodes || [];
+      };
+      return force;
+    };
+    fg.d3Force('type-y', typeYForce());
+
+    const getAngle = (id: string) => {
+      const existing = orbitAnglesRef.current.get(id);
+      if (existing != null) return existing;
+      let hash = 0;
+      for (let i = 0; i < id.length; i += 1) {
+        hash = (hash * 31 + id.charCodeAt(i)) % 360;
+      }
+      const angle = (hash * Math.PI) / 180;
+      orbitAnglesRef.current.set(id, angle);
+      return angle;
+    };
+
+    const orbitForce = (
+      nodeType: 'tech' | 'relation',
+      linkType: 'company_tech' | 'relation',
+      anchorPrefix: 'company_' | 'contact_',
+      radius: number,
+    ) => {
       let nodes: any[] = [];
       let nodeMap: Map<string, any> = new Map();
-      let tagCompanies: Map<string, any[]> = new Map();
-      const baseStrength = 0.5;
-      const baseDistance = 10;
+      let anchorMap: Map<string, any[]> = new Map();
+      const strength = 0.12;
       const force = (alpha: number) => {
-        const zoomFactor = Math.max(0.7, Math.min(1.8, zoomScaleRef.current || 1));
-        const strength = baseStrength * zoomFactor;
-        const desiredDistance = baseDistance * zoomFactor;
         for (const node of nodes) {
           const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type !== 'tech' && typed.type !== 'relation') continue;
-          if (typed.type === 'relation' && connectedTagIds.has(typed.id)) continue;
-          const companies = tagCompanies.get(typed.id);
-          if (!companies || companies.length === 0) continue;
+          if (typed.type !== nodeType) continue;
+          const anchors = anchorMap.get(typed.id);
+          if (!anchors || anchors.length === 0) continue;
           let avgX = 0;
           let avgY = 0;
-          let count = 0;
-          for (const companyNode of companies) {
-            const cx = companyNode.x ?? 0;
-            const cy = companyNode.y ?? 0;
-            avgX += cx;
-            avgY += cy;
-            count += 1;
-          }
-          if (count === 0) continue;
-          avgX /= count;
-          avgY /= count;
-          const dx = avgX - (typed.x ?? 0);
-          const dy = avgY - (typed.y ?? 0);
-          const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-          if (dist < desiredDistance) continue;
-          const k = ((dist - desiredDistance) / dist) * strength * alpha;
-          typed.vx = (typed.vx ?? 0) + dx * k;
-          typed.vy = (typed.vy ?? 0) + dy * k;
+          anchors.forEach(anchor => {
+            avgX += anchor.x ?? 0;
+            avgY += anchor.y ?? 0;
+          });
+          avgX /= anchors.length;
+          avgY /= anchors.length;
+          const angle = getAngle(typed.id);
+          const targetX = avgX + Math.cos(angle) * radius;
+          const targetY = avgY + Math.sin(angle) * radius;
+          const dx = targetX - (typed.x ?? 0);
+          const dy = targetY - (typed.y ?? 0);
+          typed.vx = (typed.vx ?? 0) + dx * strength * alpha;
+          typed.vy = (typed.vy ?? 0) + dy * strength * alpha;
         }
       };
       (force as any).initialize = (newNodes: any[]) => {
         nodes = newNodes || [];
         nodeMap = new Map(nodes.filter(n => n?.id).map(n => [n.id, n]));
-        tagCompanies = new Map();
+        anchorMap = new Map();
         graph.links.forEach(link => {
+          if (link.type !== linkType) return;
           const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
           const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-          const sourceNode = nodeMap.get(sourceId);
-          const targetNode = nodeMap.get(targetId);
-          if (!sourceNode || !targetNode) return;
-          if (sourceNode.type === 'company' && (targetNode.type === 'tech' || targetNode.type === 'relation')) {
-            const list = tagCompanies.get(targetId) || [];
-            list.push(sourceNode);
-            tagCompanies.set(targetId, list);
-            return;
-          }
-          if (targetNode.type === 'company' && (sourceNode.type === 'tech' || sourceNode.type === 'relation')) {
-            const list = tagCompanies.get(sourceId) || [];
-            list.push(targetNode);
-            tagCompanies.set(sourceId, list);
-          }
+          const nodeId = sourceId.startsWith(`${nodeType}_`)
+            ? sourceId
+            : targetId.startsWith(`${nodeType}_`)
+            ? targetId
+            : null;
+          const anchorId = sourceId.startsWith(anchorPrefix)
+            ? sourceId
+            : targetId.startsWith(anchorPrefix)
+            ? targetId
+            : null;
+          if (!nodeId || !anchorId) return;
+          const anchorNode = nodeMap.get(anchorId);
+          if (!anchorNode) return;
+          const list = anchorMap.get(nodeId) || [];
+          list.push(anchorNode);
+          anchorMap.set(nodeId, list);
         });
       };
       return force;
     };
-    fg.d3Force('tag-company-attract', tagCompanyAttractForce());
-    const personCompanySectorForce = () => {
+
+    fg.d3Force('tech-orbit', orbitForce('tech', 'company_tech', 'company_', 95));
+    fg.d3Force('relation-orbit', orbitForce('relation', 'relation', 'contact_', 85));
+
+    const lowDegreeSeparationForce = () => {
       let nodes: any[] = [];
-      const strength = 0.12;
-      const force = (alpha: number) => {
-        const angleMap = companyAnglesRef.current;
-        for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type !== 'contact' || typed.is_self || !typed.company_node_id) continue;
-          const targetAngle = angleMap.get(typed.company_node_id);
-          if (targetAngle == null) continue;
-          const x = typed.x ?? 0;
-          const y = typed.y ?? 0;
-          const r = Math.sqrt(x * x + y * y) || 1;
-          const targetX = Math.cos(targetAngle) * r;
-          const targetY = Math.sin(targetAngle) * r;
-          typed.vx = (typed.vx ?? 0) + (targetX - x) * strength * alpha;
-          typed.vy = (typed.vy ?? 0) + (targetY - y) * strength * alpha;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-      };
-      return force;
-    };
-    fg.d3Force('person-company-sector', personCompanySectorForce());
-    const personSeparationForce = () => {
-      let nodes: any[] = [];
-      const minDistance = 26;
+      const minDistance = 42;
       const strength = 0.18;
       const force = (alpha: number) => {
-        for (let i = 0; i < nodes.length; i += 1) {
-          const a = nodes[i] as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (a.type !== 'contact' || !a.company_node_id) continue;
-          for (let j = i + 1; j < nodes.length; j += 1) {
-            const b = nodes[j] as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-            if (b.type !== 'contact' || !b.company_node_id) continue;
-            if (a.company_node_id === b.company_node_id) continue;
-            const dx = (b.x ?? 0) - (a.x ?? 0);
-            const dy = (b.y ?? 0) - (a.y ?? 0);
+        const lowNodes = nodes.filter(node => {
+          const typed = node as GraphNode;
+          return (nodeDegreeMap.get(typed.id) ?? 0) <= 1;
+        });
+        for (const node of lowNodes) {
+          const a = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+          const ax = a.x ?? 0;
+          const ay = a.y ?? 0;
+          for (const other of nodes) {
+            if (other === node) continue;
+            const b = other as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
+            const dx = (b.x ?? 0) - ax;
+            const dy = (b.y ?? 0) - ay;
             const dist = Math.sqrt(dx * dx + dy * dy) || 1;
             if (dist >= minDistance) continue;
             const k = ((minDistance - dist) / dist) * strength * alpha;
             a.vx = (a.vx ?? 0) - dx * k;
             a.vy = (a.vy ?? 0) - dy * k;
-            b.vx = (b.vx ?? 0) + dx * k;
-            b.vy = (b.vy ?? 0) + dy * k;
           }
         }
       };
@@ -519,18 +624,28 @@ const NetworkGraph: React.FC = () => {
       };
       return force;
     };
-    fg.d3Force('person-separation', personSeparationForce());
+    fg.d3Force('low-degree-separation', lowDegreeSeparationForce());
+
     fg.d3ReheatSimulation();
     if (selfNode && !hasCenteredRef.current) {
       hasCenteredRef.current = true;
       fg.centerAt(0, 0, 600);
-      fg.zoom(1.15, 600);
+      fg.zoom(1.1, 600);
     }
-  }, [graph, connectedTagIds, personOverlapMap]);
+  }, [graph, nodeDegreeMap]);
 
   const applySearch = (value: string, type: typeof searchType) => {
     const trimmed = value.trim();
     if (!trimmed) {
+      setTechFilter(null);
+      setCompanyFilter(null);
+      setContactFilter(null);
+      setSearchFocus(null);
+      setSelectedNodeId(null);
+      return;
+    }
+    setSearchFocus({ type, value: trimmed });
+    if (type === 'event') {
       setTechFilter(null);
       setCompanyFilter(null);
       setContactFilter(null);
@@ -560,6 +675,28 @@ const NetworkGraph: React.FC = () => {
     return () => window.clearTimeout(timer);
   }, [searchValue, searchType]);
 
+  useEffect(() => {
+    if (!searchFocus) return;
+    const value = searchFocus.value.trim().toLowerCase();
+    if (!value) return;
+    const target = graph.nodes.find(node => {
+      if (node.type !== searchFocus.type) return false;
+      return (node.label || '').toLowerCase().includes(value);
+    });
+    if (!target) return;
+    setSelectedNodeId(target.id);
+    const fg = graphRef.current;
+    if (!fg) return;
+    const focus = () => {
+      const x = (target as any).x;
+      const y = (target as any).y;
+      if (typeof x !== 'number' || typeof y !== 'number') return;
+      fg.centerAt(x, y, 700);
+      fg.zoom(1.8, 700);
+    };
+    window.setTimeout(focus, 50);
+  }, [graph.nodes, searchFocus]);
+
   const nodeColor = useMemo(() => {
     return (node: NodeObject) => {
       const typed = node as GraphNode;
@@ -573,14 +710,15 @@ const NetworkGraph: React.FC = () => {
         relation: '#e466ab',
       };
       const base = baseByType[typed.type] || '#94a3b8';
-      if (highlightMode && selectedNodeId) {
+      const highlightActive = highlightMode || Boolean(searchFocus);
+      if (highlightActive && selectedNodeId) {
         if (!highlightedNodeIds.has(typed.id)) {
           return '#c7d0ee';
         }
       }
       return base;
     };
-  }, [highlightMode, highlightedNodeIds, selectedNodeId]);
+  }, [highlightMode, highlightedNodeIds, searchFocus, selectedNodeId]);
 
   const nodeSize = useMemo(() => {
     return (node: NodeObject) => {
@@ -726,7 +864,7 @@ const NetworkGraph: React.FC = () => {
       if (placed) break;
     }
     ctx.restore();
-  }, [nodeColor, tagCompanyIds]);
+  }, [nodeSize, tagCompanyIds]);
 
   const handleNodeClick = (node: NodeObject) => {
     const typed = node as GraphNode;
@@ -746,12 +884,22 @@ const NetworkGraph: React.FC = () => {
       setCompanyFilter(null);
       navigate(`/contacts/${match[1]}`);
     }
+    if (typed.type === 'event') {
+      const match = typed.id.match(/^event_(\d+)$/);
+      if (!match) return;
+      navigate(`/events/${match[1]}`);
+    }
     if (typed.type === 'tech') {
       setTechFilter(typed.label);
       setCompanyFilter(null);
       setContactFilter(null);
     }
     if (typed.type === 'company') {
+      const match = typed.id.match(/^company_(\d+)$/);
+      if (match) {
+        navigate(`/company/${match[1]}`);
+        return;
+      }
       setCompanyFilter(typed.label);
       setTechFilter(null);
       setContactFilter(null);
@@ -842,6 +990,14 @@ const NetworkGraph: React.FC = () => {
             />
             ハイライト
           </label>
+          <label className="text-xs text-gray-600 flex items-center gap-1">
+            <input
+              type="checkbox"
+              checked={groupCollapsed}
+              onChange={event => setGroupCollapsed(event.target.checked)}
+            />
+            Group折りたたみ
+          </label>
           <select
             value={searchType}
             onChange={event => setSearchType(event.target.value as typeof searchType)}
@@ -850,6 +1006,7 @@ const NetworkGraph: React.FC = () => {
             <option value="tech">技術</option>
             <option value="company">会社</option>
             <option value="contact">氏名</option>
+            <option value="event">イベント</option>
           </select>
           <input
             type="text"
@@ -867,8 +1024,8 @@ const NetworkGraph: React.FC = () => {
           </button>
         </div>
         <p className="text-xs text-gray-500 mt-2">
-          タイプのON/OFFで表示切替。ハイライトONはクリックで周辺強調、OFFは会社/技術で絞り込み。
-          会社ノードはクリックで中心表示します。
+          タイプのON/OFFで表示切替。検索はノードをハイライトしてズームします。
+          Group折りたたみで会社ノードを省略できます。
         </p>
         {contactFilter && (
           <p className="text-xs text-gray-500 mt-2">氏名で絞り込み: "{contactFilter}"</p>
@@ -878,6 +1035,11 @@ const NetworkGraph: React.FC = () => {
         <ForceGraph2D
           ref={graphRef}
           graphData={graph}
+          nodeRelSize={5}
+          cooldownTicks={240}
+          linkDirectionalParticles={2}
+          linkDirectionalParticleSpeed={0.006}
+          linkDirectionalParticleWidth={1.2}
           onRenderFramePre={(ctx, globalScale) => {
             labelBoxesRef.current = [];
             zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
@@ -890,40 +1052,18 @@ const NetworkGraph: React.FC = () => {
               }
             });
             nodePositionsRef.current = nextPositions;
-            const companies = graph.nodes.filter(node => node.type === 'company');
-            if (companies.length > 0) {
-              const nextAngles = new Map<string, number>();
-              let radiusSum = 0;
-              let radiusCount = 0;
-              companies.forEach(node => {
-                const x = (node as any).x ?? 0;
-                const y = (node as any).y ?? 0;
-                if (x === 0 && y === 0) return;
-                const angle = Math.atan2(y, x);
-                nextAngles.set(node.id, angle);
-                radiusSum += Math.hypot(x, y);
-                radiusCount += 1;
-              });
-              companyAnglesRef.current = nextAngles;
-              companyRadiusRef.current = radiusCount > 0 ? radiusSum / radiusCount : 0;
-            } else {
-              companyAnglesRef.current = new Map();
-              companyRadiusRef.current = 0;
-            }
-            const companyRadius = companyRadiusRef.current;
-            if (!companyRadius) return;
-            // guide lines removed
           }}
           nodeLabel={(node: NodeObject) => {
             const typed = node as GraphNode;
-            return `${typed.label} (${typed.type})`;
+            return typed.label;
           }}
           nodeColor={nodeColor}
           nodeVal={nodeSize}
           nodeCanvasObjectMode={() => 'after'}
           nodeCanvasObject={drawNodeLabel}
           linkColor={(link: any) => {
-            if (!highlightMode || !selectedNodeId) return 'rgba(120, 138, 158, 0.35)';
+            const highlightActive = highlightMode || Boolean(searchFocus);
+            if (!highlightActive || !selectedNodeId) return 'rgba(120, 138, 158, 0.35)';
             const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
             const targetId = typeof link.target === 'string' ? link.target : link.target.id;
             return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
@@ -935,7 +1075,8 @@ const NetworkGraph: React.FC = () => {
               const count = Number(link.count) || 1;
               return Math.min(6, 1 + Math.log2(count + 1) * 1.2);
             }
-            if (!highlightMode || !selectedNodeId) return 1;
+            const highlightActive = highlightMode || Boolean(searchFocus);
+            if (!highlightActive || !selectedNodeId) return 1;
             const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
             const targetId = typeof link.target === 'string' ? link.target : link.target.id;
             return highlightedLinkKeys.has(`${sourceId}->${targetId}`) ? 2 : 1;
@@ -968,16 +1109,26 @@ const NetworkGraph: React.FC = () => {
             <div className="font-semibold">{hoveredNode.label}</div>
             {hoveredNode.type === 'contact' ? (
               <>
+                <div>
+                  会社: {hoveredNode.company_node_id ? rawNodeById.get(hoveredNode.company_node_id)?.label || '-' : '-'}
+                </div>
                 <div>役職・部署: {hoveredNode.role || '-'}</div>
+                <div>関係: {(contactRelations.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
+                <div>イベント: {(contactEvents.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
                 <div>電話: {hoveredNode.mobile || hoveredNode.phone || '-'}</div>
                 <div>メール: {hoveredNode.email || '-'}</div>
                 {hoveredNode.notes ? <div>メモ: {hoveredNode.notes}</div> : null}
               </>
             ) : hoveredNode.type === 'company' ? (
               <>
-                <div>郵便番号: {hoveredNode.postal_code || '-'}</div>
-                <div>住所: {hoveredNode.address || '-'}</div>
+                <div>グループ: {companyGroupName.get(hoveredNode.id) || '-'}</div>
+                <div>Tech: {(companyTechs.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
+                <div>Contacts: {companyContactsCount.get(hoveredNode.id) ?? 0}</div>
               </>
+            ) : hoveredNode.type === 'event' ? (
+              <div>参加者数: {eventParticipantCount.get(hoveredNode.id) ?? 0}</div>
+            ) : hoveredNode.type === 'group' ? (
+              <div>企業数: {groupCompanyCount.get(hoveredNode.id) ?? 0}</div>
             ) : (
               <div>{hoveredNode.type}</div>
             )}

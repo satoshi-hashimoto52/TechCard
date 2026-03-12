@@ -9,6 +9,9 @@ import CardUpload from './pages/CardUpload';
 import ContactRegister from './pages/ContactRegister';
 import NetworkGraph from './pages/NetworkGraph';
 import EventRegister from './pages/EventRegister';
+import CompanyGroups from './pages/CompanyGroups';
+import CompanyDetail from './pages/CompanyDetail';
+import EventDetail from './pages/EventDetail';
 
 function App() {
   return (
@@ -26,6 +29,9 @@ function App() {
             <Route path="/card-upload" element={<CardUpload />} />
             <Route path="/network" element={<NetworkGraph />} />
             <Route path="/events" element={<EventRegister />} />
+            <Route path="/events/:id" element={<EventDetail />} />
+            <Route path="/company-groups" element={<CompanyGroups />} />
+            <Route path="/company/:id" element={<CompanyDetail />} />
           </Routes>
         </div>
       </div>

@@ -44,9 +44,23 @@ class EventRead(EventBase):
     class Config:
         from_attributes = True
 
+class EventDetail(BaseModel):
+    id: int
+    name: str
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    location: Optional[str] = None
+    year: Optional[int] = None
+    participants: List[dict] = []
+    companies: List[dict] = []
+
+    class Config:
+        from_attributes = True
+
 # Company schemas
 class CompanyBase(BaseModel):
     name: str
+    group_id: Optional[int] = None
     postal_code: Optional[str] = None
     address: Optional[str] = None
     latitude: Optional[float] = None
@@ -60,6 +74,35 @@ class CompanyRead(CompanyBase):
 
     class Config:
         from_attributes = True
+
+class CompanyGroupBase(BaseModel):
+    name: str
+    description: Optional[str] = None
+
+class CompanyGroupCreate(CompanyGroupBase):
+    pass
+
+class CompanyGroupRead(CompanyGroupBase):
+    id: int
+    company_ids: List[int] = []
+    aliases: List[str] = []
+
+    class Config:
+        from_attributes = True
+
+class CompanyDetail(BaseModel):
+    id: int
+    name: str
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    tech_tags: List[str] = []
+    contacts: List[dict] = []
+
+    class Config:
+        from_attributes = True
+
+class CompanyGroupUpdate(BaseModel):
+    group_id: Optional[int] = None
 
 # BusinessCard schemas
 class BusinessCardBase(BaseModel):

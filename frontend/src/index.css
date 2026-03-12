@@ -2,6 +2,100 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light;
+}
+
+body {
+  background: #f2f4f7;
+}
+
+#root {
+  min-height: 100vh;
+  background: #f2f4f7;
+  color: #1f2937;
+}
+
+#root .bg-white {
+  background-color: #ffffff;
+  color: #111827;
+  border-color: #e5e7eb;
+}
+
+#root .bg-gray-50 {
+  background-color: #f7f8fa;
+}
+
+#root .bg-gray-100 {
+  background-color: #f1f3f5;
+}
+
+#root .bg-gray-200 {
+  background-color: #e5e7eb;
+}
+
+#root .text-gray-900 {
+  color: #0f172a;
+}
+
+#root .text-gray-800 {
+  color: #1f2937;
+}
+
+#root .text-gray-700 {
+  color: #374151;
+}
+
+#root .text-gray-600 {
+  color: #4b5563;
+}
+
+#root .text-gray-500 {
+  color: #6b7280;
+}
+
+#root .text-gray-400 {
+  color: #9ca3af;
+}
+
+#root .border {
+  border-color: #e5e7eb;
+}
+
+#root input,
+#root select,
+#root textarea {
+  background-color: #ffffff;
+  color: #111827;
+  border-color: #d1d5db;
+}
+
+#root input::placeholder,
+#root textarea::placeholder {
+  color: #9ca3af;
+}
+
+#root .shadow {
+  box-shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
+}
+
+.sidebar {
+  background: #555555;
+  color: #f8fafc;
+}
+
+.sidebar__logo {
+  background: #3f3f3f;
+  padding: 12px 16px;
+  border-radius: 0;
+  letter-spacing: 0.02em;
+}
+
+.sidebar__link--active {
+  color: #7dffea;
+  text-shadow: 0 0 10px rgba(125, 255, 234, 1), 0 0 22px rgba(72, 220, 255, 0.95);
+}
+
 .company-map .maplibregl-canvas {
   outline: none;
 }
@@ -61,8 +155,8 @@
   gap: 2px;
   font-size: 11px;
   line-height: 1.1;
-  color: #111827;
-  text-shadow: 0 1px 2px rgba(255, 255, 255, 0.9);
+  color: #e5e7eb;
+  text-shadow: 0 1px 2px rgba(16, 18, 22, 0.8);
   white-space: nowrap;
 }
 
@@ -72,12 +166,12 @@
 
 .company-led-label__city {
   font-size: 10px;
-  color: #374151;
+  color: #cbd5e1;
 }
 
 .company-led-popup {
   font-size: 12px;
-  color: #0f172a;
+  color: #e5e7eb;
 }
 
 .company-led-popup__name {
@@ -86,7 +180,7 @@
 }
 
 .company-led-popup__address {
-  color: #334155;
+  color: #cbd5e1;
 }
 
 @keyframes companyLedPulse {

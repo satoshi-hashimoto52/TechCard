@@ -1,5 +1,5 @@
 import React from 'react';
-import { Link } from 'react-router-dom';
+import { NavLink } from 'react-router-dom';
 import axios from 'axios';
 
 const Sidebar: React.FC = () => {
@@ -24,26 +24,75 @@ const Sidebar: React.FC = () => {
   };
 
   return (
-    <div className="bg-gray-800 text-white w-64 min-w-max min-h-screen p-4 flex flex-col">
-      <h2 className="text-xl font-bold mb-6">TechCard</h2>
-      <ul>
+    <div className="sidebar bg-gray-800 text-white w-64 min-w-max min-h-screen flex flex-col">
+      <h2 className="sidebar__logo text-xl font-bold">TechCard</h2>
+      <div className="px-4 pt-6">
+        <ul>
         <li className="mb-2">
-          <Link to="/contacts" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">連絡先</Link>
+          <NavLink
+            to="/contacts"
+            end
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            連絡先
+          </NavLink>
         </li>
         <li className="mb-2">
-          <Link to="/contacts/register" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">連絡先登録</Link>
+          <NavLink
+            to="/contacts/register"
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            連絡先登録
+          </NavLink>
         </li>
         <li className="mb-2">
-          <Link to="/network" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">ネットワークグラフ</Link>
+          <NavLink
+            to="/network"
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            ネットワークグラフ
+          </NavLink>
         </li>
         <li className="mb-2">
-          <Link to="/events" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">イベント登録</Link>
+          <NavLink
+            to="/company-groups"
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            会社グループ
+          </NavLink>
         </li>
         <li className="mb-2">
-          <Link to="/" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">ダッシュボード</Link>
+          <NavLink
+            to="/events"
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            イベント登録
+          </NavLink>
         </li>
-      </ul>
-      <div className="mt-auto pt-4">
+        <li className="mb-2">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            ダッシュボード
+          </NavLink>
+        </li>
+        </ul>
+      </div>
+      <div className="mt-auto px-4 pb-4">
         <button
           type="button"
           onClick={handleShutdown}
