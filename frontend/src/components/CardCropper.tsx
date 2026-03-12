@@ -10,6 +10,8 @@ type CardCropperProps = {
   onPointCountChange?: (count: number) => void;
   initialPoints?: Point[] | null;
   extraActions?: React.ReactNode;
+  showCropActions?: boolean;
+  orientation?: 'horizontal' | 'vertical';
 };
 
 const POINT_RADIUS = 6;
@@ -23,6 +25,8 @@ const CardCropper: React.FC<CardCropperProps> = ({
   onPointCountChange,
   initialPoints,
   extraActions,
+  showCropActions = true,
+  orientation = 'horizontal',
 }) => {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -59,7 +63,9 @@ const CardCropper: React.FC<CardCropperProps> = ({
     const updateSize = () => {
       const width = node.clientWidth;
       if (!width) return;
-      const ratio = image ? image.height / image.width : FALLBACK_RATIO;
+      const ratio = image
+        ? (orientation === 'vertical' ? image.width / image.height : image.height / image.width)
+        : (orientation === 'vertical' ? 1 / FALLBACK_RATIO : FALLBACK_RATIO);
       const height = Math.round(width * ratio);
       setCanvasSize({ width, height });
     };
@@ -73,6 +79,17 @@ const CardCropper: React.FC<CardCropperProps> = ({
     (clientX: number, clientY: number) => {
       if (!canvasRef.current || !image) return null;
       const rect = canvasRef.current.getBoundingClientRect();
+      if (orientation === 'vertical') {
+        const scale = image.height / canvasSize.width;
+        const u = (clientX - rect.left) * scale;
+        const v = (clientY - rect.top) * scale;
+        const x = v;
+        const y = image.height - u;
+        return {
+          x: Math.max(0, Math.min(image.width, x)),
+          y: Math.max(0, Math.min(image.height, y)),
+        };
+      }
       const scaleX = image.width / canvasSize.width;
       const scaleY = image.height / canvasSize.height;
       const x = (clientX - rect.left) * scaleX;
@@ -82,17 +99,23 @@ const CardCropper: React.FC<CardCropperProps> = ({
         y: Math.max(0, Math.min(image.height, y)),
       };
     },
-    [canvasSize.width, canvasSize.height, image],
+    [canvasSize.width, canvasSize.height, image, orientation],
   );
 
   const toCanvasPoint = useCallback(
     (point: Point) => {
       if (!image || canvasSize.width === 0) return { x: 0, y: 0 };
+      if (orientation === 'vertical') {
+        const scale = canvasSize.width / image.height;
+        const u = image.height - point.y;
+        const v = point.x;
+        return { x: u * scale, y: v * scale };
+      }
       const scaleX = canvasSize.width / image.width;
       const scaleY = canvasSize.height / image.height;
       return { x: point.x * scaleX, y: point.y * scaleY };
     },
-    [canvasSize.width, canvasSize.height, image],
+    [canvasSize.width, canvasSize.height, image, orientation],
   );
 
   const drawCanvas = useCallback(() => {
@@ -112,7 +135,16 @@ const CardCropper: React.FC<CardCropperProps> = ({
       ctx.fillText('画像を読み込み中です', canvas.width / 2, canvas.height / 2);
       return;
     }
-    ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    if (orientation === 'vertical') {
+      const scale = canvas.width / image.height;
+      ctx.save();
+      ctx.translate(canvas.width, 0);
+      ctx.rotate(Math.PI / 2);
+      ctx.drawImage(image, 0, 0, image.width * scale, image.height * scale);
+      ctx.restore();
+    } else {
+      ctx.drawImage(image, 0, 0, canvas.width, canvas.height);
+    }
 
     if (points.length > 0) {
       ctx.save();
@@ -143,7 +175,7 @@ const CardCropper: React.FC<CardCropperProps> = ({
       ctx.fill();
       ctx.stroke();
     });
-  }, [canvasSize.height, canvasSize.width, dragIndex, image, points, toCanvasPoint]);
+  }, [canvasSize.height, canvasSize.width, dragIndex, image, orientation, points, toCanvasPoint]);
 
   useEffect(() => {
     drawCanvas();
@@ -259,21 +291,25 @@ const CardCropper: React.FC<CardCropperProps> = ({
         <div className="text-xs text-red-600">{error}</div>
       )}
       <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={resetPoints}
-          className="px-3 py-2 text-sm border rounded"
-        >
-          ポイントリセット
-        </button>
-        <button
-          type="button"
-          onClick={handleCrop}
-          disabled={points.length !== 4 || isCropping}
-          className="px-3 py-2 text-sm rounded bg-emerald-600 text-white disabled:opacity-50"
-        >
-          {isCropping ? 'クロップ中...' : 'クロップ実行'}
-        </button>
+        {showCropActions && (
+          <>
+            <button
+              type="button"
+              onClick={resetPoints}
+              className="px-3 py-2 text-sm border rounded"
+            >
+              ポイントリセット
+            </button>
+            <button
+              type="button"
+              onClick={handleCrop}
+              disabled={points.length !== 4 || isCropping}
+              className="px-3 py-2 text-sm rounded bg-emerald-600 text-white disabled:opacity-50"
+            >
+              {isCropping ? 'クロップ中...' : 'クロップ実行'}
+            </button>
+          </>
+        )}
         {extraActions}
       </div>
     </div>

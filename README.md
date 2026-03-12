@@ -63,60 +63,18 @@ cd techcard
 
 バックエンドの仮想環境が既にセットアップされていることを前提としています。初回は各ディレクトリで `npm install` または `pip install -r requirements.txt` を実行してください。
 
-## スマホ撮影（QR）機能の有効化
+## スマホ撮影（QR）
 
-iPhone/Androidのブラウザで**撮影時に枠を表示**するため、HTTPSでの起動が必要です。
+旧「スマホで撮影（QR表示）」はHTTPS証明書が必要なため**廃止**しました。  
+現在は **HTTP（8000）** で動く簡易アップロードを使用します。
 
-1. **証明書作成（mkcert）**
-   ```bash
-   brew install mkcert
-   mkcert -install
-   ```
+### カメラ起動までの流れ
+1. `./dev_start.sh` で起動
+2. ブラウザで `http://localhost:3000` を開く
+3. 連絡先登録 → 「スマホ撮影」を押す
+4. QRをiPhoneで開く（`http://<PCのIP>:8000/mobile-upload`）
+5. 撮影して送信
 
-2. **ローカルIPの確認**
-   ```bash
-   ifconfig | grep -E "inet " | head -n 5
-   ```
-   `192.168.x.x` のLAN IPを使用します。
-
-3. **証明書作成**
-   ```bash
-   cd techcard/backend
-   mkdir -p certs
-   mkcert -cert-file certs/lan.pem -key-file certs/lan-key.pem \
-     <YOUR_LOCAL_IP> localhost 127.0.0.1
-   ```
-
-4. **HTTPSでバックエンドを起動（8443）**
-   ```bash
-   cd techcard/backend
-   source .venv/bin/activate
-   python -m uvicorn app.main:app --host 0.0.0.0 --port 8443 \
-     --ssl-certfile certs/lan.pem --ssl-keyfile certs/lan-key.pem
-   ```
-
-5. **iPhoneで証明書を信頼**
-   - `mkcert -CAROOT` で表示されるフォルダ内の `rootCA.pem` をiPhoneへ送信
-   - 設定 → 一般 → 情報 → 証明書信頼設定 で信頼をON
-
-### IPが変わった場合（重要）
-- **LAN IPが変わったら証明書は再生成が必要**です。
-- 手順:
-  1. `ifconfig | grep -E "inet " | head -n 5` で新しいIPを確認
-  2. `mkcert -cert-file certs/lan.pem -key-file certs/lan-key.pem <NEW_IP> localhost 127.0.0.1` を再実行
-  3. バックエンド/フロントエンドを再起動
-  4. 「スマホで撮影（QR表示）」からQRを再生成
-
-### カメラ起動までの流れ（重要）
-1. 上記の証明書手順を完了（Mac + iPhoneで信頼）
-2. `./dev_start.sh` で起動
-3. ブラウザで `http://localhost:3000` を開く
-4. 連絡先登録 → 「スマホで撮影（QR表示）」を押す
-5. QRをiPhoneで開く  
-   **HTTPS（`https://<PCのIP>:8443`）で開かれていることを確認**
-6. 「カメラ起動」→ 撮影してアップロード  
-
-QRからアクセスするURLはHTTPS（`https://<PCのIP>:8443`）になります。  
 PCとスマホは**同一Wi-Fi**が必要です。
 
 ### 連続登録モード

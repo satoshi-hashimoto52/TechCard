@@ -21,6 +21,7 @@ type RoiEditorProps = {
   onChange: (next: RoiTemplate) => void;
   baseWidth?: number;
   baseHeight?: number;
+  orientation?: 'horizontal' | 'vertical';
 };
 
 const LABELS: Record<RoiField, string> = {
@@ -41,6 +42,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
   onChange,
   baseWidth = 1200,
   baseHeight = 700,
+  orientation = 'horizontal',
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const transformerRef = useRef<any>(null);
@@ -48,14 +50,46 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
   const [stageSize, setStageSize] = useState({ width: 0, height: 0 });
   const [isPanning, setIsPanning] = useState(false);
   const [lastPanPos, setLastPanPos] = useState<{ x: number; y: number } | null>(null);
-  const [roiImage] = useImage(imageUrl);
+  const [roiImage] = useImage(imageUrl, 'anonymous');
+  const [displayImage, setDisplayImage] = useState<HTMLImageElement | null>(null);
+
+  useEffect(() => {
+    if (!roiImage) {
+      setDisplayImage(null);
+      return;
+    }
+    if (orientation === 'horizontal') {
+      setDisplayImage(roiImage);
+      return;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = baseWidth;
+    canvas.height = baseHeight;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      setDisplayImage(roiImage);
+      return;
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.max(canvas.width / roiImage.height, canvas.height / roiImage.width);
+    const drawW = roiImage.width * scale;
+    const drawH = roiImage.height * scale;
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(roiImage, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    const rotated = new Image();
+    rotated.onload = () => setDisplayImage(rotated);
+    rotated.src = canvas.toDataURL('image/png');
+  }, [roiImage, orientation, baseWidth, baseHeight]);
 
   useEffect(() => {
     if (!containerRef.current) return;
     const updateSize = () => {
       const width = containerRef.current?.clientWidth || 0;
       if (!width) return;
-      const ratio = roiImage ? roiImage.height / roiImage.width : baseHeight / baseWidth;
+      const ratio = displayImage ? displayImage.height / displayImage.width : baseHeight / baseWidth;
       const height = Math.round(width * ratio);
       setStageSize({ width, height });
     };
@@ -63,7 +97,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
     const observer = new ResizeObserver(updateSize);
     observer.observe(containerRef.current);
     return () => observer.disconnect();
-  }, [roiImage, baseHeight, baseWidth]);
+  }, [displayImage, baseHeight, baseWidth]);
 
   useEffect(() => {
     const transformer = transformerRef.current;
@@ -191,7 +225,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
     <div className="bg-gray-50 border border-gray-200 rounded p-4">
       <div className="text-xs text-gray-500 mb-3">ROIをドラッグ/リサイズして調整してください。</div>
       <div ref={containerRef} className="w-full border rounded bg-white overflow-hidden">
-        {roiImage && stageSize.width > 0 ? (
+        {displayImage && stageSize.width > 0 ? (
           <Stage
             width={stageSize.width}
             height={stageSize.height}
@@ -206,7 +240,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
             <Layer>
               <KonvaImage
                 name="roi-image"
-                image={roiImage}
+                image={displayImage}
                 width={stageSize.width}
                 height={stageSize.height}
               />

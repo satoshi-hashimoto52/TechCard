@@ -210,35 +210,23 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
 
         if (!map.getSource('regions-boundary')) {
           try {
-            const data = await loadGeoJson('/regions.geojson');
+            const data = await loadGeoJson('/japan_regions.geojson');
             map.addSource('regions-boundary', { type: 'geojson', data });
           } catch (error) {
             console.warn('regions boundary load failed', error);
-            try {
-              const fallback = await loadGeoJson('/japan_regions.geojson');
-              map.addSource('regions-boundary', { type: 'geojson', data: fallback });
-            } catch (fallbackError) {
-              console.warn('regions boundary fallback failed', fallbackError);
-            }
           }
         }
         if (!map.getSource('pref-boundary')) {
           try {
-            const data = await loadGeoJson('/prefectures.geojson');
+            const data = await loadGeoJson('/japan.geojson');
             map.addSource('pref-boundary', { type: 'geojson', data });
           } catch (error) {
             console.warn('prefecture boundary load failed', error);
-            try {
-              const fallback = await loadGeoJson('/japan.geojson');
-              map.addSource('pref-boundary', { type: 'geojson', data: fallback });
-            } catch (fallbackError) {
-              console.warn('prefecture boundary fallback failed', fallbackError);
-            }
           }
         }
         if (!map.getSource('city-boundary')) {
           try {
-            const data = await loadGeoJson('/municipalities.geojson');
+            const data = await loadGeoJson('/japan.geojson');
             map.addSource('city-boundary', { type: 'geojson', data });
           } catch (error) {
             console.warn('municipality boundary load failed', error);
@@ -300,13 +288,13 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               map.setPaintProperty(layer.id, 'text-halo-color', '#0f172a');
               map.setPaintProperty(layer.id, 'text-halo-width', 1.6);
               map.setLayoutProperty(layer.id, 'text-size', 18);
-              map.setLayoutProperty(layer.id, 'maxzoom', 8);
+              map.setLayerZoomRange(layer.id, 0, 8);
             } else if (id.includes('admin-2') || id.includes('municipality')) {
               map.setPaintProperty(layer.id, 'text-color', '#93c5fd');
               map.setPaintProperty(layer.id, 'text-halo-color', '#0f172a');
               map.setPaintProperty(layer.id, 'text-halo-width', 1);
               map.setLayoutProperty(layer.id, 'text-size', 11);
-              map.setLayoutProperty(layer.id, 'minzoom', 6);
+              map.setLayerZoomRange(layer.id, 6, 24);
             } else if (
               id.includes('city') ||
               id.includes('town') ||

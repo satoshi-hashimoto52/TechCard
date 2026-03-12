@@ -6,18 +6,21 @@ import ContextPanel from '../components/ContextPanel';
 import ShortcutPanel from '../components/ShortcutPanel';
 
 const NETWORK_GRAPH_COLORS = {
-  self: '#ed5f5f',
+  self: '#CBD5E1',
   base: {
-    event: '#e6ed5f',
-    contact: '#beed5f',
-    company: '#5fed72',
-    group: '#61ed5f',
-    tech: '#615fed',
-    relation: '#ed5fa8',
+    event: '#FCA5A5',
+    contact: '#CBD5E1',
+    company: '#60A5FA',
+    group: '#C4B5FD',
+    tech: '#F6D365',
+    relation: '#86EFAC',
   },
-  fallback: '#94a3b8',
-  muted: '#cbd5f5',
+  fallback: '#9CA3AF',
+  muted: '#F3F4F6',
 };
+
+const NODE_REL_SIZE = 5;
+const LINK_COLOR = 'rgba(148, 163, 184, 0.4)';
 
 type GraphNode = {
   id: string;
@@ -43,7 +46,7 @@ type NodeObject = {
 type GraphLink = {
   source: string | { id: string };
   target: string | { id: string };
-  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'relation' | 'company_relation' | 'group_contact';
+  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'contact_tech' | 'relation' | 'company_relation' | 'group_contact';
   count?: number;
 };
 
@@ -220,7 +223,87 @@ const NetworkGraph: React.FC = () => {
       return { nodes: filteredNodes, links };
     }
 
+    const techConnectedToSelf = new Set<string>();
+    const techCompanyMap = new Map<string, Set<string>>();
+    if (visibleTypes.contact) {
+      const nodeById = new Map(rawGraph.nodes.map(node => [node.id, node]));
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'contact_tech') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const contactId = sourceId.startsWith('contact_')
+          ? sourceId
+          : targetId.startsWith('contact_')
+          ? targetId
+          : null;
+        const techId = sourceId.startsWith('tech_')
+          ? sourceId
+          : targetId.startsWith('tech_')
+          ? targetId
+          : null;
+        if (!contactId || !techId) return;
+        const contact = nodeById.get(contactId) as GraphNode | undefined;
+        if (contact && contact.is_self) {
+          techConnectedToSelf.add(techId);
+        }
+      });
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'company_tech') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const companyId = sourceId.startsWith('company_')
+          ? sourceId
+          : targetId.startsWith('company_')
+          ? targetId
+          : null;
+        const techId = sourceId.startsWith('tech_')
+          ? sourceId
+          : targetId.startsWith('tech_')
+          ? targetId
+          : null;
+        if (!companyId || !techId) return;
+        const list = techCompanyMap.get(techId) || new Set<string>();
+        list.add(companyId);
+        techCompanyMap.set(techId, list);
+      });
+    }
+
     const links = rawGraph.edges.filter(edge => {
+      if (edge.type === 'contact_tech' && visibleTypes.contact) {
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const techId = sourceId.startsWith('tech_')
+          ? sourceId
+          : targetId.startsWith('tech_')
+          ? targetId
+          : null;
+        if (techId && !techConnectedToSelf.has(techId)) {
+          return false;
+        }
+      }
+      if (edge.type === 'company_tech' && visibleTypes.contact) {
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const techId = sourceId.startsWith('tech_')
+          ? sourceId
+          : targetId.startsWith('tech_')
+          ? targetId
+          : null;
+        const companyId = sourceId.startsWith('company_')
+          ? sourceId
+          : targetId.startsWith('company_')
+          ? targetId
+          : null;
+        if (techId && techConnectedToSelf.has(techId)) {
+          return false;
+        }
+        if (techId && companyId) {
+          const allowedCompanies = techCompanyMap.get(techId);
+          if (!allowedCompanies || !allowedCompanies.has(companyId)) {
+            return false;
+          }
+        }
+      }
       const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
       const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
       return nodeIds.has(sourceId) && nodeIds.has(targetId);
@@ -559,198 +642,77 @@ const NetworkGraph: React.FC = () => {
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
+    const ringRadii: Record<GraphNode['type'], number> = {
+      contact: 150,
+      company: 320,
+      group: 480,
+      tech: 300,
+      event: 260,
+      relation: 200,
+    };
+    const placeRing = (nodes: GraphNode[], radius: number, offset = 0) => {
+      if (nodes.length === 0) return;
+      const ordered = [...nodes].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+      const step = (Math.PI * 2) / ordered.length;
+      ordered.forEach((node, index) => {
+        const angle = offset + index * step;
+        (node as any).x = Math.cos(angle) * radius;
+        (node as any).y = Math.sin(angle) * radius;
+        (node as any).vx = 0;
+        (node as any).vy = 0;
+      });
+    };
+    const selfNode = graph.nodes.find(node => node.type === 'contact' && (node as GraphNode).is_self) as GraphNode | undefined;
+    const contactNodes = graph.nodes.filter(node => node.type === 'contact' && !(node as GraphNode).is_self) as GraphNode[];
+    const companyNodes = graph.nodes.filter(node => node.type === 'company') as GraphNode[];
+    const groupNodes = graph.nodes.filter(node => node.type === 'group') as GraphNode[];
+    const techNodes = graph.nodes.filter(node => node.type === 'tech') as GraphNode[];
+    const eventNodes = graph.nodes.filter(node => node.type === 'event') as GraphNode[];
+    const relationNodes = graph.nodes.filter(node => node.type === 'relation') as GraphNode[];
+
+    placeRing(contactNodes, ringRadii.contact, Math.PI / 4);
+    placeRing(companyNodes, ringRadii.company, 0);
+    placeRing(groupNodes, ringRadii.group, Math.PI / 6);
+    placeRing(techNodes, ringRadii.tech, Math.PI / 3);
+    placeRing(eventNodes, ringRadii.event, -Math.PI / 6);
+    placeRing(relationNodes, ringRadii.relation, -Math.PI / 4);
+
     graph.nodes.forEach(node => {
       if (!(node as GraphNode).is_self) {
         (node as any).fx = undefined;
         (node as any).fy = undefined;
       }
     });
-    const selfNode = graph.nodes.find(node => node.type === 'contact' && (node as GraphNode).is_self);
     if (selfNode) {
       (selfNode as any).fx = 0;
       (selfNode as any).fy = 0;
+      (selfNode as any).x = 0;
+      (selfNode as any).y = 0;
     }
 
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
-      charge.strength((node: GraphNode) => {
-        if (node.type === 'group') return -280;
-        if (node.type === 'company') return -240;
-        if (node.type === 'event') return -200;
-        if (node.type === 'tech') return -180;
-        if (node.type === 'relation') return -170;
-        if (node.type === 'contact') return -160;
-        return -140;
-      });
+      charge.strength(-120);
     }
 
     const linkForce = fg.d3Force('link') as any;
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance((link: any) => {
-        if (link.type === 'employment') return 180;
-        if (link.type === 'company_group') return 210;
-        if (link.type === 'company_tech') return 120;
-        if (link.type === 'relation') return 120;
-        if (link.type === 'group_contact') return 170;
-        if (link.type === 'event_attendance') return 160;
-        return 150;
+        if (link.type === 'employment') return 120;
+        if (link.type === 'company_group') return 180;
+        if (link.type === 'company_tech') return 150;
+        return 140;
       });
       if (typeof linkForce.strength === 'function') {
         linkForce.strength((link: any) => (link.type === 'employment' ? 0.9 : 0.5));
       }
     }
 
-    const typeXForce = () => {
-      let nodes: any[] = [];
-      const strength = 0.06;
-      const force = (alpha: number) => {
-        for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; vx?: number };
-          let targetX = 0;
-          if (typed.type === 'event') targetX = -360;
-          if (typed.type === 'contact') targetX = 0;
-          if (typed.type === 'relation') targetX = 80;
-          if (typed.type === 'company') targetX = 260;
-          if (typed.type === 'tech') targetX = 300;
-          if (typed.type === 'group') targetX = 520;
-          const x = typed.x ?? 0;
-          typed.vx = (typed.vx ?? 0) + (targetX - x) * strength * alpha;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-      };
-      return force;
-    };
-    fg.d3Force('type-x', typeXForce());
-
-    const typeYForce = () => {
-      let nodes: any[] = [];
-      const strength = 0.04;
-      const force = (alpha: number) => {
-        for (const node of nodes) {
-          const typed = node as GraphNode & { y?: number; vy?: number };
-          if (typed.type === 'tech' || typed.type === 'relation') continue;
-          const y = typed.y ?? 0;
-          typed.vy = (typed.vy ?? 0) + (0 - y) * strength * alpha;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-      };
-      return force;
-    };
-    fg.d3Force('type-y', typeYForce());
-
-    const getAngle = (id: string) => {
-      const existing = orbitAnglesRef.current.get(id);
-      if (existing != null) return existing;
-      let hash = 0;
-      for (let i = 0; i < id.length; i += 1) {
-        hash = (hash * 31 + id.charCodeAt(i)) % 360;
-      }
-      const angle = (hash * Math.PI) / 180;
-      orbitAnglesRef.current.set(id, angle);
-      return angle;
-    };
-
-    const orbitForce = (
-      nodeType: 'tech' | 'relation',
-      linkType: 'company_tech' | 'relation',
-      anchorPrefix: 'company_' | 'contact_',
-      radius: number,
-    ) => {
-      let nodes: any[] = [];
-      let nodeMap: Map<string, any> = new Map();
-      let anchorMap: Map<string, any[]> = new Map();
-      const strength = 0.12;
-      const force = (alpha: number) => {
-        for (const node of nodes) {
-          const typed = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          if (typed.type !== nodeType) continue;
-          const anchors = anchorMap.get(typed.id);
-          if (!anchors || anchors.length === 0) continue;
-          let avgX = 0;
-          let avgY = 0;
-          anchors.forEach(anchor => {
-            avgX += anchor.x ?? 0;
-            avgY += anchor.y ?? 0;
-          });
-          avgX /= anchors.length;
-          avgY /= anchors.length;
-          const angle = getAngle(typed.id);
-          const targetX = avgX + Math.cos(angle) * radius;
-          const targetY = avgY + Math.sin(angle) * radius;
-          const dx = targetX - (typed.x ?? 0);
-          const dy = targetY - (typed.y ?? 0);
-          typed.vx = (typed.vx ?? 0) + dx * strength * alpha;
-          typed.vy = (typed.vy ?? 0) + dy * strength * alpha;
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-        nodeMap = new Map(nodes.filter(n => n?.id).map(n => [n.id, n]));
-        anchorMap = new Map();
-        graph.links.forEach(link => {
-          if (link.type !== linkType) return;
-          const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-          const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-          const nodeId = sourceId.startsWith(`${nodeType}_`)
-            ? sourceId
-            : targetId.startsWith(`${nodeType}_`)
-            ? targetId
-            : null;
-          const anchorId = sourceId.startsWith(anchorPrefix)
-            ? sourceId
-            : targetId.startsWith(anchorPrefix)
-            ? targetId
-            : null;
-          if (!nodeId || !anchorId) return;
-          const anchorNode = nodeMap.get(anchorId);
-          if (!anchorNode) return;
-          const list = anchorMap.get(nodeId) || [];
-          list.push(anchorNode);
-          anchorMap.set(nodeId, list);
-        });
-      };
-      return force;
-    };
-
-    fg.d3Force('tech-orbit', orbitForce('tech', 'company_tech', 'company_', 95));
-    fg.d3Force('relation-orbit', orbitForce('relation', 'relation', 'contact_', 85));
-
-    const lowDegreeSeparationForce = () => {
-      let nodes: any[] = [];
-      const minDistance = 42;
-      const strength = 0.18;
-      const force = (alpha: number) => {
-        const lowNodes = nodes.filter(node => {
-          const typed = node as GraphNode;
-          return (nodeDegreeMap.get(typed.id) ?? 0) <= 1;
-        });
-        for (const node of lowNodes) {
-          const a = node as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-          const ax = a.x ?? 0;
-          const ay = a.y ?? 0;
-          for (const other of nodes) {
-            if (other === node) continue;
-            const b = other as GraphNode & { x?: number; y?: number; vx?: number; vy?: number };
-            const dx = (b.x ?? 0) - ax;
-            const dy = (b.y ?? 0) - ay;
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            if (dist >= minDistance) continue;
-            const k = ((minDistance - dist) / dist) * strength * alpha;
-            a.vx = (a.vx ?? 0) - dx * k;
-            a.vy = (a.vy ?? 0) - dy * k;
-          }
-        }
-      };
-      (force as any).initialize = (newNodes: any[]) => {
-        nodes = newNodes || [];
-      };
-      return force;
-    };
-    fg.d3Force('low-degree-separation', lowDegreeSeparationForce());
+    fg.d3Force('type-x', null);
+    fg.d3Force('type-y', null);
+    fg.d3Force('tech-orbit', null);
+    fg.d3Force('relation-orbit', null);
+    fg.d3Force('low-degree-separation', null);
 
     fg.d3ReheatSimulation();
     if (selfNode && !hasCenteredRef.current) {
@@ -906,6 +868,14 @@ const NetworkGraph: React.FC = () => {
     const y = (node as any).y ?? 0;
     const offsetFactor = Math.max(1, 1 / globalScale) * 1.25;
     ctx.save();
+    const radius = Math.sqrt(nodeSize(node)) * NODE_REL_SIZE;
+    if (typed.is_self) {
+      ctx.beginPath();
+      ctx.strokeStyle = '#ef4444';
+      ctx.lineWidth = Math.max(1.2 / globalScale, 1);
+      ctx.arc(x, y, radius + 2 / globalScale, 0, Math.PI * 2);
+      ctx.stroke();
+    }
     ctx.font = `${fontSize}px "Segoe UI", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
@@ -1190,7 +1160,7 @@ const NetworkGraph: React.FC = () => {
           <ForceGraph2D
             ref={graphRef}
             graphData={graph}
-            nodeRelSize={5}
+            nodeRelSize={NODE_REL_SIZE}
             cooldownTicks={240}
             linkDirectionalParticles={2}
             linkDirectionalParticleSpeed={0.006}
@@ -1218,12 +1188,12 @@ const NetworkGraph: React.FC = () => {
             nodeCanvasObject={drawNodeLabel}
             linkColor={(link: any) => {
               const highlightActive = highlightMode || Boolean(searchFocus);
-              if (!highlightActive || !selectedNodeId) return 'rgba(120, 138, 158, 0.35)';
+              if (!highlightActive || !selectedNodeId) return LINK_COLOR;
               const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
               const targetId = typeof link.target === 'string' ? link.target : link.target.id;
               return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
-                ? 'rgba(86, 132, 214, 0.85)'
-                : 'rgba(200, 210, 224, 0.18)';
+                ? 'rgba(156, 163, 175, 0.9)'
+                : 'rgba(156, 163, 175, 0.25)';
             }}
             linkWidth={(link: any) => {
               if (!visibleTypes.contact && link.type === 'company_relation') {

@@ -11,9 +11,12 @@ import qrcode
 import pillow_heif
 
 router = APIRouter(prefix="/mobile-upload", tags=["mobile-upload"])
+api_router = APIRouter(prefix="/api/mobile-upload", tags=["mobile-upload"])
 
 UPLOAD_DIR = Path("data/mobile_uploads")
+API_UPLOAD_DIR = Path("uploads/mobile_cards")
 MOBILE_UPLOADS: Dict[str, Dict[str, Any]] = {}
+LATEST_UPLOAD: Dict[str, Any] = {"filename": None, "file_path": None, "timestamp": 0}
 
 pillow_heif.register_heif_opener()
 
@@ -43,6 +46,10 @@ def _build_base_url(
     return f"{scheme}://{host}:{port}"
 
 
+def _build_api_base_url(request: Request) -> str:
+    return _build_base_url(request, scheme_override="http", port_override=8000)
+
+
 def _get_session(session_id: str) -> Dict[str, Any]:
     session = MOBILE_UPLOADS.get(session_id)
     if not session:
@@ -56,6 +63,15 @@ def _resize_cover(image: Image.Image, target_width: int, target_height: int) -> 
     left = max((resized.width - target_width) // 2, 0)
     top = max((resized.height - target_height) // 2, 0)
     return resized.crop((left, top, left + target_width, top + target_height))
+
+
+def _resize_contain(image: Image.Image, target_width: int, target_height: int) -> Image.Image:
+    resized = ImageOps.contain(image, (target_width, target_height))
+    background = Image.new("RGB", (target_width, target_height), (255, 255, 255))
+    left = max((target_width - resized.width) // 2, 0)
+    top = max((target_height - resized.height) // 2, 0)
+    background.paste(resized, (left, top))
+    return background
 
 
 @router.post("/sessions")
@@ -84,6 +100,139 @@ def create_session(
         "image_url": f"{base_url}/mobile-upload/{session_id}/image",
         "qr_url": f"{base_url}/mobile-upload/{session_id}/qr",
     }
+
+
+@router.get("", response_class=HTMLResponse)
+def mobile_upload_root() -> HTMLResponse:
+    html = """<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>名刺撮影</title>
+    <style>
+      body {
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        margin: 0;
+        background: #f8fafc;
+        color: #0f172a;
+      }
+      .container {
+        max-width: 520px;
+        margin: 0 auto;
+        padding: 20px;
+      }
+      .card {
+        background: white;
+        border-radius: 12px;
+        padding: 16px;
+        box-shadow: 0 8px 20px rgba(15, 23, 42, 0.08);
+      }
+      .video-wrap {
+        position: relative;
+        margin: 12px auto;
+        width: 100%;
+        aspect-ratio: 12 / 7;
+        background: #0f172a;
+        border-radius: 12px;
+        overflow: hidden;
+      }
+      video {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+      .overlay {
+        position: absolute;
+        inset: 0;
+        border: 2px solid #22c55e;
+        border-radius: 12px;
+        box-shadow: 0 0 0 9999px rgba(15, 23, 42, 0.45);
+        pointer-events: none;
+      }
+      .button {
+        display: block;
+        width: 100%;
+        background: #2563eb;
+        color: white;
+        border: none;
+        border-radius: 8px;
+        padding: 14px 16px;
+        font-size: 16px;
+        font-weight: 600;
+        margin-top: 10px;
+      }
+      .button:disabled {
+        opacity: 0.6;
+      }
+      .status {
+        margin-top: 12px;
+        font-size: 14px;
+        color: #475569;
+      }
+      .preview {
+        margin-top: 12px;
+        width: 100%;
+        border-radius: 10px;
+        border: 1px solid #e2e8f0;
+      }
+      .muted {
+        color: #94a3b8;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2>名刺撮影</h2>
+      <div class="card">
+        <button id="captureButton" class="button" type="button">撮影</button>
+        <input id="fileInput" type="file" accept="image/*" capture="environment" style="display:none;" />
+        <div id="status" class="status">待機中</div>
+      </div>
+    </div>
+    <script>
+      const fileInput = document.getElementById('fileInput');
+      const statusEl = document.getElementById('status');
+      const captureButton = document.getElementById('captureButton');
+      let file = null;
+
+      const setStatus = (message) => {
+        statusEl.textContent = message;
+      };
+
+      const uploadBlob = async (blob, filename) => {
+        setStatus('アップロード中...');
+        const formData = new FormData();
+        formData.append('image', blob, filename);
+        try {
+          const response = await fetch('/api/mobile-upload', {
+            method: 'POST',
+            body: formData,
+          });
+          if (!response.ok) {
+            throw new Error('upload failed');
+          }
+          setStatus('アップロード完了。');
+        } catch (error) {
+          setStatus('アップロードに失敗しました。');
+        }
+      };
+
+      fileInput.addEventListener('change', () => {
+        file = fileInput.files[0];
+        if (!file) return;
+        uploadBlob(file, file.name || 'mobile-upload.jpg');
+      });
+
+      captureButton.addEventListener('click', () => {
+        fileInput.click();
+      });
+    </script>
+  </body>
+</html>
+"""
+    return HTMLResponse(html)
 
 
 @router.get("/{session_id}", response_class=HTMLResponse)
@@ -344,6 +493,58 @@ def mobile_upload_page(session_id: str) -> HTMLResponse:
     return HTMLResponse(html)
 
 
+@api_router.get("/info")
+def get_mobile_upload_info(request: Request) -> Dict[str, str]:
+    base_url = _build_api_base_url(request)
+    return {"base_url": base_url}
+
+
+@api_router.post("")
+async def upload_mobile_image(image: UploadFile = File(...)) -> Dict[str, str | bool]:
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file")
+    API_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}.png"
+    file_path = API_UPLOAD_DIR / filename
+    try:
+        pil_image = Image.open(io.BytesIO(content))
+        pil_image = ImageOps.exif_transpose(pil_image)
+        pil_image = pil_image.convert("RGB")
+        # Keep original resolution for OCR/crop accuracy.
+        pil_image.save(file_path, format="PNG")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc) or "Invalid image")
+
+    LATEST_UPLOAD["filename"] = image.filename or filename
+    LATEST_UPLOAD["file_path"] = str(file_path)
+    LATEST_UPLOAD["timestamp"] = time.time()
+    return {"success": True, "filename": image.filename or filename}
+
+
+@api_router.get("/latest")
+def get_latest_upload(request: Request) -> Dict[str, str | bool | float | None]:
+    if not LATEST_UPLOAD.get("file_path"):
+        return {"success": False}
+    base_url = _build_api_base_url(request)
+    filename = LATEST_UPLOAD.get("filename") or ""
+    file_path = LATEST_UPLOAD.get("file_path") or ""
+    return {
+        "success": True,
+        "filename": filename,
+        "url": f"{base_url}/api/mobile-upload/files/{Path(file_path).name}",
+        "timestamp": float(LATEST_UPLOAD.get("timestamp") or 0),
+    }
+
+
+@api_router.get("/files/{filename}")
+def get_latest_file(filename: str) -> FileResponse:
+    file_path = API_UPLOAD_DIR / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(file_path)
+
+
 @router.get("/{session_id}/status")
 def get_status(session_id: str) -> Dict[str, Any]:
     session = _get_session(session_id)
@@ -385,7 +586,7 @@ async def upload_image(
         pil_image = Image.open(io.BytesIO(content))
         pil_image = ImageOps.exif_transpose(pil_image)
         pil_image = pil_image.convert("RGB")
-        pil_image = _resize_cover(pil_image, 1200, 700)
+        # Keep original resolution for OCR/crop accuracy.
         pil_image.save(file_path, format="PNG")
     except Exception as exc:
         session["status"] = "error"

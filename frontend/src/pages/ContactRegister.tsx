@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
+import { QRCodeCanvas } from 'qrcode.react';
 import { useNavigate, useParams } from 'react-router-dom';
 import CardCropper from '../components/CardCropper';
 import RoiEditor, { RoiField, RoiTemplate } from '../components/RoiEditor';
@@ -19,23 +20,6 @@ type OcrResult = {
 
 type ContactRegisterResponse = {
   id: number;
-};
-
-type MobileUploadSession = {
-  session_id: string;
-  server_base_url: string;
-  upload_url: string;
-  status_url: string;
-  image_url: string;
-  qr_url: string;
-};
-
-type MobileUploadStatus = {
-  status: 'waiting' | 'done' | 'error';
-  filename?: string | null;
-  image_url?: string | null;
-  error?: string | null;
-  upload_count?: number | null;
 };
 
 type TagOption = {
@@ -130,15 +114,16 @@ const ContactRegister: React.FC = () => {
   const [cameraTrack, setCameraTrack] = useState<MediaStreamTrack | null>(null);
   const [videoDevices, setVideoDevices] = useState<MediaDeviceInfo[]>([]);
   const [selectedDeviceId, setSelectedDeviceId] = useState('');
-  const [mobileSession, setMobileSession] = useState<MobileUploadSession | null>(null);
-  const [mobileStatus, setMobileStatus] = useState<'idle' | 'waiting' | 'done' | 'error'>('idle');
-  const [mobileError, setMobileError] = useState<string | null>(null);
+  const [simpleMobileOpen, setSimpleMobileOpen] = useState(false);
+  const [simpleMobileQrUrl, setSimpleMobileQrUrl] = useState<string | null>(null);
+  const [simpleMobileStatus, setSimpleMobileStatus] = useState<'idle' | 'waiting' | 'done' | 'error'>('idle');
+  const [simpleMobileError, setSimpleMobileError] = useState<string | null>(null);
+  const [simpleMobileLastTimestamp, setSimpleMobileLastTimestamp] = useState(0);
   const [mobileContinuous, setMobileContinuous] = useState(false);
-  const [lastMobileUploadCount, setLastMobileUploadCount] = useState(0);
   const [flashMessage, setFlashMessage] = useState<string | null>(null);
-  const [mobileSessionLoading, setMobileSessionLoading] = useState(false);
   const [cropPointCount, setCropPointCount] = useState(0);
   const [autoCropPoints, setAutoCropPoints] = useState<{ x: number; y: number }[] | null>(null);
+  const [orientation, setOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
   const detectSeqRef = useRef(0);
   const isBlank = (value?: string) => !value || value.trim() === '';
   const targetWidth = ROI_BASE_WIDTH;
@@ -220,22 +205,88 @@ const ContactRegister: React.FC = () => {
     }
   };
 
+  const loadImageSize = (dataUrl: string) =>
+    new Promise<{ width: number; height: number } | null>((resolve) => {
+      const img = new Image();
+      img.onload = () => resolve({ width: img.width, height: img.height });
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+
+  const buildDetectPayload = async (dataUrl: string, maxSize = 1600) => {
+    return new Promise<{ payloadUrl: string; scale: number; width: number; height: number } | null>((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        const width = img.width;
+        const height = img.height;
+        const maxSide = Math.max(width, height);
+        const scale = maxSide > maxSize ? maxSize / maxSide : 1;
+        if (scale === 1) {
+          resolve({ payloadUrl: dataUrl, scale, width, height });
+          return;
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(width * scale);
+        canvas.height = Math.round(height * scale);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve({ payloadUrl: dataUrl, scale: 1, width, height });
+          return;
+        }
+        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve({ payloadUrl: canvas.toDataURL('image/png'), scale, width, height });
+      };
+      img.onerror = () => resolve(null);
+      img.src = dataUrl;
+    });
+  };
+
   const detectCardPointsFrom = async (url: string, inputFile?: File | null) => {
     const seq = ++detectSeqRef.current;
     try {
       const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
+      const payload = await buildDetectPayload(dataUrl);
+      const size = payload ? { width: payload.width, height: payload.height } : await loadImageSize(dataUrl);
       const response = await axios.post<{ points?: { x: number; y: number }[] }>(
         'http://localhost:8000/card/detect',
-        { image: dataUrl },
+        { image: payload?.payloadUrl || dataUrl },
         { timeout: 15000 },
       );
       if (seq !== detectSeqRef.current) return;
       const points = response.data?.points;
       if (Array.isArray(points) && points.length === 4) {
-        setAutoCropPoints(points.map(point => ({ x: Number(point.x), y: Number(point.y) })));
+        const scale = payload?.scale || 1;
+        setAutoCropPoints(points.map(point => ({
+          x: Math.max(0, Math.min(size?.width ?? Number(point.x), Number(point.x) / scale)),
+          y: Math.max(0, Math.min(size?.height ?? Number(point.y), Number(point.y) / scale)),
+        })));
+        return;
+      }
+      if (size) {
+        setAutoCropPoints([
+          { x: 0, y: 0 },
+          { x: size.width - 1, y: 0 },
+          { x: size.width - 1, y: size.height - 1 },
+          { x: 0, y: size.height - 1 },
+        ]);
       }
     } catch (error) {
       if (seq === detectSeqRef.current) {
+        try {
+          const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
+          const size = await loadImageSize(dataUrl);
+          if (size) {
+            setAutoCropPoints([
+              { x: 0, y: 0 },
+              { x: size.width - 1, y: 0 },
+              { x: size.width - 1, y: size.height - 1 },
+              { x: 0, y: size.height - 1 },
+            ]);
+            return;
+          }
+        } catch {
+          // ignore
+        }
         setAutoCropPoints(null);
       }
     }
@@ -689,6 +740,41 @@ const ContactRegister: React.FC = () => {
     }
   };
 
+  const buildOcrSource = async () => {
+    if (!selectedImage) {
+      throw new Error('No selected image');
+    }
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('Image load failed'));
+      img.src = selectedImage;
+    });
+
+    if (orientation === 'horizontal') {
+      return { source: img as CanvasImageSource, width: img.width, height: img.height };
+    }
+
+    const canvas = document.createElement('canvas');
+    canvas.width = ROI_BASE_WIDTH;
+    canvas.height = ROI_BASE_HEIGHT;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) {
+      throw new Error('Canvas context missing');
+    }
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const scale = Math.max(canvas.width / img.height, canvas.height / img.width);
+    const drawW = img.width * scale;
+    const drawH = img.height * scale;
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(Math.PI / 2);
+    ctx.drawImage(img, -drawW / 2, -drawH / 2, drawW, drawH);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return { source: canvas as CanvasImageSource, width: canvas.width, height: canvas.height };
+  };
+
   const runOcrFromRoi = async () => {
     if (!selectedImage) return;
     if (isOcrRunning) return;
@@ -696,14 +782,9 @@ const ContactRegister: React.FC = () => {
     setSubmitError(null);
     setDetectedTags([]);
     try {
-      const img = new Image();
-      await new Promise<void>((resolve, reject) => {
-        img.onload = () => resolve();
-        img.onerror = () => reject(new Error('Image load failed'));
-        img.src = selectedImage;
-      });
-      const scaleX = img.width / ROI_BASE_WIDTH;
-      const scaleY = img.height / ROI_BASE_HEIGHT;
+      const { source, width, height } = await buildOcrSource();
+      const scaleX = width / ROI_BASE_WIDTH;
+      const scaleY = height / ROI_BASE_HEIGHT;
       const results: { field: RoiField; text: string }[] = [];
       const fields: RoiField[] = ['company', 'branch', 'name', 'dept', 'tel', 'mobile', 'mail', 'postal', 'address'];
       for (const field of fields) {
@@ -717,7 +798,7 @@ const ContactRegister: React.FC = () => {
         canvas.height = cropH;
         const ctx = canvas.getContext('2d');
         if (!ctx) continue;
-        ctx.drawImage(img, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+        ctx.drawImage(source, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
         const dataUrl = canvas.toDataURL('image/png');
         const file = dataUrlToFile(dataUrl, `roi-${field}.png`);
         const formData = new FormData();
@@ -852,80 +933,65 @@ const ContactRegister: React.FC = () => {
     }
   };
 
-  const startMobileUploadSession = async () => {
-    if (mobileSessionLoading) return;
-    setMobileSessionLoading(true);
-    setMobileError(null);
+  const toggleSimpleMobileUpload = async () => {
+    if (simpleMobileOpen) {
+      setSimpleMobileOpen(false);
+      setSimpleMobileQrUrl(null);
+      setSimpleMobileStatus('idle');
+      setSimpleMobileError(null);
+      setSimpleMobileLastTimestamp(0);
+      return;
+    }
+    setSimpleMobileError(null);
+    setSimpleMobileStatus('waiting');
     try {
-      const scheme = 'https';
-      const port = 8443;
-      const baseUrl = `https://localhost:8443`;
-      const response = await axios.post<MobileUploadSession>(
-        `${baseUrl}/mobile-upload/sessions?scheme=${scheme}&port=${port}`,
-        undefined,
-        { timeout: 8000 },
-      );
-      setMobileSession(response.data);
-      setMobileStatus('waiting');
-      setLastMobileUploadCount(0);
-    } catch (error) {
-      if (axios.isAxiosError(error)) {
-        const detail = (error.response?.data as { detail?: string } | undefined)?.detail;
-        if (detail) {
-          setMobileError(`QRの生成に失敗しました: ${detail}`);
-          return;
-        }
-        if (error.message) {
-          setMobileError(`QRの生成に失敗しました: ${error.message}`);
-          return;
-        }
+      const response = await axios.get<{ base_url: string }>('http://localhost:8000/api/mobile-upload/info');
+      const baseUrl = response.data?.base_url;
+      if (!baseUrl) {
+        throw new Error('missing base url');
       }
-      setMobileError('QRの生成に失敗しました。');
-    } finally {
-      setMobileSessionLoading(false);
+      setSimpleMobileQrUrl(`${baseUrl}/mobile-upload`);
+      setSimpleMobileOpen(true);
+    } catch (error) {
+      setSimpleMobileError('QRの生成に失敗しました。');
+      setSimpleMobileStatus('error');
     }
   };
 
-  const closeMobileUploadSession = () => {
-    setMobileSession(null);
-    setMobileStatus('idle');
-    setMobileError(null);
-    setLastMobileUploadCount(0);
-  };
-
   useEffect(() => {
-    if (!mobileSession) return;
+    if (!simpleMobileOpen) return;
     let stopped = false;
     const poll = async () => {
       try {
-        const response = await axios.get<MobileUploadStatus>(mobileSession.status_url);
+        const response = await axios.get<{
+          success: boolean;
+          filename?: string;
+          url?: string;
+          timestamp?: number;
+        }>('http://localhost:8000/api/mobile-upload/latest');
         if (stopped) return;
-        setMobileStatus(response.data.status);
-        if (response.data.status === 'done' && response.data.image_url) {
-          const uploadCount = response.data.upload_count ?? 0;
-          if (!mobileContinuous || uploadCount > lastMobileUploadCount) {
-            const cacheBusted = `${response.data.image_url}?t=${Date.now()}`;
-            setOriginalImage(cacheBusted);
-            setCroppedImage(null);
-            setSelectedImage(cacheBusted);
-            setIsCropActive(true);
-            setOcrText(null);
-            setCardFilename(response.data.filename || 'mobile-upload.png');
-            setLastMobileUploadCount(uploadCount);
-            setAutoCropPoints(null);
-            detectCardPointsFrom(cacheBusted, null);
-          }
-          if (!mobileContinuous) {
-            stopped = true;
-          }
+        if (!response.data?.success || !response.data.url || !response.data.timestamp) {
+          setSimpleMobileStatus('waiting');
+          return;
         }
-        if (response.data.status === 'error') {
-          setMobileError(response.data.error || 'アップロードでエラーが発生しました。');
-          stopped = true;
+        if (response.data.timestamp <= simpleMobileLastTimestamp) {
+          return;
         }
+        const cacheBusted = `${response.data.url}?t=${Date.now()}`;
+        setOriginalImage(cacheBusted);
+        setCroppedImage(null);
+        setSelectedImage(cacheBusted);
+        setIsCropActive(true);
+        setOcrText(null);
+        setCardFilename(response.data.filename || 'mobile-upload.png');
+        setSimpleMobileLastTimestamp(response.data.timestamp);
+        setAutoCropPoints(null);
+        detectCardPointsFrom(cacheBusted, null);
+        setSimpleMobileStatus('done');
       } catch (error) {
         if (!stopped) {
-          setMobileError('アップロード状況の取得に失敗しました。');
+          setSimpleMobileError('アップロード状況の取得に失敗しました。');
+          setSimpleMobileStatus('error');
         }
       }
     };
@@ -935,12 +1001,23 @@ const ContactRegister: React.FC = () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [mobileSession?.session_id, mobileContinuous, lastMobileUploadCount]);
+  }, [simpleMobileOpen, simpleMobileLastTimestamp]);
 
   const canRunOcr = mode === 'upload' && !isCropActive && Boolean(selectedImage);
 
   const uploadColumn = mode === 'upload' ? (
     <div className="space-y-4">
+      <div className="flex items-center justify-end">
+        <button
+          type="button"
+          onClick={() => setOrientation(prev => (prev === 'horizontal' ? 'vertical' : 'horizontal'))}
+          className={`px-4 py-2 rounded text-white ${
+            orientation === 'horizontal' ? 'bg-blue-600' : 'bg-green-600'
+          }`}
+        >
+          {orientation === 'horizontal' ? '横で読取' : '縦で読取'}
+        </button>
+      </div>
       {isCameraActive && (
         <div className="relative">
           <div className="relative w-full max-w-4xl mx-auto">
@@ -1073,40 +1150,48 @@ const ContactRegister: React.FC = () => {
             onCropped={setCroppedImage}
             onPointCountChange={setCropPointCount}
             initialPoints={autoCropPoints}
+            showCropActions={!croppedImage}
+            orientation={orientation}
             extraActions={(
               <>
-                <button
-                  type="button"
-                  className="px-3 py-2 text-sm rounded border bg-white"
-                  onClick={() => {
-                    setSelectedImage(originalImage);
-                    setDetectedTags([]);
-                    setOcrText(null);
-                    setIsCropActive(false);
-                  }}
-                >
-                  元画像を使用
-                </button>
-                <button
-                  type="button"
-                  className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
-                  disabled={!croppedImage}
-                  onClick={() => {
-                    if (!croppedImage) return;
-                    setSelectedImage(croppedImage);
-                    setDetectedTags([]);
-                    setOcrText(null);
-                    setIsCropActive(false);
-                  }}
-                >
-                  クロップ後を使用
-                </button>
-                {cardFilename && (
-                  <span className="ml-auto text-xs text-gray-500">Loaded: {cardFilename}</span>
+                {croppedImage && (
+                  <>
+                    <button
+                      type="button"
+                      className="px-3 py-2 text-sm rounded border bg-white"
+                      onClick={() => {
+                        if (!croppedImage) return;
+                        setSelectedImage(croppedImage);
+                        setDetectedTags([]);
+                        setOcrText(null);
+                        setIsCropActive(false);
+                      }}
+                    >
+                      クロップ後を使用
+                    </button>
+                    <button
+                      type="button"
+                      className="px-3 py-2 text-sm rounded border bg-white"
+                      onClick={() => {
+                        setSelectedImage(originalImage);
+                        setDetectedTags([]);
+                        setOcrText(null);
+                        setIsCropActive(false);
+                      }}
+                    >
+                      元画像を使用
+                    </button>
+                  </>
                 )}
               </>
             )}
           />
+          {croppedImage && (
+            <div className="mt-3">
+              <div className="text-xs text-gray-500 mb-2">クロップ結果</div>
+              <img src={croppedImage} alt="cropped" className="w-full rounded border bg-white" />
+            </div>
+          )}
         </div>
       )}
 
@@ -1117,6 +1202,7 @@ const ContactRegister: React.FC = () => {
           onChange={setRoiTemplate}
           baseWidth={ROI_BASE_WIDTH}
           baseHeight={ROI_BASE_HEIGHT}
+          orientation={orientation}
         />
       )}
       {!originalImage && !selectedImage && !isCropActive && (
@@ -1130,17 +1216,12 @@ const ContactRegister: React.FC = () => {
           <div className="flex flex-wrap items-center gap-3">
             <button
               type="button"
-              onClick={mobileSession ? closeMobileUploadSession : startMobileUploadSession}
-              disabled={mobileSessionLoading}
-              className={`px-4 py-2 rounded cursor-pointer relative z-10 disabled:opacity-50 disabled:cursor-not-allowed ${
-                mobileSession ? 'bg-gray-700 text-white' : 'bg-emerald-600 text-white'
+              onClick={toggleSimpleMobileUpload}
+              className={`px-4 py-2 rounded cursor-pointer relative z-10 ${
+                simpleMobileOpen ? 'bg-gray-700 text-white' : 'bg-blue-600 text-white'
               }`}
             >
-              {mobileSessionLoading
-                ? 'QR生成中...'
-                : mobileSession
-                  ? 'QRを閉じる'
-                  : 'スマホで撮影（QR表示）'}
+              {simpleMobileOpen ? 'QRを閉じる' : 'スマホ撮影'}
             </button>
             <span className="text-xs text-gray-500">同一Wi-Fi接続が必要です。OCRは空欄のみ取得します。</span>
             <label
@@ -1165,23 +1246,19 @@ const ContactRegister: React.FC = () => {
               />
             </div>
           </div>
-          {mobileError && (
-            <p className="mt-2 text-sm text-red-600">{mobileError}</p>
+          {simpleMobileError && (
+            <p className="mt-2 text-sm text-red-600">{simpleMobileError}</p>
           )}
-          {mobileSession && (
+          {simpleMobileOpen && simpleMobileQrUrl && (
             <div className="mt-3 flex flex-col md:flex-row gap-4">
               <div className="bg-white border rounded p-3 w-fit">
-                <img
-                  src={mobileSession.qr_url}
-                  alt="QR"
-                  className="w-44 h-44"
-                />
+                <QRCodeCanvas value={simpleMobileQrUrl} size={176} />
               </div>
               <div className="text-sm text-gray-600 space-y-2">
-                <p>iPhoneでQRを読み取り、名刺を撮影してアップロードしてください。</p>
-                <p className="text-xs text-gray-500 break-all">URL: {mobileSession.upload_url}</p>
+                <p>スマホでQRを読み取り、名刺を撮影してアップロードしてください。</p>
+                <p className="text-xs text-gray-500 break-all">URL: {simpleMobileQrUrl}</p>
                 <p className="text-xs text-gray-500">
-                  状態: {mobileStatus === 'waiting' ? '待機中' : mobileStatus === 'done' ? '完了' : mobileStatus === 'error' ? 'エラー' : '準備中'}
+                  状態: {simpleMobileStatus === 'waiting' ? '待機中' : simpleMobileStatus === 'done' ? '完了' : simpleMobileStatus === 'error' ? 'エラー' : '準備中'}
                 </p>
               </div>
             </div>
@@ -1379,175 +1456,347 @@ const ContactRegister: React.FC = () => {
                   <span className="text-sm text-gray-500">タグが選択されていません。</span>
                 )}
               </div>
-              <div className="flex items-center gap-12 flex-nowrap overflow-x-auto border-t border-gray-200 pt-3">
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-sm font-medium text-gray-600">追加:</span>
-                  <select
-                    value={selectedTagOption}
-                    onChange={e => setSelectedTagOption(e.target.value)}
-                    className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
-                  >
-                    <option value="">既存タグを選択</option>
-                    <optgroup label="タグ/技術">
-                    {visibleTags
-                      .filter(tag => tag.type === 'tech')
-                      .map(tag => (
-                        <option key={tag.id} value={tag.name}>
-                          {tag.name}
-                        </option>
-                        ))}
-                    </optgroup>
-                    <optgroup label="タグ/イベント">
-                    {visibleTags
-                      .filter(tag => tag.type === 'event')
-                      .map(tag => (
-                        <option key={tag.id} value={tag.name}>
-                          {tag.name}
-                        </option>
-                        ))}
-                    </optgroup>
-                    <optgroup label="タグ/関係">
-                    {visibleTags
-                      .filter(tag => tag.type === 'relation')
-                      .map(tag => (
-                        <option key={tag.id} value={tag.name}>
-                          {tag.name}
-                        </option>
-                        ))}
-                    </optgroup>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const normalized = selectedTagOption.trim();
-                      if (!normalized) return;
-                      if (selectedTags.includes(normalized)) return;
-                      setTagsTouched(true);
-                      setSelectedTags(prev => [...prev, normalized]);
-                      setSelectedTagOption('');
-                    }}
-                    className="bg-blue-600 text-white px-3 py-2 rounded"
-                  >
-                    追加
-                  </button>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-sm font-medium text-gray-600">作成:</span>
-                  <input
-                    type="text"
-                    value={customTag}
-                    onChange={e => setCustomTag(e.target.value)}
-                    className="border rounded px-3 py-2 min-w-[140px] w-40"
-                    placeholder="タグを追加"
-                  />
-                  <select
-                    value={newTagType}
-                    onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
-                    className={`border rounded px-2 py-2 text-sm ${
-                      newTagType === 'relation'
-                        ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
-                        : newTagType === 'event'
-                        ? 'bg-orange-50 text-orange-700 border-orange-300'
-                        : 'bg-blue-50 text-blue-700 border-blue-300'
-                    }`}
-                  >
-                    <option value="tech">タグ/技術</option>
-                    <option value="event">タグ/イベント</option>
-                    <option value="relation">タグ/関係</option>
-                  </select>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const normalized = customTag.trim();
-                      if (!normalized) return;
-                      if (selectedTags.includes(normalized)) return;
-                      setTagsTouched(true);
-                      setSelectedTags(prev => [...prev, normalized]);
-                      setAvailableTags(prev => {
-                        if (prev.some(tag => tag.name === normalized)) return prev;
-                        return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
-                      });
-                      setCustomTag('');
-                    }}
-                    className="bg-gray-800 text-white px-3 py-2 rounded"
-                  >
-                    追加
-                  </button>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  <span className="text-sm font-medium text-gray-600">属性変更:</span>
-                  <select
-                    value={manageTagId}
-                    onChange={e => setManageTagId(e.target.value ? Number(e.target.value) : '')}
-                    className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
-                  >
-                    <option value="">タグ管理対象を選択</option>
-                    {visibleTags.map(tag => (
-                      <option key={tag.id} value={tag.id}>
-                        {tag.name}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={manageTagType}
-                    onChange={e => setManageTagType(e.target.value as 'tech' | 'event' | 'relation')}
-                    className="border rounded px-2 py-2 text-sm"
-                    disabled={!manageTagId}
-                  >
-                    <option value="tech">タグ/技術</option>
-                    <option value="event">タグ/イベント</option>
-                    <option value="relation">タグ/関係</option>
-                  </select>
-                  <button
-                    type="button"
-                    className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
-                    disabled={!manageTagId}
-                    onClick={async () => {
-                      const target = availableTags.find(tag => tag.id === manageTagId);
-                      if (!target) return;
-                      try {
-                        await axios.put(`http://localhost:8000/tags/${target.id}`, {
-                          name: target.name,
-                          type: manageTagType,
+              {mode === 'upload' ? (
+                <div className="space-y-3 border-t border-gray-200 pt-3">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-sm font-medium text-gray-600">追加:</span>
+                    <select
+                      value={selectedTagOption}
+                      onChange={e => setSelectedTagOption(e.target.value)}
+                      className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
+                    >
+                      <option value="">既存タグを選択</option>
+                      <optgroup label="タグ/技術">
+                      {visibleTags
+                        .filter(tag => tag.type === 'tech')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                          ))}
+                      </optgroup>
+                      <optgroup label="タグ/イベント">
+                      {visibleTags
+                        .filter(tag => tag.type === 'event')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                          ))}
+                      </optgroup>
+                      <optgroup label="タグ/関係">
+                      {visibleTags
+                        .filter(tag => tag.type === 'relation')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                          ))}
+                      </optgroup>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const normalized = selectedTagOption.trim();
+                        if (!normalized) return;
+                        if (selectedTags.includes(normalized)) return;
+                        setTagsTouched(true);
+                        setSelectedTags(prev => [...prev, normalized]);
+                        setSelectedTagOption('');
+                      }}
+                      className="bg-blue-600 text-white px-3 py-2 rounded"
+                    >
+                      追加
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-sm font-medium text-gray-600">作成:</span>
+                    <input
+                      type="text"
+                      value={customTag}
+                      onChange={e => setCustomTag(e.target.value)}
+                      className="border rounded px-3 py-2 min-w-[140px] w-40"
+                      placeholder="タグを追加"
+                    />
+                    <select
+                      value={newTagType}
+                      onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
+                      className={`border rounded px-2 py-2 text-sm ${
+                        newTagType === 'relation'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                          : newTagType === 'event'
+                          ? 'bg-orange-50 text-orange-700 border-orange-300'
+                          : 'bg-blue-50 text-blue-700 border-blue-300'
+                      }`}
+                    >
+                      <option value="tech">タグ/技術</option>
+                      <option value="event">タグ/イベント</option>
+                      <option value="relation">タグ/関係</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const normalized = customTag.trim();
+                        if (!normalized) return;
+                        if (selectedTags.includes(normalized)) return;
+                        setTagsTouched(true);
+                        setSelectedTags(prev => [...prev, normalized]);
+                        setAvailableTags(prev => {
+                          if (prev.some(tag => tag.name === normalized)) return prev;
+                          return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
                         });
-                        setAvailableTags(prev =>
-                          prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
-                        );
-                        setFlashMessage('タグ属性を更新しました。');
-                      } catch (error) {
-                        console.error('tag update failed', error);
-                        setSubmitError('タグ属性の更新に失敗しました。');
-                      }
-                    }}
-                  >
-                    属性変更
-                  </button>
-                  <button
-                    type="button"
-                    className="px-3 py-2 text-sm rounded border border-red-200 text-red-700 bg-red-50 disabled:opacity-50"
-                    disabled={!manageTagId}
-                    onClick={async () => {
-                      const target = availableTags.find(tag => tag.id === manageTagId);
-                      if (!target) return;
-                      const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
-                      if (!confirmed) return;
-                      try {
-                        await axios.delete(`http://localhost:8000/tags/${target.id}`);
-                        setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
-                        setSelectedTags(prev => prev.filter(tag => tag !== target.name));
-                        setDetectedTags(prev => prev.filter(tag => tag !== target.name));
-                        setManageTagId('');
-                        setFlashMessage('タグを削除しました。');
-                      } catch (error) {
-                        console.error('tag delete failed', error);
-                        setSubmitError('タグ削除に失敗しました。');
-                      }
-                    }}
-                  >
-                    削除
-                  </button>
+                        setCustomTag('');
+                      }}
+                      className="bg-gray-800 text-white px-3 py-2 rounded"
+                    >
+                      追加
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="text-sm font-medium text-gray-600">属性変更:</span>
+                    <select
+                      value={manageTagId}
+                      onChange={e => setManageTagId(e.target.value ? Number(e.target.value) : '')}
+                      className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
+                    >
+                      <option value="">タグ管理対象を選択</option>
+                      {visibleTags.map(tag => (
+                        <option key={tag.id} value={tag.id}>
+                          {tag.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={manageTagType}
+                      onChange={e => setManageTagType(e.target.value as 'tech' | 'event' | 'relation')}
+                      className="border rounded px-2 py-2 text-sm"
+                      disabled={!manageTagId}
+                    >
+                      <option value="tech">タグ/技術</option>
+                      <option value="event">タグ/イベント</option>
+                      <option value="relation">タグ/関係</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
+                      disabled={!manageTagId}
+                      onClick={async () => {
+                        const target = availableTags.find(tag => tag.id === manageTagId);
+                        if (!target) return;
+                        try {
+                          await axios.put(`http://localhost:8000/tags/${target.id}`, {
+                            name: target.name,
+                            type: manageTagType,
+                          });
+                          setAvailableTags(prev =>
+                            prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
+                          );
+                          setFlashMessage('タグ属性を更新しました。');
+                        } catch (error) {
+                          console.error('tag update failed', error);
+                          setSubmitError('タグ属性の更新に失敗しました。');
+                        }
+                      }}
+                    >
+                      属性変更
+                    </button>
+                    <button
+                      type="button"
+                      className="px-3 py-2 text-sm rounded border border-red-200 text-red-700 bg-red-50 disabled:opacity-50"
+                      disabled={!manageTagId}
+                      onClick={async () => {
+                        const target = availableTags.find(tag => tag.id === manageTagId);
+                        if (!target) return;
+                        const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
+                        if (!confirmed) return;
+                        try {
+                          await axios.delete(`http://localhost:8000/tags/${target.id}`);
+                          setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
+                          setSelectedTags(prev => prev.filter(tag => tag !== target.name));
+                          setDetectedTags(prev => prev.filter(tag => tag !== target.name));
+                          setManageTagId('');
+                          setFlashMessage('タグを削除しました。');
+                        } catch (error) {
+                          console.error('tag delete failed', error);
+                          setSubmitError('タグ削除に失敗しました。');
+                        }
+                      }}
+                    >
+                      削除
+                    </button>
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="flex items-center gap-12 flex-nowrap overflow-x-auto border-t border-gray-200 pt-3">
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-sm font-medium text-gray-600">追加:</span>
+                    <select
+                      value={selectedTagOption}
+                      onChange={e => setSelectedTagOption(e.target.value)}
+                      className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
+                    >
+                      <option value="">既存タグを選択</option>
+                      <optgroup label="タグ/技術">
+                      {visibleTags
+                        .filter(tag => tag.type === 'tech')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                          ))}
+                      </optgroup>
+                      <optgroup label="タグ/イベント">
+                      {visibleTags
+                        .filter(tag => tag.type === 'event')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                          ))}
+                      </optgroup>
+                      <optgroup label="タグ/関係">
+                      {visibleTags
+                        .filter(tag => tag.type === 'relation')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                          ))}
+                      </optgroup>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const normalized = selectedTagOption.trim();
+                        if (!normalized) return;
+                        if (selectedTags.includes(normalized)) return;
+                        setTagsTouched(true);
+                        setSelectedTags(prev => [...prev, normalized]);
+                        setSelectedTagOption('');
+                      }}
+                      className="bg-blue-600 text-white px-3 py-2 rounded"
+                    >
+                      追加
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-sm font-medium text-gray-600">作成:</span>
+                    <input
+                      type="text"
+                      value={customTag}
+                      onChange={e => setCustomTag(e.target.value)}
+                      className="border rounded px-3 py-2 min-w-[140px] w-40"
+                      placeholder="タグを追加"
+                    />
+                    <select
+                      value={newTagType}
+                      onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
+                      className={`border rounded px-2 py-2 text-sm ${
+                        newTagType === 'relation'
+                          ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                          : newTagType === 'event'
+                          ? 'bg-orange-50 text-orange-700 border-orange-300'
+                          : 'bg-blue-50 text-blue-700 border-blue-300'
+                      }`}
+                    >
+                      <option value="tech">タグ/技術</option>
+                      <option value="event">タグ/イベント</option>
+                      <option value="relation">タグ/関係</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const normalized = customTag.trim();
+                        if (!normalized) return;
+                        if (selectedTags.includes(normalized)) return;
+                        setTagsTouched(true);
+                        setSelectedTags(prev => [...prev, normalized]);
+                        setAvailableTags(prev => {
+                          if (prev.some(tag => tag.name === normalized)) return prev;
+                          return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
+                        });
+                        setCustomTag('');
+                      }}
+                      className="bg-gray-800 text-white px-3 py-2 rounded"
+                    >
+                      追加
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <span className="text-sm font-medium text-gray-600">属性変更:</span>
+                    <select
+                      value={manageTagId}
+                      onChange={e => setManageTagId(e.target.value ? Number(e.target.value) : '')}
+                      className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
+                    >
+                      <option value="">タグ管理対象を選択</option>
+                      {visibleTags.map(tag => (
+                        <option key={tag.id} value={tag.id}>
+                          {tag.name}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={manageTagType}
+                      onChange={e => setManageTagType(e.target.value as 'tech' | 'event' | 'relation')}
+                      className="border rounded px-2 py-2 text-sm"
+                      disabled={!manageTagId}
+                    >
+                      <option value="tech">タグ/技術</option>
+                      <option value="event">タグ/イベント</option>
+                      <option value="relation">タグ/関係</option>
+                    </select>
+                    <button
+                      type="button"
+                      className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
+                      disabled={!manageTagId}
+                      onClick={async () => {
+                        const target = availableTags.find(tag => tag.id === manageTagId);
+                        if (!target) return;
+                        try {
+                          await axios.put(`http://localhost:8000/tags/${target.id}`, {
+                            name: target.name,
+                            type: manageTagType,
+                          });
+                          setAvailableTags(prev =>
+                            prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
+                          );
+                          setFlashMessage('タグ属性を更新しました。');
+                        } catch (error) {
+                          console.error('tag update failed', error);
+                          setSubmitError('タグ属性の更新に失敗しました。');
+                        }
+                      }}
+                    >
+                      属性変更
+                    </button>
+                    <button
+                      type="button"
+                      className="px-3 py-2 text-sm rounded border border-red-200 text-red-700 bg-red-50 disabled:opacity-50"
+                      disabled={!manageTagId}
+                      onClick={async () => {
+                        const target = availableTags.find(tag => tag.id === manageTagId);
+                        if (!target) return;
+                        const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
+                        if (!confirmed) return;
+                        try {
+                          await axios.delete(`http://localhost:8000/tags/${target.id}`);
+                          setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
+                          setSelectedTags(prev => prev.filter(tag => tag !== target.name));
+                          setDetectedTags(prev => prev.filter(tag => tag !== target.name));
+                          setManageTagId('');
+                          setFlashMessage('タグを削除しました。');
+                        } catch (error) {
+                          console.error('tag delete failed', error);
+                          setSubmitError('タグ削除に失敗しました。');
+                        }
+                      }}
+                    >
+                      削除
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
           <div className="flex items-start gap-4">
@@ -1564,7 +1813,7 @@ const ContactRegister: React.FC = () => {
               disabled={isSubmitting || isOcrRunning}
               className="bg-green-600 text-white px-4 py-2 rounded disabled:opacity-50"
             >
-              {isOcrRunning ? 'OCR処理中...' : isSubmitting ? '登録中...' : '登録する'}
+              {isSubmitting ? '登録中...' : '登録する'}
             </button>
             <button
               type="button"
@@ -1587,21 +1836,23 @@ const ContactRegister: React.FC = () => {
       )}
       <div className="bg-white p-6 rounded-lg shadow w-full max-w-none mx-auto overflow-hidden">
         {!isEdit && (
-          <div className="flex gap-2 mb-6">
-            <button
-              type="button"
-              onClick={() => setMode('manual')}
-              className={`px-4 py-2 rounded ${mode === 'manual' ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-800'}`}
-            >
-              手入力
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode('upload')}
-              className={`px-4 py-2 rounded ${mode === 'upload' ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-800'}`}
-            >
-              名刺アップロード
-            </button>
+          <div className="flex items-center justify-between mb-6">
+            <div className="flex gap-2">
+              <button
+                type="button"
+                onClick={() => setMode('manual')}
+                className={`px-4 py-2 rounded ${mode === 'manual' ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-800'}`}
+              >
+                手入力
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode('upload')}
+                className={`px-4 py-2 rounded ${mode === 'upload' ? 'bg-gray-800 text-white' : 'bg-gray-200 text-gray-800'}`}
+              >
+                名刺アップロード
+              </button>
+            </div>
           </div>
         )}
 
