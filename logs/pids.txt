@@ -1,3 +1,3 @@
-backend_http 54700
-backend_https 54701
-frontend 54702
+backend_http 71924
+backend_https 71925
+frontend 71926
