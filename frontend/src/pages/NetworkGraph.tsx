@@ -565,7 +565,7 @@ const NetworkGraph: React.FC = () => {
       const typed = node as GraphNode;
       if (typed.is_self) return '#ed5f5f';
       const baseByType: Record<GraphNode['type'], string> = {
-        event: '#e6ed5f',
+        event: '#f6a6a6',
         contact: '#beed5f',
         company: '#5fed72',
         group: '#61ed5f',

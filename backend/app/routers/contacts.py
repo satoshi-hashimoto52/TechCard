@@ -148,7 +148,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
             if tag_type and tag.type in (None, "technology"):
                 tag.type = normalized_type
         effective_type = normalize_tag_type(tag.type) or normalized_type
-        if effective_type == "relation":
+        if effective_type in ("relation", "event"):
             contact.tags.append(tag)
         elif effective_type == "tech":
             if company is not None and tag not in company.tech_tags:
@@ -291,7 +291,7 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
             if tag_type and tag.type in (None, "technology"):
                 tag.type = normalized_type
         effective_type = normalize_tag_type(tag.type) or normalized_type
-        if effective_type == "relation":
+        if effective_type in ("relation", "event"):
             db_contact.tags.append(tag)
         elif effective_type == "tech":
             if company is not None and tag not in company.tech_tags:

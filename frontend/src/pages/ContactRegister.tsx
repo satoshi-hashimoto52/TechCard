@@ -41,7 +41,7 @@ type MobileUploadStatus = {
 type TagOption = {
   id: number;
   name: string;
-  type: 'tech' | 'relation' | string;
+  type: 'tech' | 'event' | 'relation' | string;
 };
 
 type CameraCapabilities = MediaTrackCapabilities & {
@@ -82,9 +82,9 @@ const ContactRegister: React.FC = () => {
   const [customTag, setCustomTag] = useState('');
   const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
-  const [newTagType, setNewTagType] = useState<'tech' | 'relation'>('tech');
+  const [newTagType, setNewTagType] = useState<'tech' | 'event' | 'relation'>('tech');
   const [manageTagId, setManageTagId] = useState<number | ''>('');
-  const [manageTagType, setManageTagType] = useState<'tech' | 'relation'>('tech');
+  const [manageTagType, setManageTagType] = useState<'tech' | 'event' | 'relation'>('tech');
   const todayString = (() => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -521,13 +521,13 @@ const ContactRegister: React.FC = () => {
         };
         const tags = response.data
           .filter(tag => tag.name)
-          .map(tag => ({ ...tag, type: normalizeType(tag.type) }))
-          .filter(tag => tag.type !== 'event');
+          .map(tag => ({ ...tag, type: normalizeType(tag.type) }));
         tags.sort((a, b) => {
           const typeOrder = (value: string) => {
             if (value === 'tech') return 0;
-            if (value === 'relation') return 1;
-            return 2;
+            if (value === 'event') return 1;
+            if (value === 'relation') return 2;
+            return 3;
           };
           const diff = typeOrder(a.type) - typeOrder(b.type);
           if (diff !== 0) return diff;
@@ -544,6 +544,8 @@ const ContactRegister: React.FC = () => {
     if (!target) return;
     if (target.type === 'relation') {
       setManageTagType('relation');
+    } else if (target.type === 'event') {
+      setManageTagType('event');
     } else {
       setManageTagType('tech');
     }
@@ -1306,6 +1308,8 @@ const ContactRegister: React.FC = () => {
                   const tagType = availableTags.find(item => item.name === tag)?.type;
                   const styleClass = tagType === 'relation'
                     ? 'bg-emerald-100 text-emerald-800'
+                    : tagType === 'event'
+                    ? 'bg-orange-100 text-orange-800'
                     : 'bg-blue-100 text-blue-800';
                   return (
                     <span
@@ -1322,6 +1326,8 @@ const ContactRegister: React.FC = () => {
                       className={
                         tagType === 'relation'
                           ? 'text-emerald-800 hover:text-emerald-900'
+                          : tagType === 'event'
+                          ? 'text-orange-800 hover:text-orange-900'
                           : 'text-blue-800 hover:text-blue-900'
                       }
                     >
@@ -1346,6 +1352,15 @@ const ContactRegister: React.FC = () => {
                     <optgroup label="Tag/Tech">
                       {availableTags
                         .filter(tag => tag.type === 'tech')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                    <optgroup label="Tag/Event">
+                      {availableTags
+                        .filter(tag => tag.type === 'event')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
                             {tag.name}
@@ -1388,14 +1403,17 @@ const ContactRegister: React.FC = () => {
                   />
                   <select
                     value={newTagType}
-                    onChange={e => setNewTagType(e.target.value as 'tech' | 'relation')}
+                    onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
                     className={`border rounded px-2 py-2 text-sm ${
                       newTagType === 'relation'
                         ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                        : newTagType === 'event'
+                        ? 'bg-orange-50 text-orange-700 border-orange-300'
                         : 'bg-blue-50 text-blue-700 border-blue-300'
                     }`}
                   >
                     <option value="tech">Tag/Tech</option>
+                    <option value="event">Tag/Event</option>
                     <option value="relation">Tag/Relation</option>
                   </select>
                   <button
@@ -1433,11 +1451,12 @@ const ContactRegister: React.FC = () => {
                   </select>
                   <select
                     value={manageTagType}
-                    onChange={e => setManageTagType(e.target.value as 'tech' | 'relation')}
+                    onChange={e => setManageTagType(e.target.value as 'tech' | 'event' | 'relation')}
                     className="border rounded px-2 py-2 text-sm"
                     disabled={!manageTagId}
                   >
                     <option value="tech">Tag/Tech</option>
+                    <option value="event">Tag/Event</option>
                     <option value="relation">Tag/Relation</option>
                   </select>
                   <button
