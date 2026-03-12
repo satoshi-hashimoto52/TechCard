@@ -304,9 +304,10 @@
   position: relative;
   background: #05070c;
   width: 100%;
-  height: 78vh;
-  min-height: 630px;
-  max-height: 930px;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  max-height: min(930px, 78vh);
+  min-height: min(480px, 78vh);
 }
 
 .techcard-map__canvas {
