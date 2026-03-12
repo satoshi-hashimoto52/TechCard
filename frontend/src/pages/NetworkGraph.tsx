@@ -563,19 +563,19 @@ const NetworkGraph: React.FC = () => {
   const nodeColor = useMemo(() => {
     return (node: NodeObject) => {
       const typed = node as GraphNode;
-      if (typed.is_self) return '#ed5f5f';
+      if (typed.is_self) return '#e86a6a';
       const baseByType: Record<GraphNode['type'], string> = {
-        event: '#f6a6a6',
-        contact: '#beed5f',
-        company: '#5fed72',
-        group: '#61ed5f',
-        tech: '#8a83f5',
-        relation: '#ed5fa8',
+        event: '#f49a9a',
+        contact: '#b7e35c',
+        company: '#58e074',
+        group: '#6adc66',
+        tech: '#8f89ee',
+        relation: '#e466ab',
       };
       const base = baseByType[typed.type] || '#94a3b8';
       if (highlightMode && selectedNodeId) {
         if (!highlightedNodeIds.has(typed.id)) {
-          return '#cbd5f5';
+          return '#c7d0ee';
         }
       }
       return base;
@@ -617,8 +617,8 @@ const NetworkGraph: React.FC = () => {
     ctx.font = `${fontSize}px "Segoe UI", sans-serif`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillStyle = '#111827';
-    ctx.shadowColor = 'rgba(15, 23, 42, 0.35)';
+    ctx.fillStyle = '#0f172a';
+    ctx.shadowColor = 'rgba(15, 23, 42, 0.45)';
     ctx.shadowBlur = 4 / globalScale;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 1 / globalScale;
@@ -923,12 +923,12 @@ const NetworkGraph: React.FC = () => {
           nodeCanvasObjectMode={() => 'after'}
           nodeCanvasObject={drawNodeLabel}
           linkColor={(link: any) => {
-            if (!highlightMode || !selectedNodeId) return 'rgba(148, 163, 184, 0.3)';
+            if (!highlightMode || !selectedNodeId) return 'rgba(120, 138, 158, 0.35)';
             const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
             const targetId = typeof link.target === 'string' ? link.target : link.target.id;
             return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
-              ? 'rgba(59, 130, 246, 0.8)'
-              : 'rgba(203, 213, 225, 0.15)';
+              ? 'rgba(86, 132, 214, 0.85)'
+              : 'rgba(200, 210, 224, 0.18)';
           }}
           linkWidth={(link: any) => {
             if (!visibleTypes.contact && link.type === 'company_relation') {
