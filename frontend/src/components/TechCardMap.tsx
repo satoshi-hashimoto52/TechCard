@@ -120,7 +120,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         try {
           const response = await fetch('/japan_regions.geojson', { cache: 'no-cache' });
           const contentType = response.headers.get('content-type') || '';
-          if (!response.ok || !contentType.includes('application/json')) {
+          if (!response.ok || (!contentType.includes('application/json') && !contentType.includes('application/geo+json'))) {
             throw new Error(`regions status=${response.status} type=${contentType}`);
           }
           regionData = await response.json();
@@ -130,7 +130,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
           try {
             const response = await fetch('/japan.geojson', { cache: 'no-cache' });
             const contentType = response.headers.get('content-type') || '';
-            if (response.ok && contentType.includes('application/json')) {
+            if (response.ok && (contentType.includes('application/json') || contentType.includes('application/geo+json'))) {
               regionData = await response.json();
             } else {
               throw new Error(`japan geojson status=${response.status} type=${contentType}`);
@@ -199,13 +199,101 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         }
       };
 
+      const ensureBoundaries = async () => {
+        const loadGeoJson = async (path: string) => {
+          const response = await fetch(path, { cache: 'no-cache' });
+          const contentType = response.headers.get('content-type') || '';
+          if (!response.ok || (!contentType.includes('application/json') && !contentType.includes('application/geo+json'))) {
+            throw new Error(`boundary status=${response.status} type=${contentType}`);
+          }
+          return await response.json();
+        };
+
+        if (!map.getSource('regions-boundary')) {
+          try {
+            const data = await loadGeoJson('/regions.geojson');
+            map.addSource('regions-boundary', { type: 'geojson', data });
+          } catch (error) {
+            console.warn('regions boundary load failed', error);
+            try {
+              const fallback = await loadGeoJson('/japan_regions.geojson');
+              map.addSource('regions-boundary', { type: 'geojson', data: fallback });
+            } catch (fallbackError) {
+              console.warn('regions boundary fallback failed', fallbackError);
+            }
+          }
+        }
+        if (!map.getSource('pref-boundary')) {
+          try {
+            const data = await loadGeoJson('/prefectures.geojson');
+            map.addSource('pref-boundary', { type: 'geojson', data });
+          } catch (error) {
+            console.warn('prefecture boundary load failed', error);
+            try {
+              const fallback = await loadGeoJson('/japan.geojson');
+              map.addSource('pref-boundary', { type: 'geojson', data: fallback });
+            } catch (fallbackError) {
+              console.warn('prefecture boundary fallback failed', fallbackError);
+            }
+          }
+        }
+        if (!map.getSource('city-boundary')) {
+          try {
+            const data = await loadGeoJson('/municipalities.geojson');
+            map.addSource('city-boundary', { type: 'geojson', data });
+          } catch (error) {
+            console.warn('municipality boundary load failed', error);
+          }
+        }
+
+        if (map.getSource('regions-boundary') && !map.getLayer('region-boundary')) {
+          map.addLayer({
+            id: 'region-boundary',
+            type: 'line',
+            source: 'regions-boundary',
+            maxzoom: 6,
+            paint: {
+              'line-color': '#334155',
+              'line-width': 2,
+            },
+          });
+        }
+        if (map.getSource('pref-boundary') && !map.getLayer('pref-boundary')) {
+          map.addLayer({
+            id: 'pref-boundary',
+            type: 'line',
+            source: 'pref-boundary',
+            minzoom: 6,
+            maxzoom: 9,
+            paint: {
+              'line-color': '#1f2937',
+              'line-width': 1.2,
+            },
+          });
+        }
+        if (map.getSource('city-boundary') && !map.getLayer('city-boundary')) {
+          map.addLayer({
+            id: 'city-boundary',
+            type: 'line',
+            source: 'city-boundary',
+            minzoom: 9,
+            paint: {
+              'line-color': '#111827',
+              'line-width': 0.8,
+            },
+          });
+        }
+      };
+
       const onReady = () => {
         console.log('regions source', map.getSource('regions'));
         console.log('layers', map.getStyle()?.layers);
         ensureRegions();
+        ensureBoundaries();
         const layers = map.getStyle()?.layers || [];
         layers.forEach((layer: any) => {
           if (layer.type !== 'symbol' || !layer.id) return;
+          if (!layer.layout || layer.layout['text-field'] == null) return;
           const id = layer.id.toLowerCase();
           try {
             if (id.includes('admin-1') || id.includes('state') || id.includes('province')) {
@@ -213,11 +301,13 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               map.setPaintProperty(layer.id, 'text-halo-color', '#0f172a');
               map.setPaintProperty(layer.id, 'text-halo-width', 1.6);
               map.setLayoutProperty(layer.id, 'text-size', 18);
+              map.setLayoutProperty(layer.id, 'maxzoom', 8);
             } else if (id.includes('admin-2') || id.includes('municipality')) {
               map.setPaintProperty(layer.id, 'text-color', '#93c5fd');
               map.setPaintProperty(layer.id, 'text-halo-color', '#0f172a');
               map.setPaintProperty(layer.id, 'text-halo-width', 1);
               map.setLayoutProperty(layer.id, 'text-size', 11);
+              map.setLayoutProperty(layer.id, 'minzoom', 6);
             } else if (
               id.includes('city') ||
               id.includes('town') ||
@@ -395,7 +485,17 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             type="circle"
             minzoom={7}
             paint={{
-              'circle-radius': 4,
+              'circle-radius': [
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                5,
+                3,
+                10,
+                6,
+                14,
+                10,
+              ],
               'circle-color': '#00ffff',
               'circle-blur': 0.8,
               'circle-opacity': 0.85,

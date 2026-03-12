@@ -28,6 +28,7 @@ type GraphLink = {
   source: string | { id: string };
   target: string | { id: string };
   type: 'works_at' | 'uses' | 'company_uses';
+  count?: number;
 };
 
 type GraphData = {
@@ -98,10 +99,102 @@ const NetworkGraph: React.FC = () => {
         return order[a.type] - order[b.type];
       });
     const nodeIds = new Set(nodes.map(node => node.id));
-    const links = rawGraph.links.filter(link => {
+    const nodeMap = new Map(nodes.map(node => [node.id, node]));
+    const personHidden = !visibleTypes.person;
+    if (personHidden) {
+      const personCompany = new Map<string, string>();
+      rawGraph.links.forEach(link => {
+        if (link.type !== 'works_at') return;
+        const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+        const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+        const companyId = sourceId.startsWith('company_') ? sourceId : targetId.startsWith('company_') ? targetId : null;
+        const personId = sourceId.startsWith('contact_') ? sourceId : targetId.startsWith('contact_') ? targetId : null;
+        if (!companyId || !personId) return;
+        personCompany.set(personId, companyId);
+      });
+      const counts = new Map<string, { companyId: string; tagId: string; count: number }>();
+      rawGraph.links.forEach(link => {
+        if (link.type !== 'uses') return;
+        const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+        const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+        const personId = sourceId.startsWith('contact_') ? sourceId : targetId.startsWith('contact_') ? targetId : null;
+        const tagId = sourceId.startsWith('tag_') ? sourceId : targetId.startsWith('tag_') ? targetId : null;
+        if (!personId || !tagId) return;
+        const companyId = personCompany.get(personId);
+        if (!companyId) return;
+        if (!nodeIds.has(companyId) || !nodeIds.has(tagId)) return;
+        const key = `${companyId}::${tagId}`;
+        const entry = counts.get(key);
+        if (entry) {
+          entry.count += 1;
+        } else {
+          counts.set(key, { companyId, tagId, count: 1 });
+        }
+      });
+      const links: GraphLink[] = Array.from(counts.values()).map(item => ({
+        source: item.companyId,
+        target: item.tagId,
+        type: 'company_uses',
+        count: item.count,
+      }));
+      return { nodes, links };
+    }
+
+    const selfNode = nodes.find(node => node.type === 'person' && (node as GraphNode).is_self);
+    const selfNodeId = selfNode?.id ?? null;
+    const selfTagIds = new Set<string>();
+    if (selfNodeId) {
+      rawGraph.links.forEach(link => {
+        const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+        const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+        if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
+        const tagId = sourceId.startsWith('tag_') ? sourceId : targetId.startsWith('tag_') ? targetId : null;
+        if (!tagId) return;
+        if ((sourceId === selfNodeId && tagId === targetId) || (targetId === selfNodeId && tagId === sourceId)) {
+          selfTagIds.add(tagId);
+        }
+      });
+    }
+    const links: GraphLink[] = [];
+    const seen = new Set<string>();
+    rawGraph.links.forEach(link => {
       const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
       const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-      return nodeIds.has(sourceId) && nodeIds.has(targetId);
+      if (link.type === 'company_uses') return;
+      if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
+      if (link.type === 'uses') {
+        const sourceNode = nodeMap.get(sourceId);
+        const targetNode = nodeMap.get(targetId);
+        const tagId = sourceNode?.type === 'technology'
+          ? sourceNode.id
+          : targetNode?.type === 'technology'
+          ? targetNode.id
+          : null;
+        const personNode = sourceNode?.type === 'person'
+          ? sourceNode
+          : targetNode?.type === 'person'
+          ? targetNode
+          : null;
+        if (
+          tagId &&
+          personNode &&
+          !selfTagIds.has(tagId) &&
+          personNode.company_node_id &&
+          nodeIds.has(personNode.company_node_id)
+        ) {
+          const companyId = personNode.company_node_id;
+          const key = `company_uses:${companyId}:${tagId}`;
+          if (!seen.has(key)) {
+            links.push({ source: companyId, target: tagId, type: 'company_uses' });
+            seen.add(key);
+          }
+          return;
+        }
+      }
+      const key = `${link.type}:${sourceId}:${targetId}`;
+      if (seen.has(key)) return;
+      links.push({ source: sourceId, target: targetId, type: link.type });
+      seen.add(key);
     });
     return { nodes, links };
   }, [rawGraph, visibleTypes, visibleTagTypes]);
@@ -523,7 +616,7 @@ const NetworkGraph: React.FC = () => {
     const fontSize = clampedScreenSize / globalScale;
     const x = (node as any).x ?? 0;
     const y = (node as any).y ?? 0;
-    const offsetFactor = Math.max(1, 1 / globalScale);
+    const offsetFactor = Math.max(1, 1 / globalScale) * 1.25;
     ctx.save();
     ctx.font = `${fontSize}px "Segoe UI", sans-serif`;
     ctx.textAlign = 'center';
@@ -824,6 +917,10 @@ const NetworkGraph: React.FC = () => {
               : 'rgba(203, 213, 225, 0.15)';
           }}
           linkWidth={(link: any) => {
+            if (!visibleTypes.person && link.type === 'company_uses') {
+              const count = Number(link.count) || 1;
+              return Math.min(6, 1 + Math.log2(count + 1) * 1.2);
+            }
             if (!highlightMode || !selectedNodeId) return 1;
             const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
             const targetId = typeof link.target === 'string' ? link.target : link.target.id;
