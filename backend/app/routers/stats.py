@@ -119,6 +119,227 @@ def get_summary(db: Session = Depends(get_db)):
     }
 
 
+@router.get("/network")
+def get_network(
+    technology: str | None = Query(default=None),
+    company: str | None = Query(default=None),
+    person: str | None = Query(default=None),
+    db: Session = Depends(get_db),
+):
+    contacts = (
+        db.query(models.Contact)
+        .options(
+            joinedload(models.Contact.company).joinedload(models.Company.group),
+            joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
+            joinedload(models.Contact.tags),
+            joinedload(models.Contact.events),
+            joinedload(models.Contact.business_cards),
+        )
+        .all()
+    )
+
+    events = (
+        db.query(models.Event)
+        .options(joinedload(models.Event.contacts))
+        .all()
+    )
+
+    tag_rows = db.query(models.Tag).all()
+    tag_by_id = {tag.id: tag for tag in tag_rows}
+
+    nodes: list[dict[str, object]] = []
+    edges: list[dict[str, object]] = []
+    node_ids: set[str] = set()
+    edge_keys: set[tuple[str, str, str]] = set()
+
+    def add_node(payload: dict[str, object]) -> None:
+        node_id = payload["id"]
+        if node_id in node_ids:
+            return
+        nodes.append(payload)
+        node_ids.add(node_id)
+
+    def add_edge(source: str, target: str, edge_type: str) -> None:
+        key = (source, target, edge_type)
+        if key in edge_keys:
+            return
+        edges.append({"source": source, "target": target, "type": edge_type})
+        edge_keys.add(key)
+
+    def normalize_tag_type(value: str | None) -> str:
+        if not value:
+            return "relation"
+        if value in ("tech", "technology"):
+            return "tech"
+        if value == "event":
+            return "event"
+        return "relation"
+
+    tech_filter = technology.strip().lower() if technology else None
+    company_filter = company.strip().lower() if company else None
+    person_filter = person.strip().lower() if person else None
+
+    if tech_filter:
+        contacts = [
+            contact
+            for contact in contacts
+            if contact.company
+            and any(
+                tag.name and tech_filter in tag.name.lower()
+                for tag in (contact.company.tech_tags or [])
+                if normalize_tag_type(tag.type) == "tech"
+            )
+        ]
+    if company_filter:
+        contacts = [
+            contact
+            for contact in contacts
+            if contact.company and contact.company.name and company_filter in contact.company.name.lower()
+        ]
+    if person_filter:
+        contacts = [
+            contact
+            for contact in contacts
+            if contact.name and person_filter in contact.name.lower()
+        ]
+
+    contact_id_set = {contact.id for contact in contacts}
+
+    # Company + Group nodes
+    companies = {contact.company for contact in contacts if contact.company}
+    company_contact_counts: dict[int, int] = {}
+    for contact in contacts:
+        if contact.company_id is None:
+            continue
+        company_contact_counts[contact.company_id] = company_contact_counts.get(contact.company_id, 0) + 1
+
+    for company in companies:
+        add_node(
+            {
+                "id": f"company_{company.id}",
+                "type": "company",
+                "label": company.name or "",
+                "size": company_contact_counts.get(company.id, 1),
+                "postal_code": company.postal_code,
+                "address": company.address,
+                "group_id": f"group_{company.group_id}" if company.group_id else None,
+            }
+        )
+        if company.group:
+            add_node(
+                {
+                    "id": f"group_{company.group.id}",
+                    "type": "group",
+                    "label": company.group.name or "",
+                    "size": len(company.group.companies or []),
+                }
+            )
+            add_edge(f"company_{company.id}", f"group_{company.group.id}", "company_group")
+
+    # Contact nodes + edges
+    for contact in contacts:
+        contact_id = f"contact_{contact.id}"
+        add_node(
+            {
+                "id": contact_id,
+                "type": "contact",
+                "label": contact.name or "",
+                "size": len(contact.business_cards or []) or 1,
+                "company_node_id": f"company_{contact.company_id}" if contact.company_id else None,
+                "role": contact.role,
+                "email": contact.email,
+                "phone": contact.phone,
+                "mobile": contact.mobile,
+                "notes": contact.notes,
+                "is_self": contact.is_self,
+            }
+        )
+        if contact.company_id is not None:
+            add_edge(contact_id, f"company_{contact.company_id}", "employment")
+
+    # Events
+    if events:
+        for event in events:
+            event_id = f"event_{event.id}"
+            event_contacts = [contact for contact in (event.contacts or []) if contact.id in contact_id_set]
+            add_node(
+                {
+                    "id": event_id,
+                    "type": "event",
+                    "label": event.name or "",
+                    "size": len(event_contacts) or 1,
+                }
+            )
+            for contact in event_contacts:
+                add_edge(event_id, f"contact_{contact.id}", "event_attendance")
+    else:
+        # Fallback: use tags of type event
+        event_tags = [tag for tag in tag_rows if normalize_tag_type(tag.type) == "event"]
+        if event_tags:
+            event_tag_ids = {tag.id for tag in event_tags}
+            tag_contact_counts: dict[int, int] = {}
+            for contact in contacts:
+                for tag in contact.tags or []:
+                    if tag.id in event_tag_ids:
+                        tag_contact_counts[tag.id] = tag_contact_counts.get(tag.id, 0) + 1
+                        add_edge(f"event_{tag.id}", f"contact_{contact.id}", "event_attendance")
+            for tag in event_tags:
+                add_node(
+                    {
+                        "id": f"event_{tag.id}",
+                        "type": "event",
+                        "label": tag.name or "",
+                        "size": tag_contact_counts.get(tag.id, 1),
+                    }
+                )
+
+    # Tags
+    relation_tag_counts: dict[int, int] = {}
+    tech_tag_company_counts: dict[int, set[int]] = {}
+
+    for contact in contacts:
+        company_id = contact.company_id
+        for tag in contact.tags or []:
+            tag_type = normalize_tag_type(tag.type)
+            if tag_type == "relation":
+                relation_tag_counts[tag.id] = relation_tag_counts.get(tag.id, 0) + 1
+                add_node(
+                    {
+                        "id": f"relation_{tag.id}",
+                        "type": "relation",
+                        "label": tag.name or "",
+                        "size": relation_tag_counts[tag.id],
+                    }
+                )
+                add_edge(f"contact_{contact.id}", f"relation_{tag.id}", "relation")
+            elif tag_type == "tech" and company_id:
+                tech_tag_company_counts.setdefault(tag.id, set()).add(company_id)
+
+    # Company tech tags (explicit)
+    for company in companies:
+        for tag in company.tech_tags or []:
+            tag_type = normalize_tag_type(tag.type)
+            if tag_type != "tech":
+                continue
+            tech_tag_company_counts.setdefault(tag.id, set()).add(company.id)
+
+    for tag_id, company_ids in tech_tag_company_counts.items():
+        tag = tag_by_id.get(tag_id)
+        label = tag.name if tag else ""
+        add_node(
+            {
+                "id": f"tech_{tag_id}",
+                "type": "tech",
+                "label": label,
+                "size": len(company_ids) or 1,
+            }
+        )
+        for company_id in company_ids:
+            add_edge(f"company_{company_id}", f"tech_{tag_id}", "company_tech")
+
+    return {"nodes": nodes, "edges": edges}
+
+
 def _request_json(url: str, headers: dict[str, str], timeout: int = 10, retries: int = 3, label: str = ""):
     for attempt in range(1, retries + 1):
         try:

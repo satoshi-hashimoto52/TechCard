@@ -6,7 +6,6 @@ import Supercluster from 'supercluster';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import LedMarker from './LedMarker';
 import CompanyCluster from './CompanyCluster';
-import GeocodeProgress from './GeocodeProgress';
 import { CompanyMapPoint } from './LedJapanMap';
 
 const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
@@ -576,8 +575,6 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         )}
       </Map>
       </div>
-      <GeocodeProgress companies={companies} />
-      {loading && <p className="mt-2 text-sm text-gray-400">位置情報を再取得中...</p>}
       {!loading && points.length === 0 && (
         <p className="mt-2 text-sm text-gray-400">会社の位置情報がまだありません。</p>
       )}

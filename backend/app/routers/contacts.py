@@ -99,37 +99,60 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
     db.add(contact)
 
     extracted_tags = extract_technologies(payload.ocr_text or "")
-    combined_tags: list[str] = []
+    combined_tags: list[tuple[str, str | None]] = []
     seen = set()
 
-    for tag_name in payload.tags:
-        normalized = tag_name.strip()
+    def normalize_tag_type(value: str | None) -> str | None:
+        if not value:
+            return None
+        if value in ("tech", "technology"):
+            return "tech"
+        if value == "event":
+            return "event"
+        if value == "relation":
+            return "relation"
+        return value
+
+    def add_tag_item(name: str, tag_type: str | None) -> None:
+        normalized = name.strip()
         if not normalized:
-            continue
+            return
         key = normalized.lower()
         if key in seen:
-            continue
+            return
         seen.add(key)
-        combined_tags.append(normalized)
+        combined_tags.append((normalized, normalize_tag_type(tag_type)))
+
+    if payload.tag_items:
+        for item in payload.tag_items:
+            add_tag_item(item.name, item.type)
+    else:
+        for tag_name in payload.tags:
+            add_tag_item(tag_name, None)
 
     for tag_name in extracted_tags:
-        key = tag_name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        combined_tags.append(tag_name)
+        add_tag_item(tag_name, "tech")
 
-    for tag_name in combined_tags:
+    for tag_name, tag_type in combined_tags:
         tag = (
             db.query(models.Tag)
             .filter(func.lower(models.Tag.name) == tag_name.lower())
             .first()
         )
+        normalized_type = normalize_tag_type(tag_type) or "tech"
         if tag is None:
-            tag = models.Tag(name=tag_name, type="technology")
+            tag = models.Tag(name=tag_name, type=normalized_type)
             db.add(tag)
             db.flush()
-        contact.tags.append(tag)
+        else:
+            if tag_type and tag.type in (None, "technology"):
+                tag.type = normalized_type
+        effective_type = normalize_tag_type(tag.type) or normalized_type
+        if effective_type == "relation":
+            contact.tags.append(tag)
+        elif effective_type == "tech":
+            if company is not None and tag not in company.tech_tags:
+                company.tech_tags.append(tag)
 
     if payload.card_filename:
         unique_filename = _unique_card_filename(db, payload.card_filename)
@@ -218,37 +241,61 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
     db_contact.company = company
 
     extracted_tags = extract_technologies(payload.ocr_text or "")
-    combined_tags: list[str] = []
+    combined_tags: list[tuple[str, str | None]] = []
     seen = set()
-    for tag_name in payload.tags:
-        normalized = tag_name.strip()
+
+    def normalize_tag_type(value: str | None) -> str | None:
+        if not value:
+            return None
+        if value in ("tech", "technology"):
+            return "tech"
+        if value == "event":
+            return "event"
+        if value == "relation":
+            return "relation"
+        return value
+
+    def add_tag_item(name: str, tag_type: str | None) -> None:
+        normalized = name.strip()
         if not normalized:
-            continue
+            return
         key = normalized.lower()
         if key in seen:
-            continue
+            return
         seen.add(key)
-        combined_tags.append(normalized)
+        combined_tags.append((normalized, normalize_tag_type(tag_type)))
+
+    if payload.tag_items:
+        for item in payload.tag_items:
+            add_tag_item(item.name, item.type)
+    else:
+        for tag_name in payload.tags:
+            add_tag_item(tag_name, None)
 
     for tag_name in extracted_tags:
-        key = tag_name.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        combined_tags.append(tag_name)
+        add_tag_item(tag_name, "tech")
 
     db_contact.tags.clear()
-    for tag_name in combined_tags:
+    for tag_name, tag_type in combined_tags:
         tag = (
             db.query(models.Tag)
             .filter(func.lower(models.Tag.name) == tag_name.lower())
             .first()
         )
+        normalized_type = normalize_tag_type(tag_type) or "tech"
         if tag is None:
-            tag = models.Tag(name=tag_name)
+            tag = models.Tag(name=tag_name, type=normalized_type)
             db.add(tag)
             db.flush()
-        db_contact.tags.append(tag)
+        else:
+            if tag_type and tag.type in (None, "technology"):
+                tag.type = normalized_type
+        effective_type = normalize_tag_type(tag.type) or normalized_type
+        if effective_type == "relation":
+            db_contact.tags.append(tag)
+        elif effective_type == "tech":
+            if company is not None and tag not in company.tech_tags:
+                company.tech_tags.append(tag)
 
     if payload.card_filename:
         unique_filename = _unique_card_filename(db, payload.card_filename)

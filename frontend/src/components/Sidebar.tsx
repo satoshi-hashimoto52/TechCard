@@ -37,6 +37,9 @@ const Sidebar: React.FC = () => {
           <Link to="/network" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">ネットワークグラフ</Link>
         </li>
         <li className="mb-2">
+          <Link to="/events" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">イベント登録</Link>
+        </li>
+        <li className="mb-2">
           <Link to="/" className="block py-2 px-4 rounded hover:bg-gray-700 whitespace-nowrap">ダッシュボード</Link>
         </li>
       </ul>

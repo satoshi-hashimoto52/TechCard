@@ -41,7 +41,7 @@ type MobileUploadStatus = {
 type TagOption = {
   id: number;
   name: string;
-  type: 'technology' | 'relation' | string;
+  type: 'tech' | 'relation' | string;
 };
 
 type CameraCapabilities = MediaTrackCapabilities & {
@@ -82,9 +82,9 @@ const ContactRegister: React.FC = () => {
   const [customTag, setCustomTag] = useState('');
   const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
-  const [newTagType, setNewTagType] = useState<'technology' | 'relation'>('technology');
+  const [newTagType, setNewTagType] = useState<'tech' | 'relation'>('tech');
   const [manageTagId, setManageTagId] = useState<number | ''>('');
-  const [manageTagType, setManageTagType] = useState<'technology' | 'relation'>('technology');
+  const [manageTagType, setManageTagType] = useState<'tech' | 'relation'>('tech');
   const todayString = (() => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -143,8 +143,8 @@ const ContactRegister: React.FC = () => {
     setCustomTag('');
     setTagsTouched(false);
     setManageTagId('');
-    setManageTagType('technology');
-    setNewTagType('technology');
+    setManageTagType('tech');
+    setNewTagType('tech');
     setOcrText(null);
     setSubmitError(null);
   };
@@ -513,9 +513,22 @@ const ContactRegister: React.FC = () => {
   useEffect(() => {
     axios.get<TagOption[]>('http://localhost:8000/tags')
       .then(response => {
-        const tags = response.data.filter(tag => tag.name);
+        const normalizeType = (value?: string) => {
+          if (!value) return 'tech';
+          if (value === 'technology') return 'tech';
+          if (value === 'event') return 'event';
+          return value;
+        };
+        const tags = response.data
+          .filter(tag => tag.name)
+          .map(tag => ({ ...tag, type: normalizeType(tag.type) }))
+          .filter(tag => tag.type !== 'event');
         tags.sort((a, b) => {
-          const typeOrder = (value: string) => (value === 'relation' ? 1 : 0);
+          const typeOrder = (value: string) => {
+            if (value === 'tech') return 0;
+            if (value === 'relation') return 1;
+            return 2;
+          };
           const diff = typeOrder(a.type) - typeOrder(b.type);
           if (diff !== 0) return diff;
           return a.name.localeCompare(b.name, 'ja');
@@ -529,7 +542,11 @@ const ContactRegister: React.FC = () => {
     if (!manageTagId) return;
     const target = availableTags.find(tag => tag.id === manageTagId);
     if (!target) return;
-    setManageTagType(target.type === 'relation' ? 'relation' : 'technology');
+    if (target.type === 'relation') {
+      setManageTagType('relation');
+    } else {
+      setManageTagType('tech');
+    }
   }, [manageTagId, availableTags]);
 
   useEffect(() => {
@@ -701,6 +718,18 @@ const ContactRegister: React.FC = () => {
     setIsSubmitting(true);
     setSubmitError(null);
     const tagsPayload = tagsTouched ? selectedTags : initialTags;
+    const normalizeTagType = (value?: string) => {
+      if (!value) return 'tech';
+      if (value === 'technology') return 'tech';
+      return value;
+    };
+    const tagItems = tagsPayload.map(name => {
+      const found = availableTags.find(tag => tag.name === name);
+      return {
+        name,
+        type: normalizeTagType(found?.type),
+      };
+    });
     const payload = {
       name: form.name,
       email: form.email || null,
@@ -713,6 +742,7 @@ const ContactRegister: React.FC = () => {
       company_name: form.company || null,
       first_met_at: form.first_met_at || null,
       tags: tagsPayload,
+      tag_items: tagItems,
       notes: form.notes || null,
       card_filename: cardFilename,
       ocr_text: ocrText,
@@ -1275,7 +1305,7 @@ const ContactRegister: React.FC = () => {
                 {selectedTags.map(tag => {
                   const tagType = availableTags.find(item => item.name === tag)?.type;
                   const styleClass = tagType === 'relation'
-                    ? 'bg-amber-100 text-amber-800'
+                    ? 'bg-emerald-100 text-emerald-800'
                     : 'bg-blue-100 text-blue-800';
                   return (
                     <span
@@ -1289,7 +1319,11 @@ const ContactRegister: React.FC = () => {
                         setTagsTouched(true);
                         setSelectedTags(prev => prev.filter(item => item !== tag));
                       }}
-                      className={tagType === 'relation' ? 'text-amber-800 hover:text-amber-900' : 'text-blue-800 hover:text-blue-900'}
+                      className={
+                        tagType === 'relation'
+                          ? 'text-emerald-800 hover:text-emerald-900'
+                          : 'text-blue-800 hover:text-blue-900'
+                      }
                     >
                       ×
                     </button>
@@ -1300,154 +1334,161 @@ const ContactRegister: React.FC = () => {
                   <span className="text-sm text-gray-500">タグが選択されていません。</span>
                 )}
               </div>
-              <div className="flex flex-wrap gap-2">
-                <select
-                  value={selectedTagOption}
-                  onChange={e => setSelectedTagOption(e.target.value)}
-                  className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
-                >
-                  <option value="">既存タグを選択</option>
-                  <optgroup label="Tag/Tech">
-                    {availableTags
-                      .filter(tag => tag.type !== 'relation')
-                      .map(tag => (
-                        <option key={tag.id} value={tag.name}>
-                          {tag.name}
-                        </option>
-                      ))}
-                  </optgroup>
-                  <optgroup label="Tag/Relation">
-                    {availableTags
-                      .filter(tag => tag.type === 'relation')
-                      .map(tag => (
-                        <option key={tag.id} value={tag.name}>
-                          {tag.name}
-                        </option>
-                      ))}
-                  </optgroup>
-                </select>
-                <button
-                  type="button"
-                  onClick={() => {
-                    const normalized = selectedTagOption.trim();
-                    if (!normalized) return;
-                    if (selectedTags.includes(normalized)) return;
-                    setTagsTouched(true);
-                    setSelectedTags(prev => [...prev, normalized]);
-                    setSelectedTagOption('');
-                  }}
-                  className="bg-blue-600 text-white px-3 py-2 rounded"
-                >
-                  追加
-                </button>
-                <select
-                  value={newTagType}
-                  onChange={e => setNewTagType(e.target.value as 'technology' | 'relation')}
-                  className={`border rounded px-2 py-2 text-sm ${
-                    newTagType === 'relation'
-                      ? 'bg-amber-50 text-amber-700 border-amber-300'
-                      : 'bg-blue-50 text-blue-700 border-blue-300'
-                  }`}
-                >
-                  <option value="technology">Tag/Tech</option>
-                  <option value="relation">Tag/Relation</option>
-                </select>
-                <input
-                  type="text"
-                  value={customTag}
-                  onChange={e => setCustomTag(e.target.value)}
-                  className="flex-1 border rounded px-3 py-2 min-w-[200px]"
-                  placeholder="タグを追加"
-                />
-                <button
-                  type="button"
-                  onClick={() => {
-                    const normalized = customTag.trim();
-                    if (!normalized) return;
-                    if (selectedTags.includes(normalized)) return;
-                    setTagsTouched(true);
-                    setSelectedTags(prev => [...prev, normalized]);
-                    setAvailableTags(prev => {
-                      if (prev.some(tag => tag.name === normalized)) return prev;
-                      return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
-                    });
-                    setCustomTag('');
-                  }}
-                  className="bg-gray-800 text-white px-3 py-2 rounded"
-                >
-                  追加
-                </button>
-              </div>
-              <div className="flex flex-wrap items-center gap-2 border-t border-gray-200 pt-3">
-                <select
-                  value={manageTagId}
-                  onChange={e => setManageTagId(e.target.value ? Number(e.target.value) : '')}
-                  className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
-                >
-                  <option value="">タグ管理対象を選択</option>
-                  {availableTags.map(tag => (
-                    <option key={tag.id} value={tag.id}>
-                      {tag.name}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  value={manageTagType}
-                  onChange={e => setManageTagType(e.target.value as 'technology' | 'relation')}
-                  className="border rounded px-2 py-2 text-sm"
-                  disabled={!manageTagId}
-                >
-                  <option value="technology">Tag/Tech</option>
-                  <option value="relation">Tag/Relation</option>
-                </select>
-                <button
-                  type="button"
-                  className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
-                  disabled={!manageTagId}
-                  onClick={async () => {
-                    const target = availableTags.find(tag => tag.id === manageTagId);
-                    if (!target) return;
-                    try {
-                      await axios.put(`http://localhost:8000/tags/${target.id}`, {
-                        name: target.name,
-                        type: manageTagType,
+              <div className="flex items-center gap-12 flex-nowrap overflow-x-auto border-t border-gray-200 pt-3">
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-sm font-medium text-gray-600">追加:</span>
+                  <select
+                    value={selectedTagOption}
+                    onChange={e => setSelectedTagOption(e.target.value)}
+                    className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
+                  >
+                    <option value="">既存タグを選択</option>
+                    <optgroup label="Tag/Tech">
+                      {availableTags
+                        .filter(tag => tag.type === 'tech')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                    <optgroup label="Tag/Relation">
+                      {availableTags
+                        .filter(tag => tag.type === 'relation')
+                        .map(tag => (
+                          <option key={tag.id} value={tag.name}>
+                            {tag.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const normalized = selectedTagOption.trim();
+                      if (!normalized) return;
+                      if (selectedTags.includes(normalized)) return;
+                      setTagsTouched(true);
+                      setSelectedTags(prev => [...prev, normalized]);
+                      setSelectedTagOption('');
+                    }}
+                    className="bg-blue-600 text-white px-3 py-2 rounded"
+                  >
+                    追加
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-sm font-medium text-gray-600">作成:</span>
+                  <input
+                    type="text"
+                    value={customTag}
+                    onChange={e => setCustomTag(e.target.value)}
+                    className="border rounded px-3 py-2 min-w-[140px] w-40"
+                    placeholder="タグを追加"
+                  />
+                  <select
+                    value={newTagType}
+                    onChange={e => setNewTagType(e.target.value as 'tech' | 'relation')}
+                    className={`border rounded px-2 py-2 text-sm ${
+                      newTagType === 'relation'
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-300'
+                        : 'bg-blue-50 text-blue-700 border-blue-300'
+                    }`}
+                  >
+                    <option value="tech">Tag/Tech</option>
+                    <option value="relation">Tag/Relation</option>
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const normalized = customTag.trim();
+                      if (!normalized) return;
+                      if (selectedTags.includes(normalized)) return;
+                      setTagsTouched(true);
+                      setSelectedTags(prev => [...prev, normalized]);
+                      setAvailableTags(prev => {
+                        if (prev.some(tag => tag.name === normalized)) return prev;
+                        return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
                       });
-                      setAvailableTags(prev =>
-                        prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
-                      );
-                      setFlashMessage('タグ属性を更新しました。');
-                    } catch (error) {
-                      console.error('tag update failed', error);
-                      setSubmitError('タグ属性の更新に失敗しました。');
-                    }
-                  }}
-                >
-                  属性変更
-                </button>
-                <button
-                  type="button"
-                  className="px-3 py-2 text-sm rounded border border-red-200 text-red-700 bg-red-50 disabled:opacity-50"
-                  disabled={!manageTagId}
-                  onClick={async () => {
-                    const target = availableTags.find(tag => tag.id === manageTagId);
-                    if (!target) return;
-                    const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
-                    if (!confirmed) return;
-                    try {
-                      await axios.delete(`http://localhost:8000/tags/${target.id}`);
-                      setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
-                      setSelectedTags(prev => prev.filter(tag => tag !== target.name));
-                      setDetectedTags(prev => prev.filter(tag => tag !== target.name));
-                      setManageTagId('');
-                      setFlashMessage('タグを削除しました。');
-                    } catch (error) {
-                      console.error('tag delete failed', error);
-                      setSubmitError('タグ削除に失敗しました。');
-                    }
-                  }}
-                >
-                  削除
-                </button>
+                      setCustomTag('');
+                    }}
+                    className="bg-gray-800 text-white px-3 py-2 rounded"
+                  >
+                    追加
+                  </button>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-sm font-medium text-gray-600">属性変更:</span>
+                  <select
+                    value={manageTagId}
+                    onChange={e => setManageTagId(e.target.value ? Number(e.target.value) : '')}
+                    className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
+                  >
+                    <option value="">タグ管理対象を選択</option>
+                    {availableTags.map(tag => (
+                      <option key={tag.id} value={tag.id}>
+                        {tag.name}
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={manageTagType}
+                    onChange={e => setManageTagType(e.target.value as 'tech' | 'relation')}
+                    className="border rounded px-2 py-2 text-sm"
+                    disabled={!manageTagId}
+                  >
+                    <option value="tech">Tag/Tech</option>
+                    <option value="relation">Tag/Relation</option>
+                  </select>
+                  <button
+                    type="button"
+                    className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
+                    disabled={!manageTagId}
+                    onClick={async () => {
+                      const target = availableTags.find(tag => tag.id === manageTagId);
+                      if (!target) return;
+                      try {
+                        await axios.put(`http://localhost:8000/tags/${target.id}`, {
+                          name: target.name,
+                          type: manageTagType,
+                        });
+                        setAvailableTags(prev =>
+                          prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
+                        );
+                        setFlashMessage('タグ属性を更新しました。');
+                      } catch (error) {
+                        console.error('tag update failed', error);
+                        setSubmitError('タグ属性の更新に失敗しました。');
+                      }
+                    }}
+                  >
+                    属性変更
+                  </button>
+                  <button
+                    type="button"
+                    className="px-3 py-2 text-sm rounded border border-red-200 text-red-700 bg-red-50 disabled:opacity-50"
+                    disabled={!manageTagId}
+                    onClick={async () => {
+                      const target = availableTags.find(tag => tag.id === manageTagId);
+                      if (!target) return;
+                      const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
+                      if (!confirmed) return;
+                      try {
+                        await axios.delete(`http://localhost:8000/tags/${target.id}`);
+                        setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
+                        setSelectedTags(prev => prev.filter(tag => tag !== target.name));
+                        setDetectedTags(prev => prev.filter(tag => tag !== target.name));
+                        setManageTagId('');
+                        setFlashMessage('タグを削除しました。');
+                      } catch (error) {
+                        console.error('tag delete failed', error);
+                        setSubmitError('タグ削除に失敗しました。');
+                      }
+                    }}
+                  >
+                    削除
+                  </button>
+                </div>
               </div>
             </div>
           </div>

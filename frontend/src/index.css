@@ -428,11 +428,11 @@
 }
 
 .tag-select optgroup[label='Tag/Tech'] {
-  color: rgba(245, 158, 11, 0.85);
+  color: rgba(59, 130, 246, 0.85);
 }
 
 .tag-select optgroup[label='Tag/Relation'] {
-  color: rgba(236, 72, 153, 0.85);
+  color: rgba(34, 197, 94, 0.85);
 }
 
 .geocode-progress__bar-fill {

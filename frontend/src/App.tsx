@@ -8,6 +8,7 @@ import TechnologySearch from './pages/TechnologySearch';
 import CardUpload from './pages/CardUpload';
 import ContactRegister from './pages/ContactRegister';
 import NetworkGraph from './pages/NetworkGraph';
+import EventRegister from './pages/EventRegister';
 
 function App() {
   return (
@@ -24,6 +25,7 @@ function App() {
             <Route path="/technology-search" element={<TechnologySearch />} />
             <Route path="/card-upload" element={<CardUpload />} />
             <Route path="/network" element={<NetworkGraph />} />
+            <Route path="/events" element={<EventRegister />} />
           </Routes>
         </div>
       </div>

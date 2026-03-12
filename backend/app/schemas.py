@@ -8,7 +8,11 @@ class TagBase(BaseModel):
     type: Optional[str] = None
 
 class TagCreate(TagBase):
-    type: str = "technology"
+    type: str = "tech"
+
+class ContactTagItem(BaseModel):
+    name: str
+    type: Optional[str] = None
 
 class TagRead(TagBase):
     id: int
@@ -21,6 +25,24 @@ class TechExtractRequest(BaseModel):
 
 class TechExtractResponse(BaseModel):
     tags: List[str]
+
+# Event schemas
+class EventBase(BaseModel):
+    name: str
+    start_date: Optional[date] = None
+    end_date: Optional[date] = None
+    location: Optional[str] = None
+    year: Optional[int] = None
+
+class EventCreate(EventBase):
+    contact_ids: List[int] = Field(default_factory=list)
+
+class EventRead(EventBase):
+    id: int
+    contact_ids: List[int] = Field(default_factory=list)
+
+    class Config:
+        from_attributes = True
 
 # Company schemas
 class CompanyBase(BaseModel):
@@ -109,6 +131,7 @@ class ContactRegisterRequest(BaseModel):
     first_met_at: Optional[date] = None
     company_name: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
+    tag_items: List[ContactTagItem] = Field(default_factory=list)
     notes: Optional[str] = None
     card_filename: Optional[str] = None
     ocr_text: Optional[str] = None

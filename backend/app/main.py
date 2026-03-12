@@ -4,7 +4,7 @@ from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 from .database import engine
 from . import models
-from .routers import contacts, companies, tags, meetings, cards, graph, stats, mobile_upload, admin, card_crop
+from .routers import contacts, companies, tags, meetings, cards, graph, stats, mobile_upload, admin, card_crop, events
 
 pillow_heif.register_heif_opener()
 
@@ -77,6 +77,8 @@ with engine.begin() as connection:
         connection.execute(text("ALTER TABLE companies ADD COLUMN postal_code TEXT"))
     if company_columns and not any(column[1] == "address" for column in company_columns):
         connection.execute(text("ALTER TABLE companies ADD COLUMN address TEXT"))
+    if company_columns and not any(column[1] == "group_id" for column in company_columns):
+        connection.execute(text("ALTER TABLE companies ADD COLUMN group_id INTEGER"))
     if company_columns and not any(column[1] == "latitude" for column in company_columns):
         connection.execute(text("ALTER TABLE companies ADD COLUMN latitude REAL"))
     if company_columns and not any(column[1] == "longitude" for column in company_columns):
@@ -88,9 +90,41 @@ with engine.begin() as connection:
 
     tag_columns = connection.execute(text("PRAGMA table_info(tags)")).fetchall()
     if tag_columns and not any(column[1] == "type" for column in tag_columns):
-        connection.execute(text("ALTER TABLE tags ADD COLUMN type TEXT DEFAULT 'technology'"))
+        connection.execute(text("ALTER TABLE tags ADD COLUMN type TEXT DEFAULT 'tech'"))
     if tag_columns:
-        connection.execute(text("UPDATE tags SET type='technology' WHERE type IS NULL"))
+        connection.execute(text("UPDATE tags SET type='tech' WHERE type IS NULL"))
+        connection.execute(text("UPDATE tags SET type='tech' WHERE type='technology'"))
+        connection.execute(
+            text(
+                """
+                UPDATE tags
+                SET type='event'
+                WHERE name IN (
+                    'IIFES 2024',
+                    '国際画像機器展 2025',
+                    'MEX金沢',
+                    '製造DX応援フェア'
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                UPDATE tags
+                SET type='relation'
+                WHERE name IN (
+                    '交流 ホクショー',
+                    '家族',
+                    '師弟',
+                    '旅行(会社)',
+                    'フリーアドレス',
+                    '別川未来塾X月星道場',
+                    'JXI'
+                )
+                """
+            )
+        )
 
 app = FastAPI(title="TechCard Backend")
 
@@ -116,5 +150,6 @@ app.include_router(cards.router)
 app.include_router(graph.router)
 app.include_router(card_crop.router)
 app.include_router(stats.router)
+app.include_router(events.router)
 app.include_router(mobile_upload.router)
 app.include_router(admin.router)

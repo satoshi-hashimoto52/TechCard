@@ -2,7 +2,6 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import TechCardMap from '../components/TechCardMap';
 import { CompanyMapPoint } from '../components/LedJapanMap';
-import GeocodeProgress from '../components/GeocodeProgress';
 
 type Summary = {
   counts: {
@@ -51,6 +50,10 @@ const Dashboard: React.FC = () => {
   const [companyMapLoading, setCompanyMapLoading] = useState(false);
   const [companyDiagnostics, setCompanyDiagnostics] = useState<CompanyDiagnostics | null>(null);
   const totalContacts = summary.counts.contacts || 1;
+  const geocodeProgress = companyMap[0]?.geocode_progress;
+  const geocodePercent = geocodeProgress
+    ? Math.round((geocodeProgress.success / Math.max(1, geocodeProgress.total)) * 100)
+    : 0;
 
   useEffect(() => {
     axios.get<Summary>('http://localhost:8000/stats/summary')
@@ -115,7 +118,7 @@ const Dashboard: React.FC = () => {
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">連絡先数</h2>
           <p className="text-2xl">{summary.counts.contacts}</p>
-          <div className="mt-2 text-sm text-gray-600">
+          <div className={`mt-2 text-sm text-gray-600 ${expanded.contacts ? 'space-y-1' : 'space-y-0'}`}>
             {(expanded.contacts ? summary.lists.contacts : summary.lists.contacts.slice(0, 3)).map(contact => (
               <div key={contact.id}>{contact.name}</div>
             ))}
@@ -133,8 +136,8 @@ const Dashboard: React.FC = () => {
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">会社数</h2>
           <p className="text-2xl">{summary.counts.companies}</p>
-          <div className="mt-2 space-y-2">
-            {(expanded.companies ? summary.lists.companies : summary.lists.companies.slice(0, 5)).map(company => {
+          <div className={`mt-2 ${expanded.companies ? 'space-y-2' : 'space-y-1'}`}>
+            {(expanded.companies ? summary.lists.companies : summary.lists.companies.slice(0, 3)).map(company => {
               const ratio = Math.round((company.count / totalContacts) * 100);
               return (
                 <div key={company.name}>
@@ -167,7 +170,7 @@ const Dashboard: React.FC = () => {
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">タグ数</h2>
           <p className="text-2xl">{summary.counts.tags}</p>
-          <div className="mt-2 text-sm text-gray-600">
+          <div className={`mt-2 text-sm text-gray-600 ${expanded.tags ? 'space-y-1' : 'space-y-0'}`}>
             {(expanded.tags ? summary.lists.tags : summary.lists.tags.slice(0, 3)).map(tag => (
               <div key={tag.name}>
                 {tag.name} ({tag.count})
@@ -187,7 +190,7 @@ const Dashboard: React.FC = () => {
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">Connections(Tag)</h2>
           <p className="text-2xl">{summary.counts.meetings}</p>
-          <div className="mt-2 text-sm text-gray-600">
+          <div className={`mt-2 text-sm text-gray-600 ${expanded.meetings ? 'space-y-1' : 'space-y-0'}`}>
             {(expanded.meetings ? summary.lists.meetings : summary.lists.meetings.slice(0, 3)).map(meeting => (
               <div key={meeting.id}>
                 {meeting.contact_name || 'Unknown'} ({meeting.overlap})
@@ -215,13 +218,12 @@ const Dashboard: React.FC = () => {
             className="text-xs text-blue-600 hover:text-blue-800 disabled:opacity-50"
             disabled={companyMapLoading}
           >
-            {companyMapLoading ? '再取得中...' : '位置情報を再取得'}
+            {companyMapLoading ? `ジオコーディング進捗 ${geocodePercent}%` : '位置情報を再取得'}
           </button>
         </div>
         <div className="w-full overflow-hidden border rounded bg-slate-950">
           <TechCardMap companies={companyMap} loading={companyMapLoading} />
         </div>
-        <GeocodeProgress companies={companyMap} />
         {companyDiagnostics && (
           <div className="mt-4 space-y-3 text-sm text-gray-600">
             {companyDiagnostics.invalidated_coords.length > 0 && (
