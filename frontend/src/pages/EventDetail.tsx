@@ -147,7 +147,7 @@ const EventDetail: React.FC = () => {
 
         <div className="mt-6 grid grid-cols-1 lg:grid-cols-[minmax(0,360px)_minmax(0,1fr)] gap-6">
           <div>
-            <h3 className="text-sm font-semibold mb-2">Participants</h3>
+            <h3 className="text-sm font-semibold mb-2">参加者</h3>
             <div className="border rounded p-3 max-h-[360px] overflow-y-auto">
               {event.participants.length === 0 && (
                 <div className="text-sm text-gray-500">参加者が登録されていません。</div>
@@ -172,7 +172,7 @@ const EventDetail: React.FC = () => {
             </div>
 
             <div className="mt-4">
-              <h3 className="text-sm font-semibold mb-2">Companies</h3>
+              <h3 className="text-sm font-semibold mb-2">会社</h3>
               <div className="text-sm text-gray-600">
                 {event.companies.length === 0 && '登録なし'}
                 {event.companies.length > 0 && event.companies.map(company => company.name).join(' / ')}

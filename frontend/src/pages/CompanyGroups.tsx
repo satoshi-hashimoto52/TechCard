@@ -156,7 +156,7 @@ const CompanyGroups: React.FC = () => {
             value={name}
             onChange={event => setName(event.target.value)}
             className="border rounded px-3 py-2"
-            placeholder="例: HITACHI Group"
+            placeholder="例: HITACHI グループ"
           />
           <input
             type="text"

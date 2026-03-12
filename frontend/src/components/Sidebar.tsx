@@ -30,33 +30,36 @@ const Sidebar: React.FC = () => {
         <ul>
         <li className="mb-2">
           <NavLink
+            to="/"
+            end
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            Dashboard
+          </NavLink>
+        </li>
+        <li className="mb-2">
+          <NavLink
             to="/contacts"
             end
             className={({ isActive }) =>
               `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
             }
           >
-            連絡先
+            Contacts
           </NavLink>
         </li>
         <li className="mb-2">
           <NavLink
             to="/contacts/register"
             className={({ isActive }) =>
-              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+              `sidebar__link flex items-center gap-2 py-2 px-4 rounded whitespace-nowrap ${
+                isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'
+              }`
             }
           >
-            連絡先登録
-          </NavLink>
-        </li>
-        <li className="mb-2">
-          <NavLink
-            to="/network"
-            className={({ isActive }) =>
-              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
-            }
-          >
-            ネットワークグラフ
+            Card Registration
           </NavLink>
         </li>
         <li className="mb-2">
@@ -66,7 +69,7 @@ const Sidebar: React.FC = () => {
               `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
             }
           >
-            会社グループ
+            Companies
           </NavLink>
         </li>
         <li className="mb-2">
@@ -76,18 +79,37 @@ const Sidebar: React.FC = () => {
               `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
             }
           >
-            イベント登録
+            Events
           </NavLink>
         </li>
         <li className="mb-2">
           <NavLink
-            to="/"
-            end
+            to="/timeline"
             className={({ isActive }) =>
               `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
             }
           >
-            ダッシュボード
+            Timeline
+          </NavLink>
+        </li>
+        <li className="mb-2">
+          <NavLink
+            to="/network"
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            Network
+          </NavLink>
+        </li>
+        <li className="mb-2">
+          <NavLink
+            to="/insights"
+            className={({ isActive }) =>
+              `sidebar__link block py-2 px-4 rounded whitespace-nowrap ${isActive ? 'sidebar__link--active' : 'hover:bg-gray-700'}`
+            }
+          >
+            Insights
           </NavLink>
         </li>
         </ul>

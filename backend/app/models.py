@@ -9,6 +9,13 @@ contact_tags = Table(
     Column("tag_id", ForeignKey("tags.id"), primary_key=True),
 )
 
+contact_tech_tags = Table(
+    "contact_tech_tags",
+    Base.metadata,
+    Column("contact_id", ForeignKey("contacts.id"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id"), primary_key=True),
+)
+
 company_tech_tags = Table(
     "company_tech_tags",
     Base.metadata,
@@ -72,6 +79,7 @@ class Contact(Base):
 
     company = relationship("Company", back_populates="contacts")
     tags = relationship("Tag", secondary=contact_tags, back_populates="contacts")
+    tech_tags = relationship("Tag", secondary=contact_tech_tags, back_populates="tech_contacts")
     events = relationship("Event", secondary=event_contacts, back_populates="contacts")
     meetings = relationship("Meeting", back_populates="contact")
     business_cards = relationship("BusinessCard", back_populates="contact")
@@ -99,6 +107,7 @@ class Tag(Base):
     type = Column(String, nullable=False, default="tech")
 
     contacts = relationship("Contact", secondary=contact_tags, back_populates="tags")
+    tech_contacts = relationship("Contact", secondary=contact_tech_tags, back_populates="tech_tags")
     companies = relationship("Company", secondary=company_tech_tags, back_populates="tech_tags")
 
 class Meeting(Base):

@@ -18,6 +18,12 @@ type Summary = {
   };
 };
 
+type ContactRecentItem = {
+  id: number;
+  name: string;
+  first_met_at?: string | null;
+};
+
 type CompanyDiagnostics = {
   missing_addresses: { company_id: number; name: string }[];
   invalidated_coords: { company_id: number; name: string; reason: string }[];
@@ -40,16 +46,12 @@ const Dashboard: React.FC = () => {
       meetings: [],
     },
   });
-  const [expanded, setExpanded] = useState({
-    contacts: false,
-    companies: false,
-    tags: false,
-    meetings: false,
-  });
+  const [recentContacts, setRecentContacts] = useState<ContactRecentItem[]>([]);
   const [companyMap, setCompanyMap] = useState<CompanyMapPoint[]>([]);
   const [companyMapLoading, setCompanyMapLoading] = useState(false);
   const [companyDiagnostics, setCompanyDiagnostics] = useState<CompanyDiagnostics | null>(null);
   const totalContacts = summary.counts.contacts || 1;
+  const topLimit = 3;
   const geocodeProgress = companyMap[0]?.geocode_progress;
   const geocodePercent = geocodeProgress
     ? Math.round((geocodeProgress.success / Math.max(1, geocodeProgress.total)) * 100)
@@ -74,6 +76,21 @@ const Dashboard: React.FC = () => {
           },
         });
       });
+  }, []);
+
+  useEffect(() => {
+    axios
+      .get<ContactRecentItem[]>('http://localhost:8000/contacts/')
+      .then(response => {
+        const sorted = [...(response.data || [])].sort((a, b) => {
+          const dateA = a.first_met_at || '';
+          const dateB = b.first_met_at || '';
+          if (dateA !== dateB) return dateB.localeCompare(dateA);
+          return (b.id || 0) - (a.id || 0);
+        });
+        setRecentContacts(sorted);
+      })
+      .catch(() => setRecentContacts([]));
   }, []);
 
   const fetchCompanyMap = (withRefresh = false) => {
@@ -118,94 +135,64 @@ const Dashboard: React.FC = () => {
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">連絡先数</h2>
           <p className="text-2xl">{summary.counts.contacts}</p>
-          <div className={`mt-2 text-sm text-gray-600 ${expanded.contacts ? 'space-y-1' : 'space-y-0'}`}>
-            {(expanded.contacts ? summary.lists.contacts : summary.lists.contacts.slice(0, 3)).map(contact => (
-              <div key={contact.id}>{contact.name}</div>
+          <div className="mt-2 text-sm text-gray-600 space-y-1">
+            {recentContacts.slice(0, topLimit).map(contact => (
+              <div key={contact.id} className="flex items-center justify-between gap-2">
+                <span className="truncate">{contact.name}</span>
+                <span className="text-xs text-gray-500 whitespace-nowrap">
+                  {contact.first_met_at || '-'}
+                </span>
+              </div>
             ))}
-            {summary.lists.contacts.length > 3 && (
-              <button
-                type="button"
-                onClick={() => setExpanded(prev => ({ ...prev, contacts: !prev.contacts }))}
-                className="mt-2 text-xs text-blue-600 hover:text-blue-800"
-              >
-                {expanded.contacts ? '閉じる' : '全て表示'}
-              </button>
-            )}
+            {recentContacts.length === 0 && <div>データがありません。</div>}
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">会社数</h2>
           <p className="text-2xl">{summary.counts.companies}</p>
-          <div className={`mt-2 ${expanded.companies ? 'space-y-2' : 'space-y-1'}`}>
-            {(expanded.companies ? summary.lists.companies : summary.lists.companies.slice(0, 3)).map(company => {
+          <div className="mt-2 space-y-2">
+            {summary.lists.companies.slice(0, topLimit).map(company => {
               const ratio = Math.round((company.count / totalContacts) * 100);
               return (
                 <div key={company.name}>
-                  <div className="flex items-center justify-between text-sm text-gray-700">
-                    <span className="truncate">{company.name}</span>
-                    <span className="ml-2 text-xs text-gray-500 whitespace-nowrap">
+                  <div className="flex items-center gap-2 text-sm text-gray-700">
+                    <span className="truncate flex-1">{company.name}</span>
+                    <div className="flex-1 h-2 rounded bg-gray-200">
+                      <div
+                        className="h-2 rounded bg-emerald-500"
+                        style={{ width: `${Math.min(100, ratio)}%` }}
+                      />
+                    </div>
+                    <span className="ml-1 text-xs text-gray-500 whitespace-nowrap">
                       {company.count}件 ({ratio}%)
                     </span>
-                  </div>
-                  <div className="mt-1 h-2 rounded bg-gray-200">
-                    <div
-                      className="h-2 rounded bg-emerald-500"
-                      style={{ width: `${Math.min(100, ratio)}%` }}
-                    />
                   </div>
                 </div>
               );
             })}
-            {summary.lists.companies.length > 3 && (
-              <button
-                type="button"
-                onClick={() => setExpanded(prev => ({ ...prev, companies: !prev.companies }))}
-                className="mt-2 text-xs text-blue-600 hover:text-blue-800"
-              >
-                {expanded.companies ? '閉じる' : '全て表示'}
-              </button>
-            )}
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">タグ数</h2>
           <p className="text-2xl">{summary.counts.tags}</p>
-          <div className={`mt-2 text-sm text-gray-600 ${expanded.tags ? 'space-y-1' : 'space-y-0'}`}>
-            {(expanded.tags ? summary.lists.tags : summary.lists.tags.slice(0, 3)).map(tag => (
+          <div className="mt-2 text-sm text-gray-600 space-y-1">
+            {summary.lists.tags.slice(0, topLimit).map(tag => (
               <div key={tag.name}>
                 {tag.name} ({tag.count})
               </div>
             ))}
-            {summary.lists.tags.length > 3 && (
-              <button
-                type="button"
-                onClick={() => setExpanded(prev => ({ ...prev, tags: !prev.tags }))}
-                className="mt-2 text-xs text-blue-600 hover:text-blue-800"
-              >
-                {expanded.tags ? '閉じる' : '全て表示'}
-              </button>
-            )}
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">
-          <h2 className="text-lg font-semibold">Connections(Tag)</h2>
+          <h2 className="text-lg font-semibold">つながり（タグ）</h2>
           <p className="text-2xl">{summary.counts.meetings}</p>
-          <div className={`mt-2 text-sm text-gray-600 ${expanded.meetings ? 'space-y-1' : 'space-y-0'}`}>
-            {(expanded.meetings ? summary.lists.meetings : summary.lists.meetings.slice(0, 3)).map(meeting => (
+          <div className="mt-2 text-sm text-gray-600 space-y-1">
+            {summary.lists.meetings.slice(0, topLimit).map(meeting => (
               <div key={meeting.id}>
-                {meeting.contact_name || 'Unknown'} ({meeting.overlap})
+                {meeting.contact_name || '不明'} ({meeting.overlap})
                 {meeting.company_name ? ` / ${meeting.company_name}` : ''}
               </div>
             ))}
-            {summary.lists.meetings.length > 3 && (
-              <button
-                type="button"
-                onClick={() => setExpanded(prev => ({ ...prev, meetings: !prev.meetings }))}
-                className="mt-2 text-xs text-blue-600 hover:text-blue-800"
-              >
-                {expanded.meetings ? '閉じる' : '全て表示'}
-              </button>
-            )}
           </div>
         </div>
       </div>

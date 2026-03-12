@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 from pathlib import Path
@@ -29,6 +29,26 @@ def _unique_card_filename(db: Session, filename: str) -> str:
     stem = path.stem or "card"
     ext = path.suffix or ".png"
     return f"{stem}-{suffix}{ext}"
+
+def _sync_company_tech_tags(db: Session, company_id: int | None) -> None:
+    if not company_id:
+        return
+    company = (
+        db.query(models.Company)
+        .options(
+            joinedload(models.Company.tech_tags),
+            joinedload(models.Company.contacts).joinedload(models.Contact.tech_tags),
+        )
+        .filter(models.Company.id == company_id)
+        .first()
+    )
+    if not company:
+        return
+    tag_map = {}
+    for contact in company.contacts or []:
+        for tag in contact.tech_tags or []:
+            tag_map[tag.id] = tag
+    company.tech_tags = list(tag_map.values())
 
 @router.post("/", response_model=schemas.ContactRead)
 def create_contact(contact: schemas.ContactCreate, db: Session = Depends(get_db)):
@@ -148,9 +168,11 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
             if tag_type and tag.type in (None, "technology"):
                 tag.type = normalized_type
         effective_type = normalize_tag_type(tag.type) or normalized_type
-        if effective_type in ("relation", "event"):
+        if tag not in contact.tags:
             contact.tags.append(tag)
-        elif effective_type == "tech":
+        if effective_type == "tech":
+            if tag not in contact.tech_tags:
+                contact.tech_tags.append(tag)
             if company is not None and tag not in company.tech_tags:
                 company.tech_tags.append(tag)
 
@@ -162,6 +184,8 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
             contact=contact,
         )
         db.add(business_card)
+
+    _sync_company_tech_tags(db, contact.company_id)
 
     try:
         db.commit()
@@ -227,6 +251,7 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
             },
         )
 
+    old_company_id = db_contact.company_id
     db_contact.name = normalized_name
     db_contact.email = payload.email
     db_contact.phone = payload.phone
@@ -276,6 +301,7 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
         add_tag_item(tag_name, "tech")
 
     db_contact.tags.clear()
+    db_contact.tech_tags.clear()
     for tag_name, tag_type in combined_tags:
         tag = (
             db.query(models.Tag)
@@ -291,9 +317,11 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
             if tag_type and tag.type in (None, "technology"):
                 tag.type = normalized_type
         effective_type = normalize_tag_type(tag.type) or normalized_type
-        if effective_type in ("relation", "event"):
+        if tag not in db_contact.tags:
             db_contact.tags.append(tag)
-        elif effective_type == "tech":
+        if effective_type == "tech":
+            if tag not in db_contact.tech_tags:
+                db_contact.tech_tags.append(tag)
             if company is not None and tag not in company.tech_tags:
                 company.tech_tags.append(tag)
 
@@ -305,6 +333,10 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
             contact=db_contact,
         )
         db.add(business_card)
+
+    _sync_company_tech_tags(db, db_contact.company_id)
+    if old_company_id and old_company_id != db_contact.company_id:
+        _sync_company_tech_tags(db, old_company_id)
 
     try:
         db.commit()

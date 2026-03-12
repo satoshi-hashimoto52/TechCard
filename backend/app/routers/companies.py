@@ -36,7 +36,8 @@ def read_company_detail(company_id: int, db: Session = Depends(get_db)):
         .options(
             joinedload(models.Company.group),
             joinedload(models.Company.tech_tags),
-            joinedload(models.Company.contacts),
+            joinedload(models.Company.contacts).joinedload(models.Contact.tech_tags),
+            joinedload(models.Company.contacts).joinedload(models.Contact.tags),
         )
         .filter(models.Company.id == company_id)
         .first()
@@ -47,12 +48,22 @@ def read_company_detail(company_id: int, db: Session = Depends(get_db)):
         {"id": contact.id, "name": contact.name}
         for contact in (company.contacts or [])
     ]
+    tech_names: dict[str, None] = {}
+    for contact in company.contacts or []:
+        for tag in contact.tech_tags or []:
+            if tag.name:
+                tech_names[tag.name] = None
+        for tag in contact.tags or []:
+            if tag.type in ("tech", "technology") and tag.name:
+                tech_names[tag.name] = None
+    tech_list = sorted(tech_names.keys(), key=lambda name: name)
+
     return schemas.CompanyDetail(
         id=company.id,
         name=company.name,
         group_id=company.group_id,
         group_name=company.group.name if company.group else None,
-        tech_tags=[tag.name for tag in (company.tech_tags or []) if tag.name],
+        tech_tags=tech_list,
         contacts=contacts,
     )
 

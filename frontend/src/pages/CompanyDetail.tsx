@@ -147,7 +147,7 @@ const CompanyDetail: React.FC = () => {
         </div>
 
         <div>
-          <label className="text-sm font-semibold">Tech</label>
+          <label className="text-sm font-semibold">技術</label>
           <div className="mt-2 flex flex-wrap gap-2">
             {company.tech_tags.length === 0 && <span className="text-sm text-gray-500">未登録</span>}
             {company.tech_tags.map(tag => (

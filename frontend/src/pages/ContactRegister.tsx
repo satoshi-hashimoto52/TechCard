@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { useNavigate, useParams } from 'react-router-dom';
 import CardCropper from '../components/CardCropper';
@@ -44,6 +44,13 @@ type TagOption = {
   type: 'tech' | 'event' | 'relation' | string;
 };
 
+type CompanyGroup = {
+  id: number;
+  name: string;
+};
+
+const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
+
 type CameraCapabilities = MediaTrackCapabilities & {
   focusMode?: string[];
   focusDistance?: { min: number; max: number; step?: number };
@@ -85,6 +92,7 @@ const ContactRegister: React.FC = () => {
   const [newTagType, setNewTagType] = useState<'tech' | 'event' | 'relation'>('tech');
   const [manageTagId, setManageTagId] = useState<number | ''>('');
   const [manageTagType, setManageTagType] = useState<'tech' | 'event' | 'relation'>('tech');
+  const [groupTagNames, setGroupTagNames] = useState<string[]>([]);
   const todayString = (() => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -539,6 +547,15 @@ const ContactRegister: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    axios.get<CompanyGroup[]>('http://localhost:8000/company-groups')
+      .then(response => {
+        const names = (response.data || []).map(group => group.name).filter(Boolean);
+        setGroupTagNames(names);
+      })
+      .catch(() => setGroupTagNames([]));
+  }, []);
+
+  useEffect(() => {
     if (!manageTagId) return;
     const target = availableTags.find(tag => tag.id === manageTagId);
     if (!target) return;
@@ -550,6 +567,28 @@ const ContactRegister: React.FC = () => {
       setManageTagType('tech');
     }
   }, [manageTagId, availableTags]);
+
+  const groupTagSet = useMemo(() => {
+    const set = new Set<string>();
+    groupTagNames.forEach(name => {
+      if (name) set.add(name.trim());
+    });
+    GROUP_TAG_BLOCKLIST.forEach(name => set.add(name));
+    return set;
+  }, [groupTagNames]);
+  const isGroupTagName = useCallback((name: string) => groupTagSet.has(name.trim()), [groupTagSet]);
+  const visibleTags = useMemo(
+    () => availableTags.filter(tag => !isGroupTagName(tag.name)),
+    [availableTags, isGroupTagName],
+  );
+  const visibleSelectedTags = useMemo(
+    () => selectedTags.filter(tag => !isGroupTagName(tag)),
+    [isGroupTagName, selectedTags],
+  );
+  const visibleDetectedTags = useMemo(
+    () => detectedTags.filter(tag => !isGroupTagName(tag)),
+    [detectedTags, isGroupTagName],
+  );
 
   useEffect(() => {
     if (!isEdit || !id) return;
@@ -1174,7 +1213,7 @@ const ContactRegister: React.FC = () => {
           <p className="text-sm text-gray-500">技術はまだ検出されていません。</p>
         ) : (
           <div className="flex flex-wrap gap-2">
-            {detectedTags.map(tag => {
+            {visibleDetectedTags.map(tag => {
               const added = selectedTags.includes(tag);
               return (
                 <button
@@ -1304,8 +1343,8 @@ const ContactRegister: React.FC = () => {
             <label className="w-32 text-sm font-medium pt-2">タグ</label>
             <div className="flex-1 space-y-3">
               <div className="flex flex-wrap gap-2">
-                {selectedTags.map(tag => {
-                  const tagType = availableTags.find(item => item.name === tag)?.type;
+                {visibleSelectedTags.map(tag => {
+                  const tagType = visibleTags.find(item => item.name === tag)?.type;
                   const styleClass = tagType === 'relation'
                     ? 'bg-emerald-100 text-emerald-800'
                     : tagType === 'event'
@@ -1336,7 +1375,7 @@ const ContactRegister: React.FC = () => {
                     </span>
                   );
                 })}
-                {selectedTags.length === 0 && (
+                {visibleSelectedTags.length === 0 && (
                   <span className="text-sm text-gray-500">タグが選択されていません。</span>
                 )}
               </div>
@@ -1349,31 +1388,31 @@ const ContactRegister: React.FC = () => {
                     className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
                   >
                     <option value="">既存タグを選択</option>
-                    <optgroup label="Tag/Tech">
-                      {availableTags
-                        .filter(tag => tag.type === 'tech')
-                        .map(tag => (
-                          <option key={tag.id} value={tag.name}>
-                            {tag.name}
-                          </option>
+                    <optgroup label="タグ/技術">
+                    {visibleTags
+                      .filter(tag => tag.type === 'tech')
+                      .map(tag => (
+                        <option key={tag.id} value={tag.name}>
+                          {tag.name}
+                        </option>
                         ))}
                     </optgroup>
-                    <optgroup label="Tag/Event">
-                      {availableTags
-                        .filter(tag => tag.type === 'event')
-                        .map(tag => (
-                          <option key={tag.id} value={tag.name}>
-                            {tag.name}
-                          </option>
+                    <optgroup label="タグ/イベント">
+                    {visibleTags
+                      .filter(tag => tag.type === 'event')
+                      .map(tag => (
+                        <option key={tag.id} value={tag.name}>
+                          {tag.name}
+                        </option>
                         ))}
                     </optgroup>
-                    <optgroup label="Tag/Relation">
-                      {availableTags
-                        .filter(tag => tag.type === 'relation')
-                        .map(tag => (
-                          <option key={tag.id} value={tag.name}>
-                            {tag.name}
-                          </option>
+                    <optgroup label="タグ/関係">
+                    {visibleTags
+                      .filter(tag => tag.type === 'relation')
+                      .map(tag => (
+                        <option key={tag.id} value={tag.name}>
+                          {tag.name}
+                        </option>
                         ))}
                     </optgroup>
                   </select>
@@ -1412,9 +1451,9 @@ const ContactRegister: React.FC = () => {
                         : 'bg-blue-50 text-blue-700 border-blue-300'
                     }`}
                   >
-                    <option value="tech">Tag/Tech</option>
-                    <option value="event">Tag/Event</option>
-                    <option value="relation">Tag/Relation</option>
+                    <option value="tech">タグ/技術</option>
+                    <option value="event">タグ/イベント</option>
+                    <option value="relation">タグ/関係</option>
                   </select>
                   <button
                     type="button"
@@ -1443,7 +1482,7 @@ const ContactRegister: React.FC = () => {
                     className="tag-select border rounded px-3 py-2 text-sm min-w-[200px]"
                   >
                     <option value="">タグ管理対象を選択</option>
-                    {availableTags.map(tag => (
+                    {visibleTags.map(tag => (
                       <option key={tag.id} value={tag.id}>
                         {tag.name}
                       </option>
@@ -1455,9 +1494,9 @@ const ContactRegister: React.FC = () => {
                     className="border rounded px-2 py-2 text-sm"
                     disabled={!manageTagId}
                   >
-                    <option value="tech">Tag/Tech</option>
-                    <option value="event">Tag/Event</option>
-                    <option value="relation">Tag/Relation</option>
+                    <option value="tech">タグ/技術</option>
+                    <option value="event">タグ/イベント</option>
+                    <option value="relation">タグ/関係</option>
                   </select>
                   <button
                     type="button"

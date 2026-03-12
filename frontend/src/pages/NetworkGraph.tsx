@@ -2,6 +2,22 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import axios from 'axios';
 import { useNavigate } from 'react-router-dom';
 import ForceGraph2D from 'react-force-graph-2d';
+import ContextPanel from '../components/ContextPanel';
+import ShortcutPanel from '../components/ShortcutPanel';
+
+const NETWORK_GRAPH_COLORS = {
+  self: '#ed5f5f',
+  base: {
+    event: '#e6ed5f',
+    contact: '#beed5f',
+    company: '#5fed72',
+    group: '#61ed5f',
+    tech: '#615fed',
+    relation: '#ed5fa8',
+  },
+  fallback: '#94a3b8',
+  muted: '#cbd5f5',
+};
 
 type GraphNode = {
   id: string;
@@ -64,11 +80,21 @@ const NetworkGraph: React.FC = () => {
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [groupCollapsed, setGroupCollapsed] = useState(false);
   const [searchFocus, setSearchFocus] = useState<{ type: 'tech' | 'company' | 'contact' | 'event'; value: string } | null>(null);
+  const [quickOpen, setQuickOpen] = useState(false);
+  const [quickQuery, setQuickQuery] = useState('');
   const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number; groupId?: string | null }[]>([]);
   const hasCenteredRef = useRef(false);
   const zoomScaleRef = useRef(1);
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
+
+  const searchTypeLabel = useMemo(() => {
+    if (searchType === 'tech') return '技術';
+    if (searchType === 'company') return '会社';
+    if (searchType === 'contact') return '氏名';
+    if (searchType === 'event') return 'イベント';
+    return '';
+  }, [searchType]);
 
   useEffect(() => {
     const params: Record<string, string | number> = {};
@@ -430,6 +456,106 @@ const NetworkGraph: React.FC = () => {
     return keys;
   }, [graph.links, selectedNodeId]);
 
+  const selectedNode = useMemo(() => {
+    if (!selectedNodeId) return null;
+    return graph.nodes.find(node => node.id === selectedNodeId) || null;
+  }, [graph.nodes, selectedNodeId]);
+
+  const contextData = useMemo(() => {
+    if (!selectedNode) return null;
+    if (selectedNode.type === 'contact') {
+      const companyLabel = selectedNode.company_node_id
+        ? rawNodeById.get(selectedNode.company_node_id)?.label || '-'
+        : '-';
+      const relations = (contactRelations.get(selectedNode.id) || []).join(' / ') || '-';
+      const events = (contactEvents.get(selectedNode.id) || []).join(' / ') || '-';
+      const tech = selectedNode.company_node_id
+        ? (companyTechs.get(selectedNode.company_node_id) || []).join(' / ') || '-'
+        : '-';
+      return {
+        title: selectedNode.label,
+        subtitle: '連絡先',
+        rows: [
+          { label: '会社', value: companyLabel },
+          { label: '関係', value: relations },
+          { label: 'イベント', value: events },
+          { label: '技術', value: tech },
+        ],
+      };
+    }
+    if (selectedNode.type === 'company') {
+      return {
+        title: selectedNode.label,
+        subtitle: '会社',
+        rows: [
+          { label: 'グループ', value: companyGroupName.get(selectedNode.id) || '-' },
+          { label: '技術', value: (companyTechs.get(selectedNode.id) || []).join(' / ') || '-' },
+          { label: '連絡先数', value: companyContactsCount.get(selectedNode.id) ?? 0 },
+        ],
+      };
+    }
+    if (selectedNode.type === 'event') {
+      return {
+        title: selectedNode.label,
+        subtitle: 'イベント',
+        rows: [
+          { label: '参加人数', value: eventParticipantCount.get(selectedNode.id) ?? 0 },
+        ],
+      };
+    }
+    if (selectedNode.type === 'group') {
+      return {
+        title: selectedNode.label,
+        subtitle: 'グループ',
+        rows: [
+          { label: '企業数', value: groupCompanyCount.get(selectedNode.id) ?? 0 },
+        ],
+      };
+    }
+    if (selectedNode.type === 'tech') {
+      const count = Array.from(rawGraph.edges).filter(edge => {
+        if (edge.type !== 'company_tech') return false;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        return sourceId === selectedNode.id || targetId === selectedNode.id;
+      }).length;
+      return {
+        title: selectedNode.label,
+        subtitle: '技術',
+        rows: [
+          { label: '会社数', value: count },
+        ],
+      };
+    }
+    if (selectedNode.type === 'relation') {
+      const count = Array.from(rawGraph.edges).filter(edge => {
+        if (edge.type !== 'relation') return false;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        return sourceId === selectedNode.id || targetId === selectedNode.id;
+      }).length;
+      return {
+        title: selectedNode.label,
+        subtitle: '関係',
+        rows: [
+          { label: '連絡先数', value: count },
+        ],
+      };
+    }
+    return null;
+  }, [
+    selectedNode,
+    companyContactsCount,
+    companyGroupName,
+    companyTechs,
+    contactEvents,
+    contactRelations,
+    eventParticipantCount,
+    groupCompanyCount,
+    rawGraph.edges,
+    rawNodeById,
+  ]);
+
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
@@ -676,6 +802,42 @@ const NetworkGraph: React.FC = () => {
   }, [searchValue, searchType]);
 
   useEffect(() => {
+    const handleKeydown = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+        event.preventDefault();
+        setQuickOpen(true);
+        setQuickQuery('');
+      }
+      if (event.key === 'Escape') {
+        setQuickOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeydown);
+    return () => window.removeEventListener('keydown', handleKeydown);
+  }, []);
+
+  const quickResults = useMemo(() => {
+    const query = quickQuery.trim().toLowerCase();
+    if (!query) return [];
+    return graph.nodes.filter(node => {
+      if (!['contact', 'company', 'tech', 'event', 'group'].includes(node.type)) return false;
+      return (node.label || '').toLowerCase().includes(query);
+    }).slice(0, 12);
+  }, [graph.nodes, quickQuery]);
+
+  const focusNode = (target: GraphNode) => {
+    setSelectedNodeId(target.id);
+    setSearchFocus({ type: target.type as any, value: target.label });
+    const fg = graphRef.current;
+    if (!fg) return;
+    const x = (target as any).x;
+    const y = (target as any).y;
+    if (typeof x !== 'number' || typeof y !== 'number') return;
+    fg.centerAt(x, y, 700);
+    fg.zoom(1.8, 700);
+  };
+
+  useEffect(() => {
     if (!searchFocus) return;
     const value = searchFocus.value.trim().toLowerCase();
     if (!value) return;
@@ -700,20 +862,12 @@ const NetworkGraph: React.FC = () => {
   const nodeColor = useMemo(() => {
     return (node: NodeObject) => {
       const typed = node as GraphNode;
-      if (typed.is_self) return '#e86a6a';
-      const baseByType: Record<GraphNode['type'], string> = {
-        event: '#f49a9a',
-        contact: '#b7e35c',
-        company: '#58e074',
-        group: '#6adc66',
-        tech: '#8f89ee',
-        relation: '#e466ab',
-      };
-      const base = baseByType[typed.type] || '#94a3b8';
+      if (typed.is_self) return NETWORK_GRAPH_COLORS.self;
+      const base = NETWORK_GRAPH_COLORS.base[typed.type] || NETWORK_GRAPH_COLORS.fallback;
       const highlightActive = highlightMode || Boolean(searchFocus);
       if (highlightActive && selectedNodeId) {
         if (!highlightedNodeIds.has(typed.id)) {
-          return '#c7d0ee';
+          return NETWORK_GRAPH_COLORS.muted;
         }
       }
       return base;
@@ -868,12 +1022,12 @@ const NetworkGraph: React.FC = () => {
 
   const handleNodeClick = (node: NodeObject) => {
     const typed = node as GraphNode;
+    setSelectedNodeId(prev => (prev === typed.id ? null : typed.id));
     if (typed.type === 'company' && graphRef.current && (node as any).x != null && (node as any).y != null) {
       graphRef.current.centerAt((node as any).x, (node as any).y, 600);
       graphRef.current.zoom(1.6, 600);
     }
     if (highlightMode) {
-      setSelectedNodeId(prev => (prev === typed.id ? null : typed.id));
       return;
     }
     if (typed.type === 'contact') {
@@ -952,7 +1106,7 @@ const NetworkGraph: React.FC = () => {
                 onChange={event => setVisibleTypes(prev => ({ ...prev, group: event.target.checked }))}
                 className="mr-1"
               />
-              Group
+              グループ
             </label>
             <label className="text-xs text-gray-600">
               <input
@@ -961,7 +1115,7 @@ const NetworkGraph: React.FC = () => {
                 onChange={event => setVisibleTypes(prev => ({ ...prev, event: event.target.checked }))}
                 className="mr-1"
               />
-              Event
+              #Event
             </label>
             <label className="text-xs text-gray-600">
               <input
@@ -970,7 +1124,7 @@ const NetworkGraph: React.FC = () => {
                 onChange={event => setVisibleTypes(prev => ({ ...prev, tech: event.target.checked }))}
                 className="mr-1"
               />
-              Tag/Tech
+              #Tech
             </label>
             <label className="text-xs text-gray-600">
               <input
@@ -979,7 +1133,7 @@ const NetworkGraph: React.FC = () => {
                 onChange={event => setVisibleTypes(prev => ({ ...prev, relation: event.target.checked }))}
                 className="mr-1"
               />
-              Tag/Relation
+              #Relation
             </label>
           </div>
           <label className="text-xs text-gray-600 flex items-center gap-1">
@@ -996,7 +1150,7 @@ const NetworkGraph: React.FC = () => {
               checked={groupCollapsed}
               onChange={event => setGroupCollapsed(event.target.checked)}
             />
-            Group折りたたみ
+            グループ折りたたみ
           </label>
           <select
             value={searchType}
@@ -1013,7 +1167,7 @@ const NetworkGraph: React.FC = () => {
             value={searchValue}
             onChange={event => setSearchValue(event.target.value)}
             className="flex-1 min-w-[200px] border rounded px-3 py-2 text-sm"
-            placeholder={`検索: ${searchType}`}
+            placeholder={`検索: ${searchTypeLabel}`}
           />
           <button
             type="button"
@@ -1025,115 +1179,174 @@ const NetworkGraph: React.FC = () => {
         </div>
         <p className="text-xs text-gray-500 mt-2">
           タイプのON/OFFで表示切替。検索はノードをハイライトしてズームします。
-          Group折りたたみで会社ノードを省略できます。
+          グループ折りたたみで会社ノードを省略できます。
         </p>
         {contactFilter && (
           <p className="text-xs text-gray-500 mt-2">氏名で絞り込み: "{contactFilter}"</p>
         )}
       </div>
-      <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] relative">
-        <ForceGraph2D
-          ref={graphRef}
-          graphData={graph}
-          nodeRelSize={5}
-          cooldownTicks={240}
-          linkDirectionalParticles={2}
-          linkDirectionalParticleSpeed={0.006}
-          linkDirectionalParticleWidth={1.2}
-          onRenderFramePre={(ctx, globalScale) => {
-            labelBoxesRef.current = [];
-            zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
-            const nextPositions = new Map<string, { x: number; y: number }>();
-            graph.nodes.forEach(node => {
-              const nx = (node as any).x;
-              const ny = (node as any).y;
-              if (typeof nx === 'number' && typeof ny === 'number') {
-                nextPositions.set(node.id, { x: nx, y: ny });
-              }
-            });
-            nodePositionsRef.current = nextPositions;
-          }}
-          nodeLabel={(node: NodeObject) => {
-            const typed = node as GraphNode;
-            return typed.label;
-          }}
-          nodeColor={nodeColor}
-          nodeVal={nodeSize}
-          nodeCanvasObjectMode={() => 'after'}
-          nodeCanvasObject={drawNodeLabel}
-          linkColor={(link: any) => {
-            const highlightActive = highlightMode || Boolean(searchFocus);
-            if (!highlightActive || !selectedNodeId) return 'rgba(120, 138, 158, 0.35)';
-            const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-            const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-            return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
-              ? 'rgba(86, 132, 214, 0.85)'
-              : 'rgba(200, 210, 224, 0.18)';
-          }}
-          linkWidth={(link: any) => {
-            if (!visibleTypes.contact && link.type === 'company_relation') {
-              const count = Number(link.count) || 1;
-              return Math.min(6, 1 + Math.log2(count + 1) * 1.2);
-            }
-            const highlightActive = highlightMode || Boolean(searchFocus);
-            if (!highlightActive || !selectedNodeId) return 1;
-            const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-            const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-            return highlightedLinkKeys.has(`${sourceId}->${targetId}`) ? 2 : 1;
-          }}
-          linkDirectionalArrowLength={6}
-          linkDirectionalArrowRelPos={1}
-          onNodeClick={handleNodeClick}
-          onNodeHover={(node: NodeObject | null) => {
-            const typed = (node as GraphNode) || null;
-            setHoveredNode(typed);
-            if (typed && graphRef.current && (node as any).x != null && (node as any).y != null) {
-              const coords = graphRef.current.graph2ScreenCoords((node as any).x, (node as any).y);
-              setHoveredPos({ x: coords.x, y: coords.y });
-            } else {
-              setHoveredPos(null);
-            }
-          }}
-          onBackgroundClick={() => setSelectedNodeId(null)}
-        />
-        {hoveredNode && hoveredPos && (
-          <div
-            className="absolute bg-gray-900 text-white text-sm px-3 py-2 rounded shadow space-y-1 pointer-events-none"
-            style={{
-              left: hoveredPos.x + 12,
-              top: hoveredPos.y + 12,
-              transform: 'translate(-50%, -100%)',
-              maxWidth: 240,
+      <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] flex overflow-hidden">
+        <div className="flex-1 min-w-0 relative">
+          <ForceGraph2D
+            ref={graphRef}
+            graphData={graph}
+            nodeRelSize={5}
+            cooldownTicks={240}
+            linkDirectionalParticles={2}
+            linkDirectionalParticleSpeed={0.006}
+            linkDirectionalParticleWidth={1.2}
+            onRenderFramePre={(ctx, globalScale) => {
+              labelBoxesRef.current = [];
+              zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
+              const nextPositions = new Map<string, { x: number; y: number }>();
+              graph.nodes.forEach(node => {
+                const nx = (node as any).x;
+                const ny = (node as any).y;
+                if (typeof nx === 'number' && typeof ny === 'number') {
+                  nextPositions.set(node.id, { x: nx, y: ny });
+                }
+              });
+              nodePositionsRef.current = nextPositions;
             }}
-          >
-            <div className="font-semibold">{hoveredNode.label}</div>
-            {hoveredNode.type === 'contact' ? (
-              <>
-                <div>
-                  会社: {hoveredNode.company_node_id ? rawNodeById.get(hoveredNode.company_node_id)?.label || '-' : '-'}
+            nodeLabel={(node: NodeObject) => {
+              const typed = node as GraphNode;
+              return typed.label;
+            }}
+            nodeColor={nodeColor}
+            nodeVal={nodeSize}
+            nodeCanvasObjectMode={() => 'after'}
+            nodeCanvasObject={drawNodeLabel}
+            linkColor={(link: any) => {
+              const highlightActive = highlightMode || Boolean(searchFocus);
+              if (!highlightActive || !selectedNodeId) return 'rgba(120, 138, 158, 0.35)';
+              const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+              const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+              return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
+                ? 'rgba(86, 132, 214, 0.85)'
+                : 'rgba(200, 210, 224, 0.18)';
+            }}
+            linkWidth={(link: any) => {
+              if (!visibleTypes.contact && link.type === 'company_relation') {
+                const count = Number(link.count) || 1;
+                return Math.min(6, 1 + Math.log2(count + 1) * 1.2);
+              }
+              const highlightActive = highlightMode || Boolean(searchFocus);
+              if (!highlightActive || !selectedNodeId) return 1;
+              const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+              const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+              return highlightedLinkKeys.has(`${sourceId}->${targetId}`) ? 2 : 1;
+            }}
+            linkDirectionalArrowLength={6}
+            linkDirectionalArrowRelPos={1}
+            onNodeClick={handleNodeClick}
+            onNodeHover={(node: NodeObject | null) => {
+              const typed = (node as GraphNode) || null;
+              setHoveredNode(typed);
+              if (typed && graphRef.current && (node as any).x != null && (node as any).y != null) {
+                const coords = graphRef.current.graph2ScreenCoords((node as any).x, (node as any).y);
+                setHoveredPos({ x: coords.x, y: coords.y });
+              } else {
+                setHoveredPos(null);
+              }
+            }}
+            onBackgroundClick={() => setSelectedNodeId(null)}
+          />
+          {hoveredNode && hoveredPos && (
+            <div
+              className="absolute bg-gray-900 text-white text-sm px-3 py-2 rounded shadow space-y-1 pointer-events-none"
+              style={{
+                left: hoveredPos.x + 12,
+                top: hoveredPos.y + 12,
+                transform: 'translate(-50%, -100%)',
+                maxWidth: 240,
+              }}
+            >
+              <div className="font-semibold">{hoveredNode.label}</div>
+              {hoveredNode.type === 'contact' ? (
+                <>
+                  <div>
+                    会社: {hoveredNode.company_node_id ? rawNodeById.get(hoveredNode.company_node_id)?.label || '-' : '-'}
+                  </div>
+                  <div>役職・部署: {hoveredNode.role || '-'}</div>
+                  <div>関係: {(contactRelations.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
+                  <div>イベント: {(contactEvents.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
+                  <div>電話: {hoveredNode.mobile || hoveredNode.phone || '-'}</div>
+                  <div>メール: {hoveredNode.email || '-'}</div>
+                  {hoveredNode.notes ? <div>メモ: {hoveredNode.notes}</div> : null}
+                </>
+              ) : hoveredNode.type === 'company' ? (
+                <>
+                  <div>グループ: {companyGroupName.get(hoveredNode.id) || '-'}</div>
+                  <div>技術: {(companyTechs.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
+                  <div>連絡先数: {companyContactsCount.get(hoveredNode.id) ?? 0}</div>
+                </>
+              ) : hoveredNode.type === 'event' ? (
+                <div>参加者数: {eventParticipantCount.get(hoveredNode.id) ?? 0}</div>
+              ) : hoveredNode.type === 'group' ? (
+                <div>企業数: {groupCompanyCount.get(hoveredNode.id) ?? 0}</div>
+              ) : (
+                <div>{hoveredNode.type}</div>
+              )}
+            </div>
+          )}
+          {quickOpen && (
+            <div className="absolute inset-0 bg-black/40 flex items-start justify-center pt-16">
+              <div className="bg-white rounded-lg shadow w-[480px] max-w-[90%] p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="text-sm font-semibold">クイック検索</div>
+                  <button
+                    type="button"
+                    onClick={() => setQuickOpen(false)}
+                    className="text-xs text-gray-500"
+                  >
+                    閉じる
+                  </button>
                 </div>
-                <div>役職・部署: {hoveredNode.role || '-'}</div>
-                <div>関係: {(contactRelations.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
-                <div>イベント: {(contactEvents.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
-                <div>電話: {hoveredNode.mobile || hoveredNode.phone || '-'}</div>
-                <div>メール: {hoveredNode.email || '-'}</div>
-                {hoveredNode.notes ? <div>メモ: {hoveredNode.notes}</div> : null}
-              </>
-            ) : hoveredNode.type === 'company' ? (
-              <>
-                <div>グループ: {companyGroupName.get(hoveredNode.id) || '-'}</div>
-                <div>Tech: {(companyTechs.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
-                <div>Contacts: {companyContactsCount.get(hoveredNode.id) ?? 0}</div>
-              </>
-            ) : hoveredNode.type === 'event' ? (
-              <div>参加者数: {eventParticipantCount.get(hoveredNode.id) ?? 0}</div>
-            ) : hoveredNode.type === 'group' ? (
-              <div>企業数: {groupCompanyCount.get(hoveredNode.id) ?? 0}</div>
-            ) : (
-              <div>{hoveredNode.type}</div>
-            )}
-          </div>
-        )}
+                <input
+                  autoFocus
+                  type="text"
+                  value={quickQuery}
+                  onChange={event => setQuickQuery(event.target.value)}
+                  className="w-full border rounded px-3 py-2 text-sm"
+                  placeholder="連絡先 / 会社 / 技術 / イベント / グループ"
+                />
+                <div className="mt-3 max-h-[300px] overflow-y-auto border rounded">
+                  {quickResults.length === 0 && (
+                    <div className="px-3 py-4 text-sm text-gray-500">結果がありません。</div>
+                  )}
+                  {quickResults.map(node => (
+                    <button
+                      key={node.id}
+                      type="button"
+                      onClick={() => {
+                        focusNode(node);
+                        setQuickOpen(false);
+                      }}
+                      className="w-full text-left px-3 py-2 border-b last:border-b-0 hover:bg-gray-50 text-sm"
+                    >
+                      <span className="font-medium">{node.label}</span>
+                      <span className="ml-2 text-xs text-gray-500">
+                        {node.type === 'contact'
+                          ? '連絡先'
+                          : node.type === 'company'
+                          ? '会社'
+                          : node.type === 'event'
+                          ? 'イベント'
+                          : node.type === 'group'
+                          ? 'グループ'
+                          : node.type === 'tech'
+                          ? '技術'
+                          : '関係'}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+          <ShortcutPanel embedded bottomClassName="bottom-12" />
+        </div>
+        <ContextPanel data={contextData} />
       </div>
     </div>
   );

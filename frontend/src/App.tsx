@@ -12,6 +12,8 @@ import EventRegister from './pages/EventRegister';
 import CompanyGroups from './pages/CompanyGroups';
 import CompanyDetail from './pages/CompanyDetail';
 import EventDetail from './pages/EventDetail';
+import Insights from './pages/Insights';
+import Timeline from './pages/Timeline';
 
 function App() {
   return (
@@ -32,6 +34,8 @@ function App() {
             <Route path="/events/:id" element={<EventDetail />} />
             <Route path="/company-groups" element={<CompanyGroups />} />
             <Route path="/company/:id" element={<CompanyDetail />} />
+            <Route path="/insights" element={<Insights />} />
+            <Route path="/timeline" element={<Timeline />} />
           </Routes>
         </div>
       </div>

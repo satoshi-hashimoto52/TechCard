@@ -132,6 +132,7 @@ def get_network(
             joinedload(models.Contact.company).joinedload(models.Company.group),
             joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
             joinedload(models.Contact.tags),
+            joinedload(models.Contact.tech_tags),
             joinedload(models.Contact.events),
             joinedload(models.Contact.business_cards),
         )
@@ -183,10 +184,14 @@ def get_network(
         contacts = [
             contact
             for contact in contacts
-            if contact.company
-            and any(
+            if any(
                 tag.name and tech_filter in tag.name.lower()
-                for tag in (contact.company.tech_tags or [])
+                for tag in (contact.tech_tags or [])
+                if normalize_tag_type(tag.type) == "tech"
+            )
+            or any(
+                tag.name and tech_filter in tag.name.lower()
+                for tag in (contact.tags or [])
                 if normalize_tag_type(tag.type) == "tech"
             )
         ]
@@ -296,6 +301,7 @@ def get_network(
     # Tags
     relation_tag_counts: dict[int, int] = {}
     tech_tag_company_counts: dict[int, set[int]] = {}
+    tech_tag_contact_counts: dict[int, int] = {}
 
     for contact in contacts:
         company_id = contact.company_id
@@ -312,18 +318,24 @@ def get_network(
                     }
                 )
                 add_edge(f"contact_{contact.id}", f"relation_{tag.id}", "relation")
-            elif tag_type == "tech" and company_id:
-                tech_tag_company_counts.setdefault(tag.id, set()).add(company_id)
+            elif tag_type == "tech":
+                tech_tag_contact_counts[tag.id] = tech_tag_contact_counts.get(tag.id, 0) + 1
+                add_edge(f"contact_{contact.id}", f"tech_{tag.id}", "contact_tech")
+                if company_id:
+                    tech_tag_company_counts.setdefault(tag.id, set()).add(company_id)
 
-    # Company tech tags (explicit)
-    for company in companies:
-        for tag in company.tech_tags or []:
+        for tag in contact.tech_tags or []:
             tag_type = normalize_tag_type(tag.type)
             if tag_type != "tech":
                 continue
-            tech_tag_company_counts.setdefault(tag.id, set()).add(company.id)
+            tech_tag_contact_counts[tag.id] = tech_tag_contact_counts.get(tag.id, 0) + 1
+            add_edge(f"contact_{contact.id}", f"tech_{tag.id}", "contact_tech")
+            if company_id:
+                tech_tag_company_counts.setdefault(tag.id, set()).add(company_id)
 
-    for tag_id, company_ids in tech_tag_company_counts.items():
+    all_tech_tag_ids = set(tech_tag_company_counts.keys()) | set(tech_tag_contact_counts.keys())
+    for tag_id in all_tech_tag_ids:
+        company_ids = tech_tag_company_counts.get(tag_id, set())
         tag = tag_by_id.get(tag_id)
         label = tag.name if tag else ""
         add_node(
@@ -331,7 +343,7 @@ def get_network(
                 "id": f"tech_{tag_id}",
                 "type": "tech",
                 "label": label,
-                "size": len(company_ids) or 1,
+                "size": max(len(company_ids), tech_tag_contact_counts.get(tag_id, 0), 1),
             }
         )
         for company_id in company_ids:

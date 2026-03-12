@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useMemo, useState, useEffect } from 'react';
 import { useLocation, useNavigate, useParams } from 'react-router-dom';
 import axios from 'axios';
 
@@ -21,11 +21,19 @@ interface Contact {
   is_self?: boolean;
 }
 
+interface CompanyGroup {
+  id: number;
+  name: string;
+}
+
+const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
+
 const ContactDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const location = useLocation();
   const [contact, setContact] = useState<Contact | null>(null);
+  const [companyGroups, setCompanyGroups] = useState<CompanyGroup[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
   const [flashMessage, setFlashMessage] = useState<string | null>(
     (location.state as { flash?: string } | null)?.flash || null,
@@ -46,6 +54,28 @@ const ContactDetail: React.FC = () => {
       });
     }
   }, [id]);
+
+  useEffect(() => {
+    axios.get<CompanyGroup[]>('http://localhost:8000/company-groups')
+      .then(response => setCompanyGroups(response.data || []))
+      .catch(() => setCompanyGroups([]));
+  }, []);
+
+  const groupTagSet = useMemo(() => {
+    const set = new Set<string>();
+    companyGroups.forEach(group => {
+      if (group.name) {
+        set.add(group.name.trim().toUpperCase());
+      }
+    });
+    GROUP_TAG_BLOCKLIST.forEach(name => set.add(name.toUpperCase()));
+    return set;
+  }, [companyGroups]);
+
+  const visibleTags = useMemo(() => {
+    if (!contact) return [];
+    return contact.tags.filter(tag => !groupTagSet.has(tag.name.trim().toUpperCase()));
+  }, [contact, groupTagSet]);
 
   if (!contact) return <div>読み込み中...</div>;
 
@@ -152,11 +182,12 @@ const ContactDetail: React.FC = () => {
         <p><strong>メモ:</strong> {contact.notes || '-'}</p>
         <div className="mt-2">
           <strong>タグ:</strong>
-          {contact.tags.map(tag => (
+          {visibleTags.map(tag => (
             <span key={tag.name} className="bg-blue-100 text-blue-800 px-2 py-1 rounded mr-1">
               {tag.name}
             </span>
           ))}
+          {visibleTags.length === 0 && <span className="ml-2 text-sm text-gray-500">-</span>}
         </div>
         <div className="mt-4">
           <h2 className="text-lg font-semibold">ミーティング</h2>
