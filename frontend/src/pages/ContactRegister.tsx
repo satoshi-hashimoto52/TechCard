@@ -82,6 +82,7 @@ const ContactRegister: React.FC = () => {
   const [customTag, setCustomTag] = useState('');
   const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
+  const [newTagType, setNewTagType] = useState<'technology' | 'relation'>('technology');
   const [manageTagId, setManageTagId] = useState<number | ''>('');
   const [manageTagType, setManageTagType] = useState<'technology' | 'relation'>('technology');
   const todayString = (() => {
@@ -143,6 +144,7 @@ const ContactRegister: React.FC = () => {
     setTagsTouched(false);
     setManageTagId('');
     setManageTagType('technology');
+    setNewTagType('technology');
     setOcrText(null);
     setSubmitError(null);
   };
@@ -1338,6 +1340,18 @@ const ContactRegister: React.FC = () => {
                 >
                   追加
                 </button>
+                <select
+                  value={newTagType}
+                  onChange={e => setNewTagType(e.target.value as 'technology' | 'relation')}
+                  className={`border rounded px-2 py-2 text-sm ${
+                    newTagType === 'relation'
+                      ? 'bg-amber-50 text-amber-700 border-amber-300'
+                      : 'bg-blue-50 text-blue-700 border-blue-300'
+                  }`}
+                >
+                  <option value="technology">Tag/Tech</option>
+                  <option value="relation">Tag/Relation</option>
+                </select>
                 <input
                   type="text"
                   value={customTag}
@@ -1353,6 +1367,10 @@ const ContactRegister: React.FC = () => {
                     if (selectedTags.includes(normalized)) return;
                     setTagsTouched(true);
                     setSelectedTags(prev => [...prev, normalized]);
+                    setAvailableTags(prev => {
+                      if (prev.some(tag => tag.name === normalized)) return prev;
+                      return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
+                    });
                     setCustomTag('');
                   }}
                   className="bg-gray-800 text-white px-3 py-2 rounded"
@@ -1494,7 +1512,7 @@ const ContactRegister: React.FC = () => {
             <div>{formColumn}</div>
           </div>
         ) : (
-          <div className="max-w-[720px]">{formColumn}</div>
+          <div className="w-full">{formColumn}</div>
         )}
       </div>
     </div>
