@@ -248,14 +248,19 @@ const ContactRegister: React.FC = () => {
       const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
       const payload = await buildDetectPayload(dataUrl);
       const size = payload ? { width: payload.width, height: payload.height } : await loadImageSize(dataUrl);
-      const response = await axios.post<{ points?: { x: number; y: number }[] }>(
+      const response = await axios.post<{
+        points?: { x: number; y: number }[] | null;
+        source?: 'contour' | 'fallback';
+        score?: number;
+      }>(
         'http://localhost:8000/card/detect',
         { image: payload?.payloadUrl || dataUrl },
         { timeout: 15000 },
       );
       if (seq !== detectSeqRef.current) return;
       const points = response.data?.points;
-      if (Array.isArray(points) && points.length === 4) {
+      const isDetected = response.data?.source === 'contour' || (response.data?.source == null && response.data?.score);
+      if (Array.isArray(points) && points.length === 4 && isDetected) {
         const scale = payload?.scale || 1;
         setAutoCropPoints(points.map(point => ({
           x: Math.max(0, Math.min(size?.width ?? Number(point.x), Number(point.x) / scale)),
@@ -263,26 +268,15 @@ const ContactRegister: React.FC = () => {
         })));
         return;
       }
-      if (size) {
-        setAutoCropPoints([
-          { x: 0, y: 0 },
-          { x: size.width - 1, y: 0 },
-          { x: size.width - 1, y: size.height - 1 },
-          { x: 0, y: size.height - 1 },
-        ]);
-      }
+      setAutoCropPoints(null);
     } catch (error) {
       if (seq === detectSeqRef.current) {
         try {
           const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
           const size = await loadImageSize(dataUrl);
           if (size) {
-            setAutoCropPoints([
-              { x: 0, y: 0 },
-              { x: size.width - 1, y: 0 },
-              { x: size.width - 1, y: size.height - 1 },
-              { x: 0, y: size.height - 1 },
-            ]);
+            console.info('card detect fallback: no point detection, keep manual crop');
+            setAutoCropPoints(null);
             return;
           }
         } catch {
