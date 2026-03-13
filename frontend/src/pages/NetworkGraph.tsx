@@ -21,6 +21,7 @@ const NETWORK_GRAPH_COLORS = {
 
 const NODE_REL_SIZE = 5;
 const LINK_COLOR = 'rgba(148, 163, 184, 0.4)';
+const LAYOUT_STORAGE_KEY = 'techcard_network_layout_v1';
 
 type GraphNode = {
   id: string;
@@ -63,7 +64,9 @@ type GraphView = {
 const NetworkGraph: React.FC = () => {
   const navigate = useNavigate();
   const graphRef = useRef<any>(null);
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const [rawGraph, setRawGraph] = useState<GraphData>({ nodes: [], edges: [] });
+  const [graphSize, setGraphSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
   const [techFilter, setTechFilter] = useState<string | null>(null);
   const [companyFilter, setCompanyFilter] = useState<string | null>(null);
   const [contactFilter, setContactFilter] = useState<string | null>(null);
@@ -86,10 +89,17 @@ const NetworkGraph: React.FC = () => {
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickQuery, setQuickQuery] = useState('');
   const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number; groupId?: string | null }[]>([]);
+  const labelOffsetsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const labelDragStartRef = useRef<Map<string, { ox: number; oy: number; nx: number; ny: number }>>(new Map());
+  const labelDragKeyRef = useRef(false);
+  const selfNodeIdRef = useRef<string | null>(null);
+  const labelAngleOverridesRef = useRef<Map<string, number>>(new Map());
+  const parentMapRef = useRef<Map<string, string | null>>(new Map());
   const hasCenteredRef = useRef(false);
   const zoomScaleRef = useRef(1);
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
+  const saveLayoutTimerRef = useRef<number | null>(null);
 
   const searchTypeLabel = useMemo(() => {
     if (searchType === 'tech') return '技術';
@@ -108,6 +118,19 @@ const NetworkGraph: React.FC = () => {
       setRawGraph(response.data);
     });
   }, [techFilter, companyFilter, contactFilter]);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver(entries => {
+      if (!entries.length) return;
+      const rect = entries[0].contentRect;
+      if (rect.width && rect.height) {
+        setGraphSize({ width: rect.width, height: rect.height });
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
+  }, []);
 
   const graph: GraphView = useMemo(() => {
     const allowedTypes = new Set(
@@ -129,13 +152,69 @@ const NetworkGraph: React.FC = () => {
         return order[a.type] - order[b.type];
       });
     const collapsed = groupCollapsed;
+    const groupedCompanies = new Set<string>();
+    if (collapsed) {
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'company_group') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const companyId = sourceId.startsWith('company_') ? sourceId : targetId.startsWith('company_') ? targetId : null;
+        if (!companyId) return;
+        groupedCompanies.add(companyId);
+      });
+    }
     const filteredNodes = collapsed
-      ? nodes.filter(node => node.type !== 'company' && node.type !== 'tech')
+      ? nodes.filter(node => {
+          if (node.type === 'company') return !groupedCompanies.has(node.id);
+          return true;
+        })
       : nodes;
-    const nodeIds = new Set(filteredNodes.map(node => node.id));
-
     if (collapsed) {
       const contactCompany = new Map<string, string>();
+      const techConnectedToSelf = new Set<string>();
+      const techCompanyMap = new Map<string, Set<string>>();
+      if (visibleTypes.contact) {
+        const nodeById = new Map(rawGraph.nodes.map(node => [node.id, node]));
+        rawGraph.edges.forEach(edge => {
+          if (edge.type !== 'contact_tech') return;
+          const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+          const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+          const contactId = sourceId.startsWith('contact_')
+            ? sourceId
+            : targetId.startsWith('contact_')
+            ? targetId
+            : null;
+          const techId = sourceId.startsWith('tech_')
+            ? sourceId
+            : targetId.startsWith('tech_')
+            ? targetId
+            : null;
+          if (!contactId || !techId) return;
+          const contact = nodeById.get(contactId) as GraphNode | undefined;
+          if (contact && contact.is_self) {
+            techConnectedToSelf.add(techId);
+          }
+        });
+        rawGraph.edges.forEach(edge => {
+          if (edge.type !== 'company_tech') return;
+          const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+          const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+          const companyId = sourceId.startsWith('company_')
+            ? sourceId
+            : targetId.startsWith('company_')
+            ? targetId
+            : null;
+          const techId = sourceId.startsWith('tech_')
+            ? sourceId
+            : targetId.startsWith('tech_')
+            ? targetId
+            : null;
+          if (!companyId || !techId) return;
+          const list = techCompanyMap.get(techId) || new Set<string>();
+          list.add(companyId);
+          techCompanyMap.set(techId, list);
+        });
+      }
       rawGraph.edges.forEach(edge => {
         if (edge.type !== 'employment') return;
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
@@ -155,6 +234,7 @@ const NetworkGraph: React.FC = () => {
         if (!companyId || !groupId) return;
         companyGroup.set(companyId, groupId);
       });
+      const nodeIds = new Set(filteredNodes.map(node => node.id));
       const links: GraphLink[] = [];
       rawGraph.edges.forEach(edge => {
         if (edge.type !== 'event_attendance' && edge.type !== 'relation') return;
@@ -162,6 +242,57 @@ const NetworkGraph: React.FC = () => {
         const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
         if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
         links.push(edge);
+      });
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'company_tech' && edge.type !== 'contact_tech') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
+        if (edge.type === 'contact_tech' && visibleTypes.contact) {
+          const techId = sourceId.startsWith('tech_')
+            ? sourceId
+            : targetId.startsWith('tech_')
+            ? targetId
+            : null;
+          if (techId && !techConnectedToSelf.has(techId)) {
+            return;
+          }
+        }
+        if (edge.type === 'company_tech' && visibleTypes.contact) {
+          const techId = sourceId.startsWith('tech_')
+            ? sourceId
+            : targetId.startsWith('tech_')
+            ? targetId
+            : null;
+          const companyId = sourceId.startsWith('company_')
+            ? sourceId
+            : targetId.startsWith('company_')
+            ? targetId
+            : null;
+          if (techId && techConnectedToSelf.has(techId)) {
+            return;
+          }
+          if (techId && companyId) {
+            const allowedCompanies = techCompanyMap.get(techId);
+            if (!allowedCompanies || !allowedCompanies.has(companyId)) {
+              return;
+            }
+          }
+        }
+        links.push(edge);
+      });
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'employment') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const companyId = sourceId.startsWith('company_')
+          ? sourceId
+          : targetId.startsWith('company_')
+            ? targetId
+            : null;
+        if (!companyId || groupedCompanies.has(companyId)) return;
+        if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
+        links.push({ ...edge, source: sourceId, target: targetId });
       });
       contactCompany.forEach((companyId, contactId) => {
         const groupId = companyGroup.get(companyId);
@@ -172,6 +303,7 @@ const NetworkGraph: React.FC = () => {
       return { nodes: filteredNodes, links };
     }
 
+    const nodeIds = new Set(filteredNodes.map(node => node.id));
     const contactHidden = !visibleTypes.contact;
     if (contactHidden) {
       const contactCompany = new Map<string, string>();
@@ -563,6 +695,7 @@ const NetworkGraph: React.FC = () => {
           { label: '関係', value: relations },
           { label: 'イベント', value: events },
           { label: '技術', value: tech },
+          { label: 'メモ', value: selectedNode.notes || '-' },
         ],
       };
     }
@@ -642,69 +775,262 @@ const NetworkGraph: React.FC = () => {
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
-    const ringRadii: Record<GraphNode['type'], number> = {
-      contact: 150,
-      company: 320,
-      group: 480,
-      tech: 300,
-      event: 260,
-      relation: 200,
-    };
-    const placeRing = (nodes: GraphNode[], radius: number, offset = 0) => {
-      if (nodes.length === 0) return;
-      const ordered = [...nodes].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
-      const step = (Math.PI * 2) / ordered.length;
-      ordered.forEach((node, index) => {
-        const angle = offset + index * step;
-        (node as any).x = Math.cos(angle) * radius;
-        (node as any).y = Math.sin(angle) * radius;
-        (node as any).vx = 0;
-        (node as any).vy = 0;
-      });
-    };
     const selfNode = graph.nodes.find(node => node.type === 'contact' && (node as GraphNode).is_self) as GraphNode | undefined;
-    const contactNodes = graph.nodes.filter(node => node.type === 'contact' && !(node as GraphNode).is_self) as GraphNode[];
-    const companyNodes = graph.nodes.filter(node => node.type === 'company') as GraphNode[];
-    const groupNodes = graph.nodes.filter(node => node.type === 'group') as GraphNode[];
-    const techNodes = graph.nodes.filter(node => node.type === 'tech') as GraphNode[];
-    const eventNodes = graph.nodes.filter(node => node.type === 'event') as GraphNode[];
-    const relationNodes = graph.nodes.filter(node => node.type === 'relation') as GraphNode[];
+    if (!selfNode) return;
+    selfNodeIdRef.current = selfNode.id;
 
-    placeRing(contactNodes, ringRadii.contact, Math.PI / 4);
-    placeRing(companyNodes, ringRadii.company, 0);
-    placeRing(groupNodes, ringRadii.group, Math.PI / 6);
-    placeRing(techNodes, ringRadii.tech, Math.PI / 3);
-    placeRing(eventNodes, ringRadii.event, -Math.PI / 6);
-    placeRing(relationNodes, ringRadii.relation, -Math.PI / 4);
+    const nodesById = new Map(graph.nodes.map(node => [node.id, node]));
+    const nodeTypeById = new Map(graph.nodes.map(node => [node.id, node.type]));
+    const adjacency = new Map<string, Set<string>>();
+    graph.links.forEach(link => {
+      const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+      const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+      if (!adjacency.has(sourceId)) adjacency.set(sourceId, new Set());
+      if (!adjacency.has(targetId)) adjacency.set(targetId, new Set());
+      adjacency.get(sourceId)!.add(targetId);
+      adjacency.get(targetId)!.add(sourceId);
+    });
+
+    const hopMap = new Map<string, number>();
+    const queue: string[] = [selfNode.id];
+    hopMap.set(selfNode.id, 0);
+    while (queue.length) {
+      const current = queue.shift() as string;
+      const currentHop = hopMap.get(current) ?? 0;
+      const neighbors = adjacency.get(current);
+      if (!neighbors) continue;
+      neighbors.forEach(next => {
+        if (hopMap.has(next)) return;
+        hopMap.set(next, currentHop + 1);
+        queue.push(next);
+      });
+    }
+
+    const parentMap = new Map<string, string | null>();
+    parentMap.set(selfNode.id, null);
+    const parentQueue: string[] = [selfNode.id];
+    while (parentQueue.length) {
+      const current = parentQueue.shift() as string;
+      const neighbors = adjacency.get(current);
+      if (!neighbors) continue;
+      neighbors.forEach(next => {
+        if (parentMap.has(next)) return;
+        parentMap.set(next, current);
+        parentQueue.push(next);
+      });
+    }
+    parentMapRef.current = parentMap;
+
+    let maxHop = 0;
+    hopMap.forEach(hop => {
+      if (hop > maxHop) maxHop = hop;
+    });
+    const defaultHop = maxHop + 1;
+
+    const selfNeighborIds = adjacency.get(selfNode.id) ?? new Set<string>();
+    const contactCompany = new Map<string, string>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'employment') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const companyId = sourceId.startsWith('company_') ? sourceId : targetId.startsWith('company_') ? targetId : null;
+      const contactId = sourceId.startsWith('contact_') ? sourceId : targetId.startsWith('contact_') ? targetId : null;
+      if (!companyId || !contactId) return;
+      contactCompany.set(contactId, companyId);
+    });
 
     graph.nodes.forEach(node => {
-      if (!(node as GraphNode).is_self) {
-        (node as any).fx = undefined;
-        (node as any).fy = undefined;
-      }
+      const hop = hopMap.get(node.id) ?? defaultHop;
+      (node as any).depth = hop;
     });
-    if (selfNode) {
-      (selfNode as any).fx = 0;
-      (selfNode as any).fy = 0;
+    (selfNode as any).depth = 0;
+
+    let outerTagDepth = 0;
+    graph.nodes.forEach(node => {
+      if (node.type !== 'tech' && node.type !== 'event') return;
+      const hop = hopMap.get(node.id) ?? defaultHop;
+      if (hop > outerTagDepth) outerTagDepth = hop;
+    });
+    if (outerTagDepth === 0) outerTagDepth = defaultHop;
+    graph.nodes.forEach(node => {
+      if (node.type !== 'relation') return;
+      const currentDepth = Number.isFinite((node as any).depth) ? (node as any).depth : defaultHop;
+      (node as any).depth = Math.max(currentDepth, outerTagDepth);
+    });
+
+    const companyChildMap = new Map<string, string>();
+    graph.nodes.forEach(node => {
+      if (node.type !== 'contact') return;
+      const contact = node as GraphNode;
+      if (contact.is_self) return;
+      if (selfNeighborIds.has(contact.id)) return;
+      const companyId = contactCompany.get(contact.id);
+      if (!companyId) return;
+      if (!nodesById.has(companyId)) return;
+      companyChildMap.set(contact.id, companyId);
+    });
+
+    // sector-based layout removed for equal-angle radial layout
+
+    const depthGroups = new Map<number, GraphNode[]>();
+    graph.nodes.forEach(node => {
+      if (node.id === selfNode.id) return;
+      if (companyChildMap.has(node.id)) return;
+      const hop = Number.isFinite((node as any).depth) ? (node as any).depth : defaultHop;
+      const list = depthGroups.get(hop) || [];
+      list.push(node as GraphNode);
+      depthGroups.set(hop, list);
+    });
+
+    depthGroups.forEach((nodes, hop) => {
+      const ringRadius = hop * 150;
+      const ordered = [...nodes].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+      const total = ordered.length || 1;
+      ordered.forEach((node, index) => {
+        const angle = (index / total) * Math.PI * 2;
+        const x = Math.cos(angle) * ringRadius;
+        const y = Math.sin(angle) * ringRadius;
+        (node as any).ringAngle = angle;
+        if (!Number.isFinite((node as any).x) || !Number.isFinite((node as any).y)) {
+          (node as any).x = x;
+          (node as any).y = y;
+        }
+      });
+    });
+
+    if (!Number.isFinite((selfNode as any).x) || !Number.isFinite((selfNode as any).y)) {
       (selfNode as any).x = 0;
       (selfNode as any).y = 0;
     }
 
+    const companyChildAngleMap = new Map<string, number>();
+    const companyChildrenByCompany = new Map<string, GraphNode[]>();
+    companyChildMap.forEach((companyId, contactId) => {
+      const contactNode = nodesById.get(contactId);
+      if (!contactNode) return;
+      const list = companyChildrenByCompany.get(companyId) || [];
+      list.push(contactNode as GraphNode);
+      companyChildrenByCompany.set(companyId, list);
+    });
+    companyChildrenByCompany.forEach((contacts, companyId) => {
+      const ordered = [...contacts].sort((a, b) => (a.label || '').localeCompare(b.label || ''));
+      const step = (Math.PI * 2) / ordered.length;
+      ordered.forEach((contact, index) => {
+        const angle = index * step;
+        companyChildAngleMap.set(contact.id, angle);
+      });
+    });
+
+    const radialForce = (strength = 0.18) => {
+      let nodes: any[] = [];
+      const force = (alpha: number) => {
+        nodes.forEach(node => {
+          if (node.id === selfNode.id) return;
+          if (companyChildMap.has(node.id)) return;
+          const depth = Number.isFinite(node.depth) ? node.depth : defaultHop;
+          const ringRadius = depth * 140;
+          let targetRadius = ringRadius;
+          if (node.type === 'contact') {
+            const degree = nodeDegreeMap.get(node.id) ?? 0;
+            targetRadius = Math.max(ringRadius * 0.6, ringRadius - degree * 5);
+          }
+          const angle = Number.isFinite(node.sectorAngle)
+            ? node.sectorAngle
+            : Math.atan2(Number.isFinite(node.y) ? node.y : 0, Number.isFinite(node.x) ? node.x : 0);
+          const tx = Math.cos(angle) * targetRadius;
+          const ty = Math.sin(angle) * targetRadius;
+          node.vx += (tx - node.x) * strength * alpha;
+          node.vy += (ty - node.y) * strength * alpha;
+        });
+      };
+      (force as any).initialize = (nextNodes: any[]) => {
+        nodes = nextNodes;
+      };
+      return force;
+    };
+
+    const companyClusterForce = (strength = 0.15) => {
+      let nodes: any[] = [];
+      const force = (alpha: number) => {
+        nodes.forEach(node => {
+          const companyId = companyChildMap.get(node.id);
+          if (!companyId) return;
+          const company = nodesById.get(companyId) as any;
+          if (!company) return;
+          const depth = Number.isFinite(company.depth) ? company.depth : defaultHop;
+          const ringRadius = depth * 140;
+          const childRadius = ringRadius * 0.5;
+          const angle = companyChildAngleMap.get(node.id) ?? 0;
+          const cx = Number.isFinite(company.x) ? company.x : 0;
+          const cy = Number.isFinite(company.y) ? company.y : 0;
+          const tx = cx + Math.cos(angle) * childRadius;
+          const ty = cy + Math.sin(angle) * childRadius;
+          if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+            node.x = tx;
+            node.y = ty;
+          }
+          node.vx += (tx - node.x) * strength * alpha;
+          node.vy += (ty - node.y) * strength * alpha;
+        });
+      };
+      (force as any).initialize = (nextNodes: any[]) => {
+        nodes = nextNodes;
+      };
+      return force;
+    };
+
+    const collideForce = (radius = 40) => {
+      let nodes: any[] = [];
+      const r = radius;
+      const force = (alpha: number) => {
+        for (let i = 0; i < nodes.length; i += 1) {
+          for (let j = i + 1; j < nodes.length; j += 1) {
+            const nodeA = nodes[i];
+            const nodeB = nodes[j];
+            const dx = (nodeB.x || 0) - (nodeA.x || 0);
+            const dy = (nodeB.y || 0) - (nodeA.y || 0);
+            let dist = Math.sqrt(dx * dx + dy * dy);
+            if (!dist) dist = 0.01;
+            const minDist = r * 2;
+            if (dist < minDist) {
+              const move = ((minDist - dist) / dist) * 0.5 * alpha;
+              const mx = dx * move;
+              const my = dy * move;
+              nodeA.vx -= mx;
+              nodeA.vy -= my;
+              nodeB.vx += mx;
+              nodeB.vy += my;
+            }
+          }
+        }
+      };
+      (force as any).initialize = (nextNodes: any[]) => {
+        nodes = nextNodes;
+      };
+      return force;
+    };
+
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
-      charge.strength(-120);
+      charge.strength(-220);
     }
 
     const linkForce = fg.d3Force('link') as any;
     if (linkForce && typeof linkForce.distance === 'function') {
       linkForce.distance((link: any) => {
-        if (link.type === 'employment') return 120;
-        if (link.type === 'company_group') return 180;
-        if (link.type === 'company_tech') return 150;
+        const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+        const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+        if (sourceId === selfNode.id || targetId === selfNode.id) return 80;
+        const sourceType = nodeTypeById.get(sourceId);
+        const targetType = nodeTypeById.get(targetId);
+        if (sourceType === 'tech' || targetType === 'tech' || sourceType === 'relation' || targetType === 'relation') return 120;
+        if (sourceType === 'group' || targetType === 'group') return 260;
+        if (sourceType === 'company' || targetType === 'company') return 220;
+        if (sourceType === 'contact' || targetType === 'contact') return 160;
         return 140;
       });
       if (typeof linkForce.strength === 'function') {
-        linkForce.strength((link: any) => (link.type === 'employment' ? 0.9 : 0.5));
+        linkForce.strength(0.7);
       }
     }
 
@@ -713,7 +1039,23 @@ const NetworkGraph: React.FC = () => {
     fg.d3Force('tech-orbit', null);
     fg.d3Force('relation-orbit', null);
     fg.d3Force('low-degree-separation', null);
+    const centerForce = fg.d3Force('center') as any;
+    if (centerForce && typeof centerForce.x === 'function') {
+      centerForce.x(0);
+    }
+    if (centerForce && typeof centerForce.y === 'function') {
+      centerForce.y(0);
+    }
+    fg.d3Force('radial', radialForce(0.18));
+    fg.d3Force('company-cluster', companyClusterForce(0.15));
+    fg.d3Force('collide', collideForce(40));
 
+    if (typeof (fg as any).cooldownTicks === 'function') {
+      (fg as any).cooldownTicks(300);
+    }
+    if (typeof (fg as any).cooldownTime === 'function') {
+      (fg as any).cooldownTime(20000);
+    }
     fg.d3ReheatSimulation();
     if (selfNode && !hasCenteredRef.current) {
       hasCenteredRef.current = true;
@@ -755,6 +1097,29 @@ const NetworkGraph: React.FC = () => {
     setTechFilter(null);
     setCompanyFilter(null);
   };
+
+  const resetLayout = useCallback(() => {
+    try {
+      localStorage.removeItem(LAYOUT_STORAGE_KEY);
+    } catch (error) {
+      console.warn('layout reset failed', error);
+    }
+    labelOffsetsRef.current.clear();
+    labelAngleOverridesRef.current.clear();
+    graph.nodes.forEach(node => {
+      delete (node as any).x;
+      delete (node as any).y;
+      (node as any).vx = 0;
+      (node as any).vy = 0;
+      (node as any).fx = null;
+      (node as any).fy = null;
+    });
+    const fg = graphRef.current;
+    if (fg) {
+      fg.d3ReheatSimulation();
+      hasCenteredRef.current = false;
+    }
+  }, [graph.nodes]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -857,15 +1222,84 @@ const NetworkGraph: React.FC = () => {
     };
   }, []);
 
+  const graphNodeById = useMemo(() => {
+    return new Map(graph.nodes.map(node => [node.id, node as GraphNode]));
+  }, [graph.nodes]);
+
+  const scheduleLayoutSave = useCallback(() => {
+    if (saveLayoutTimerRef.current) {
+      window.clearTimeout(saveLayoutTimerRef.current);
+    }
+    saveLayoutTimerRef.current = window.setTimeout(() => {
+      const positions: Record<string, { x: number; y: number }> = {};
+      graph.nodes.forEach(node => {
+        const nx = (node as any).x;
+        const ny = (node as any).y;
+        if (Number.isFinite(nx) && Number.isFinite(ny)) {
+          positions[node.id] = { x: nx, y: ny };
+        }
+      });
+      const labels: Record<string, { x: number; y: number }> = {};
+      labelOffsetsRef.current.forEach((value, key) => {
+        labels[key] = value;
+      });
+      const angles: Record<string, number> = {};
+      labelAngleOverridesRef.current.forEach((value, key) => {
+        if (Number.isFinite(value)) {
+          angles[key] = value;
+        }
+      });
+      const payload = { positions, labels, angles };
+      try {
+        localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(payload));
+      } catch (error) {
+        console.warn('layout save failed', error);
+      }
+    }, 300);
+  }, [graph.nodes]);
+
+  useEffect(() => {
+    const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as {
+        positions?: Record<string, { x: number; y: number }>;
+        labels?: Record<string, { x: number; y: number }>;
+        angles?: Record<string, number>;
+      };
+      if (parsed.positions) {
+        graph.nodes.forEach(node => {
+          const saved = parsed.positions?.[node.id];
+          if (!saved) return;
+          if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
+            (node as any).x = saved.x;
+            (node as any).y = saved.y;
+            (node as any).vx = 0;
+            (node as any).vy = 0;
+          }
+        });
+      }
+      labelOffsetsRef.current = new Map(Object.entries(parsed.labels ?? {}).map(([key, value]) => [key, value]));
+      labelAngleOverridesRef.current = new Map(
+        Object.entries(parsed.angles ?? {}).map(([key, value]) => [key, value]),
+      );
+    } catch (error) {
+      console.warn('layout load failed', error);
+    }
+  }, [graph.nodes]);
+
   const drawNodeLabel = useCallback((node: NodeObject, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const typed = node as GraphNode;
     if (!typed.label) return;
+    const labelOffset = labelOffsetsRef.current.get(typed.id);
+    const offsetX = labelOffset?.x ?? 0;
+    const offsetY = labelOffset?.y ?? 0;
     const baseSize = typed.type === 'tech' || typed.type === 'relation' ? 8 : 10;
     const scaledScreenSize = baseSize * globalScale;
     const clampedScreenSize = Math.max(7, Math.min(14, scaledScreenSize));
     const fontSize = clampedScreenSize / globalScale;
-    const x = (node as any).x ?? 0;
-    const y = (node as any).y ?? 0;
+    const x = ((node as any).x ?? 0) + offsetX;
+    const y = ((node as any).y ?? 0) + offsetY;
     const offsetFactor = Math.max(1, 1 / globalScale) * 1.25;
     ctx.save();
     const radius = Math.sqrt(nodeSize(node)) * NODE_REL_SIZE;
@@ -909,8 +1343,14 @@ const NetworkGraph: React.FC = () => {
       h: fontSize + padding * 2,
       groupId,
     });
-    const offsets = [0, 12, 24, 36, 48, 60, 72, 84, 96, 108, 120, 132, 144, 156, 168, 180, 192]
-      .map(offset => offset * offsetFactor);
+    const ringAngle = labelAngleOverridesRef.current.get(typed.id)
+      ?? (Number.isFinite((node as any).ringAngle)
+        ? (node as any).ringAngle
+        : Math.atan2(y, x));
+    const labelRadius = Math.max(10 / globalScale, radius + 8 / globalScale);
+    const anchorX = x + Math.cos(ringAngle) * labelRadius;
+    const anchorY = y + Math.sin(ringAngle) * labelRadius;
+    const offsets = [0, 10, 20, 30, 40, 50, 60, 70, 80].map(offset => offset * offsetFactor);
     const directions = [
       [0, 0],
       [0, -1],
@@ -924,6 +1364,7 @@ const NetworkGraph: React.FC = () => {
     ];
     let placed = false;
     let orderedDirections = directions;
+    let outward: { nx: number; ny: number } | null = null;
     if (typed.type === 'tech' || typed.type === 'relation') {
       const companyIds = tagCompanyIds.get(typed.id) || [];
       let vx = x;
@@ -949,18 +1390,62 @@ const NetworkGraph: React.FC = () => {
       const len = Math.hypot(vx, vy) || 1;
       const nx = vx / len;
       const ny = vy / len;
+      outward = { nx, ny };
       orderedDirections = [...directions].sort((a, b) => {
         const da = a[0] * nx + a[1] * ny;
         const db = b[0] * nx + b[1] * ny;
         return db - da;
       });
+      if (typed.type === 'relation' && outward) {
+        const filtered = orderedDirections.filter(([dxDir, dyDir]) => {
+          if (dxDir === 0 && dyDir === 0) return false;
+          return dxDir * outward!.nx + dyDir * outward!.ny >= 0;
+        });
+        if (filtered.length > 0) {
+          orderedDirections = filtered;
+        }
+      }
+    }
+    if (typed.type === 'relation') {
+      const selfId = selfNodeIdRef.current;
+      const selfPos = selfId ? nodePositionsRef.current.get(selfId) : undefined;
+      const sx = selfPos?.x ?? 0;
+      const sy = selfPos?.y ?? 0;
+      let rvx = x - sx;
+      let rvy = y - sy;
+      const rlen = Math.hypot(rvx, rvy) || 1;
+      rvx /= rlen;
+      rvy /= rlen;
+      const tx = -rvy;
+      const ty = rvx;
+      const radialOffsets = [0, 10, 20, 30, 40, 50, 60, 70].map(offset => offset * offsetFactor);
+      const tangentOffsets = [0, 12, -12, 24, -24, 36, -36].map(offset => offset * offsetFactor);
+      let relationPlaced = false;
+      for (const radial of radialOffsets) {
+        for (const tangent of tangentOffsets) {
+          const cx = anchorX + (rvx * radial + tx * tangent) / globalScale;
+          const cy = anchorY + (rvy * radial + ty * tangent) / globalScale;
+          const box = makeBox(cx, cy);
+          if (!overlaps(box)) {
+            labelBoxesRef.current.push(box);
+            ctx.fillText(typed.label, cx, cy);
+            relationPlaced = true;
+            break;
+          }
+        }
+        if (relationPlaced) break;
+      }
+      if (relationPlaced) {
+        ctx.restore();
+        return;
+      }
     }
     for (const offset of offsets) {
       for (const [dxDir, dyDir] of orderedDirections) {
         const dx = (dxDir * offset) / globalScale;
         const dy = (dyDir * offset) / globalScale;
-        const cx = x + dx;
-        const cy = y + dy;
+        const cx = anchorX + dx;
+        const cy = anchorY + dy;
         const box = makeBox(cx, cy);
         const hasOverlap = overlaps(box);
         if (!hasOverlap) {
@@ -989,6 +1474,80 @@ const NetworkGraph: React.FC = () => {
     }
     ctx.restore();
   }, [nodeSize, tagCompanyIds]);
+
+  const alignLabelChain = useCallback((outerId: string) => {
+    const selfId = selfNodeIdRef.current;
+    if (!selfId) return;
+    const parentMap = parentMapRef.current;
+    if (!parentMap || parentMap.size === 0) return;
+    const outerNode = graphNodeById.get(outerId);
+    if (!outerNode) return;
+    const selfPos = nodePositionsRef.current.get(selfId)
+      || { x: (graphNodeById.get(selfId) as any)?.x ?? 0, y: (graphNodeById.get(selfId) as any)?.y ?? 0 };
+    const outerPos = nodePositionsRef.current.get(outerId)
+      || { x: (outerNode as any).x ?? 0, y: (outerNode as any).y ?? 0 };
+    const outerOffset = labelOffsetsRef.current.get(outerId) || { x: 0, y: 0 };
+    const scale = zoomScaleRef.current || 1;
+    const outerRadius = Math.sqrt(nodeSize(outerNode)) * NODE_REL_SIZE;
+    const outerLabelRadius = Math.max(10 / scale, outerRadius + 8 / scale);
+    const outerAnchorX = outerPos.x + outerOffset.x;
+    const outerAnchorY = outerPos.y + outerOffset.y;
+    const dx = outerAnchorX - selfPos.x;
+    const dy = outerAnchorY - selfPos.y;
+    const dist = Math.hypot(dx, dy);
+    if (!dist) return;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const angle = Math.atan2(uy, ux);
+
+    const path: GraphNode[] = [];
+    let current: string | null = outerId;
+    while (current && current !== selfId) {
+      const node = graphNodeById.get(current);
+      if (node) path.push(node);
+      current = parentMap.get(current) ?? null;
+    }
+    const outerDepth = Number((outerNode as any).depth) || 1;
+    path.forEach(node => {
+      const depth = Number((node as any).depth) || 0;
+      const t = outerDepth > 0 ? depth / outerDepth : 0;
+      const targetDist = dist * t;
+      const nodePos = nodePositionsRef.current.get(node.id)
+        || { x: (node as any).x ?? 0, y: (node as any).y ?? 0 };
+      const nodeRadius = Math.sqrt(nodeSize(node)) * NODE_REL_SIZE;
+      const labelRadius = Math.max(10 / scale, nodeRadius + 8 / scale);
+      labelAngleOverridesRef.current.set(node.id, angle);
+      labelOffsetsRef.current.set(node.id, {
+        x: selfPos.x + ux * targetDist - nodePos.x - ux * labelRadius,
+        y: selfPos.y + uy * targetDist - nodePos.y - uy * labelRadius,
+      });
+    });
+    labelAngleOverridesRef.current.set(outerId, angle);
+    labelOffsetsRef.current.set(outerId, {
+      x: outerAnchorX - outerPos.x - ux * outerLabelRadius,
+      y: outerAnchorY - outerPos.y - uy * outerLabelRadius,
+    });
+  }, [graphNodeById, nodeSize]);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Shift') {
+        labelDragKeyRef.current = true;
+      }
+    };
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key === 'Shift') {
+        labelDragKeyRef.current = false;
+        labelDragStartRef.current.clear();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keyup', handleKeyUp);
+    };
+  }, []);
 
   const handleNodeClick = (node: NodeObject) => {
     const typed = node as GraphNode;
@@ -1136,7 +1695,7 @@ const NetworkGraph: React.FC = () => {
             type="text"
             value={searchValue}
             onChange={event => setSearchValue(event.target.value)}
-            className="flex-1 min-w-[200px] border rounded px-3 py-2 text-sm"
+            className="flex-1 min-w-[200px] max-w-[240px] border rounded px-3 py-2 text-sm"
             placeholder={`検索: ${searchTypeLabel}`}
           />
           <button
@@ -1145,6 +1704,13 @@ const NetworkGraph: React.FC = () => {
             className="bg-gray-800 text-white px-4 py-2 rounded text-sm"
           >
             検索
+          </button>
+          <button
+            type="button"
+            onClick={resetLayout}
+            className="border border-gray-300 text-gray-700 px-3 py-2 rounded text-sm"
+          >
+            レイアウトリセット
           </button>
         </div>
         <p className="text-xs text-gray-500 mt-2">
@@ -1155,72 +1721,107 @@ const NetworkGraph: React.FC = () => {
           <p className="text-xs text-gray-500 mt-2">氏名で絞り込み: "{contactFilter}"</p>
         )}
       </div>
-      <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] flex overflow-hidden">
-        <div className="flex-1 min-w-0 relative">
-          <ForceGraph2D
-            ref={graphRef}
-            graphData={graph}
-            nodeRelSize={NODE_REL_SIZE}
-            cooldownTicks={240}
-            linkDirectionalParticles={2}
-            linkDirectionalParticleSpeed={0.006}
-            linkDirectionalParticleWidth={1.2}
-            onRenderFramePre={(ctx, globalScale) => {
-              labelBoxesRef.current = [];
-              zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
-              const nextPositions = new Map<string, { x: number; y: number }>();
-              graph.nodes.forEach(node => {
-                const nx = (node as any).x;
-                const ny = (node as any).y;
-                if (typeof nx === 'number' && typeof ny === 'number') {
-                  nextPositions.set(node.id, { x: nx, y: ny });
+      <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] flex w-full overflow-hidden min-w-0">
+        <div ref={containerRef} className="flex-1 min-w-0 relative overflow-hidden">
+          {graphSize.width > 0 && graphSize.height > 0 && (
+            <ForceGraph2D
+              ref={graphRef}
+              graphData={graph}
+              width={graphSize.width}
+              height={graphSize.height}
+              nodeRelSize={NODE_REL_SIZE}
+              cooldownTicks={300}
+              cooldownTime={20000}
+              linkDirectionalParticles={2}
+              linkDirectionalParticleSpeed={0.006}
+              linkDirectionalParticleWidth={1.2}
+              onRenderFramePre={(ctx, globalScale) => {
+                labelBoxesRef.current = [];
+                zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
+                const nextPositions = new Map<string, { x: number; y: number }>();
+                graph.nodes.forEach(node => {
+                  const nx = (node as any).x;
+                  const ny = (node as any).y;
+                  if (typeof nx === 'number' && typeof ny === 'number') {
+                    nextPositions.set(node.id, { x: nx, y: ny });
+                  }
+                });
+                nodePositionsRef.current = nextPositions;
+              }}
+              nodeLabel={(node: NodeObject) => {
+                const typed = node as GraphNode;
+                return typed.label;
+              }}
+              nodeColor={nodeColor}
+              nodeVal={nodeSize}
+              nodeCanvasObjectMode={() => 'after'}
+              nodeCanvasObject={drawNodeLabel}
+              linkColor={(link: any) => {
+                const highlightActive = highlightMode || Boolean(searchFocus);
+                if (!highlightActive || !selectedNodeId) return LINK_COLOR;
+                const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+                const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+                return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
+                  ? 'rgba(156, 163, 175, 0.9)'
+                  : 'rgba(156, 163, 175, 0.25)';
+              }}
+              linkWidth={(link: any) => {
+                if (!visibleTypes.contact && link.type === 'company_relation') {
+                  const count = Number(link.count) || 1;
+                  return Math.min(6, 1 + Math.log2(count + 1) * 1.2);
                 }
-              });
-              nodePositionsRef.current = nextPositions;
-            }}
-            nodeLabel={(node: NodeObject) => {
-              const typed = node as GraphNode;
-              return typed.label;
-            }}
-            nodeColor={nodeColor}
-            nodeVal={nodeSize}
-            nodeCanvasObjectMode={() => 'after'}
-            nodeCanvasObject={drawNodeLabel}
-            linkColor={(link: any) => {
-              const highlightActive = highlightMode || Boolean(searchFocus);
-              if (!highlightActive || !selectedNodeId) return LINK_COLOR;
-              const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-              const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-              return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
-                ? 'rgba(156, 163, 175, 0.9)'
-                : 'rgba(156, 163, 175, 0.25)';
-            }}
-            linkWidth={(link: any) => {
-              if (!visibleTypes.contact && link.type === 'company_relation') {
-                const count = Number(link.count) || 1;
-                return Math.min(6, 1 + Math.log2(count + 1) * 1.2);
-              }
-              const highlightActive = highlightMode || Boolean(searchFocus);
-              if (!highlightActive || !selectedNodeId) return 1;
-              const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-              const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-              return highlightedLinkKeys.has(`${sourceId}->${targetId}`) ? 2 : 1;
-            }}
-            linkDirectionalArrowLength={6}
-            linkDirectionalArrowRelPos={1}
-            onNodeClick={handleNodeClick}
-            onNodeHover={(node: NodeObject | null) => {
-              const typed = (node as GraphNode) || null;
-              setHoveredNode(typed);
-              if (typed && graphRef.current && (node as any).x != null && (node as any).y != null) {
-                const coords = graphRef.current.graph2ScreenCoords((node as any).x, (node as any).y);
-                setHoveredPos({ x: coords.x, y: coords.y });
-              } else {
-                setHoveredPos(null);
-              }
-            }}
-            onBackgroundClick={() => setSelectedNodeId(null)}
-          />
+                const highlightActive = highlightMode || Boolean(searchFocus);
+                if (!highlightActive || !selectedNodeId) return 1;
+                const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+                const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+                return highlightedLinkKeys.has(`${sourceId}->${targetId}`) ? 2 : 1;
+              }}
+              linkDirectionalArrowLength={6}
+              linkDirectionalArrowRelPos={1}
+              onNodeClick={handleNodeClick}
+              onNodeDrag={(node: NodeObject, translate: { x: number; y: number }) => {
+                const typed = node as GraphNode;
+                if (labelDragKeyRef.current) {
+                  const currentOffset = labelOffsetsRef.current.get(typed.id) || { x: 0, y: 0 };
+                  let base = labelDragStartRef.current.get(typed.id);
+                  if (!base) {
+                    const nx = (node as any).x ?? 0;
+                    const ny = (node as any).y ?? 0;
+                    base = { ox: currentOffset.x, oy: currentOffset.y, nx, ny };
+                    labelDragStartRef.current.set(typed.id, base);
+                  }
+                  labelOffsetsRef.current.set(typed.id, {
+                    x: base.ox + translate.x,
+                    y: base.oy + translate.y,
+                  });
+                  (node as any).fx = base.nx;
+                  (node as any).fy = base.ny;
+                  alignLabelChain(typed.id);
+                  return;
+                }
+                (node as any).fx = (node as any).x;
+                (node as any).fy = (node as any).y;
+              }}
+              onNodeDragEnd={(node: NodeObject) => {
+                const typed = node as GraphNode;
+                labelDragStartRef.current.delete(typed.id);
+                (node as any).fx = null;
+                (node as any).fy = null;
+                scheduleLayoutSave();
+              }}
+              onNodeHover={(node: NodeObject | null) => {
+                const typed = (node as GraphNode) || null;
+                setHoveredNode(typed);
+                if (typed && graphRef.current && (node as any).x != null && (node as any).y != null) {
+                  const coords = graphRef.current.graph2ScreenCoords((node as any).x, (node as any).y);
+                  setHoveredPos({ x: coords.x, y: coords.y });
+                } else {
+                  setHoveredPos(null);
+                }
+              }}
+              onBackgroundClick={() => setSelectedNodeId(null)}
+            />
+          )}
           {hoveredNode && hoveredPos && (
             <div
               className="absolute bg-gray-900 text-white text-sm px-3 py-2 rounded shadow space-y-1 pointer-events-none"

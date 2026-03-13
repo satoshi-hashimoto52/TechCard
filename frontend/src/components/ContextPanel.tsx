@@ -17,7 +17,7 @@ type ContextPanelProps = {
 
 const ContextPanel: React.FC<ContextPanelProps> = ({ data }) => {
   return (
-    <aside className="w-[360px] min-w-[360px] bg-white border-l border-gray-200 px-4 py-5 sticky top-4 self-start h-[calc(100vh-6rem)] overflow-y-auto">
+    <aside className="w-[360px] max-w-[40vw] flex-shrink-0 bg-white border-l border-gray-200 px-4 py-5 sticky top-4 self-start h-[calc(100vh-6rem)] overflow-y-auto">
       <div className="text-sm font-semibold text-gray-500">コンテキスト</div>
       {!data && (
         <div className="mt-4 text-sm text-gray-500">ノードをクリックすると詳細が表示されます。</div>

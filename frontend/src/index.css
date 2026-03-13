@@ -6,6 +6,11 @@
   color-scheme: light;
 }
 
+html,
+body {
+  overflow-x: hidden;
+}
+
 body {
   background: #f2f4f7;
 }
