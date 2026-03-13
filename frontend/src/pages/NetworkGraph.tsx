@@ -126,6 +126,11 @@ const NetworkGraph: React.FC = () => {
       const rect = entries[0].contentRect;
       if (rect.width && rect.height) {
         setGraphSize({ width: rect.width, height: rect.height });
+        if (graphRef.current) {
+          requestAnimationFrame(() => {
+            graphRef.current?.zoomToFit?.(400);
+          });
+        }
       }
     });
     observer.observe(containerRef.current);
@@ -1756,6 +1761,8 @@ const NetworkGraph: React.FC = () => {
               nodeVal={nodeSize}
               nodeCanvasObjectMode={() => 'after'}
               nodeCanvasObject={drawNodeLabel}
+              enableZoomInteraction
+              enablePanInteraction
               linkColor={(link: any) => {
                 const highlightActive = highlightMode || Boolean(searchFocus);
                 if (!highlightActive || !selectedNodeId) return LINK_COLOR;
