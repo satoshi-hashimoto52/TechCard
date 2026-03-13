@@ -125,6 +125,20 @@ const ContactRegister: React.FC = () => {
   const [cropPointCount, setCropPointCount] = useState(0);
   const [autoCropPoints, setAutoCropPoints] = useState<{ x: number; y: number }[] | null>(null);
   const [orientation, setOrientation] = useState<'horizontal' | 'vertical'>('horizontal');
+  const roiFieldValues = useMemo(
+    () => ({
+      company: form.company,
+      branch: form.branch,
+      name: form.name,
+      dept: form.role,
+      tel: form.phone,
+      mobile: form.mobile,
+      mail: form.email,
+      postal: form.postal_code,
+      address: form.address,
+    }),
+    [form.company, form.branch, form.name, form.role, form.phone, form.mobile, form.email, form.postal_code, form.address],
+  );
   const detectSeqRef = useRef(0);
   const isBlank = (value?: string) => !value || value.trim() === '';
   const targetWidth = ROI_BASE_WIDTH;
@@ -447,27 +461,62 @@ const ContactRegister: React.FC = () => {
 
   const normalizeEmail = (text: string) => {
     if (!text) return text;
-    const cleaned = text.replace(/＠/g, '@').replace(/[．。]/g, '.').replace(/\s+/g, '').trim();
+    const cleaned = text
+      .replace(/＠/g, '@')
+      .replace(/[．。、]/g, '.')
+      .replace(/\s+/g, '')
+      .trim()
+      .toLowerCase();
+
     if (!cleaned.includes('@')) return cleaned;
-    const [local, domainRaw] = cleaned.split('@');
-    const domain = domainRaw.replace(/\.\.+/g, '.');
-    if (domain.includes('.')) return `${local}@${domain}`;
-    const lower = domain.toLowerCase();
-    const jpSuffixes = ['cojp', 'nejp', 'orjp', 'acjp', 'gojp', 'edjp', 'lgjp'];
-    for (const suffix of jpSuffixes) {
-      if (lower.endsWith(suffix) && domain.length > suffix.length) {
-        const base = domain.slice(0, -suffix.length);
-        return `${local}@${base}.${suffix.slice(0, 2)}.${suffix.slice(2)}`;
-      }
+
+    const atIndex = cleaned.lastIndexOf('@');
+    if (atIndex <= 0 || atIndex === cleaned.length - 1) return cleaned;
+
+    const local = cleaned.slice(0, atIndex);
+    const domainRaw = cleaned.slice(atIndex + 1);
+
+    const domainNoDots = domainRaw.replace(/\s+/g, '').replace(/[^a-z0-9.]/g, '');
+    if (!domainNoDots) return `${local}@${domainRaw}`;
+    const normalizedDomain = domainNoDots.replace(/\.\.+/g, '.');
+
+    if (normalizedDomain.includes('.')) {
+      return `${local}@${normalizedDomain}`;
     }
-    const genericSuffixes = ['com', 'net', 'org', 'jp', 'co', 'io'];
+
+    const compact = normalizedDomain.replace(/\./g, '');
+    const correctedCompact = compact
+      .replace(/c0/g, 'co')
+      .replace(/n3/g, 'ne')
+      .replace(/0p/g, 'jp')
+      .replace(/j0/g, 'jp');
+
+    const coMatch = correctedCompact.match(/^(.*?)(?:co|coo|c0|o0|co0|c[o0])jp$/i);
+    if (coMatch && coMatch[1]) {
+      return `${local}@${coMatch[1]}.co.jp`;
+    }
+
+    const neMatch = correctedCompact.match(/^(.*?)(?:ne|n[e3]|n[e3]0|ne0|n3e)jp$/i);
+    if (neMatch && neMatch[1]) {
+      return `${local}@${neMatch[1]}.ne.jp`;
+    }
+
+    if (correctedCompact.includes('cojp') || correctedCompact.includes('nejp')) {
+      const base = correctedCompact.replace(/(?:cojp|nejp)$/g, '');
+      if (base && correctedCompact.endsWith('cojp')) return `${local}@${base}.co.jp`;
+      if (base && correctedCompact.endsWith('nejp')) return `${local}@${base}.ne.jp`;
+    }
+
+    const genericSuffixes = ['com', 'net', 'org', 'io', 'co', 'jp'];
+    const lowerDomain = correctedCompact.toLowerCase();
     for (const suffix of genericSuffixes) {
-      if (lower.endsWith(suffix) && domain.length > suffix.length) {
-        const base = domain.slice(0, -suffix.length);
+      if (lowerDomain.endsWith(suffix) && lowerDomain.length > suffix.length) {
+        const base = lowerDomain.slice(0, -suffix.length);
         return `${local}@${base}.${suffix}`;
       }
     }
-    return `${local}@${domain}`;
+
+    return `${local}@${correctedCompact}`;
   };
 
   const normalizePersonName = (text: string) => {
@@ -1203,6 +1252,7 @@ const ContactRegister: React.FC = () => {
           imageUrl={selectedImage}
           template={roiTemplate}
           onChange={setRoiTemplate}
+          fieldValues={roiFieldValues}
           baseWidth={ROI_BASE_WIDTH}
           baseHeight={ROI_BASE_HEIGHT}
           orientation={orientation}
@@ -1264,27 +1314,27 @@ const ContactRegister: React.FC = () => {
                   状態: {simpleMobileStatus === 'waiting' ? '待機中' : simpleMobileStatus === 'done' ? '完了' : simpleMobileStatus === 'error' ? 'エラー' : '準備中'}
                 </p>
               </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  className="px-3 py-2 text-sm rounded bg-emerald-600 text-white disabled:opacity-50"
+                  onClick={runOcrFromRoi}
+                  disabled={!canRunOcr || isOcrRunning}
+                >
+                  {isOcrRunning ? 'OCR処理中...' : 'OCR実行'}
+                </button>
+                <button
+                  type="button"
+                  className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
+                  onClick={resetRoiTemplate}
+                  disabled={!selectedImage}
+                >
+                  ROIをデフォルトに戻す
+                </button>
+              </div>
             </div>
           )}
         </div>
-      </div>
-      <div className="flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          className="px-3 py-2 text-sm rounded bg-emerald-600 text-white disabled:opacity-50"
-          onClick={runOcrFromRoi}
-          disabled={!canRunOcr || isOcrRunning}
-        >
-          {isOcrRunning ? 'OCR処理中...' : 'OCR実行'}
-        </button>
-        <button
-          type="button"
-          className="px-3 py-2 text-sm rounded border bg-white disabled:opacity-50"
-          onClick={resetRoiTemplate}
-          disabled={!selectedImage}
-        >
-          ROIをデフォルトに戻す
-        </button>
       </div>
 
       <div className="bg-gray-50 border border-gray-200 rounded p-4">

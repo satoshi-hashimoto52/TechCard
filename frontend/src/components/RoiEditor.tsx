@@ -22,6 +22,7 @@ type RoiEditorProps = {
   baseWidth?: number;
   baseHeight?: number;
   orientation?: 'horizontal' | 'vertical';
+  fieldValues?: Partial<Record<RoiField, string>>;
 };
 
 const LABELS: Record<RoiField, string> = {
@@ -43,6 +44,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
   baseWidth = 1200,
   baseHeight = 700,
   orientation = 'horizontal',
+  fieldValues = {},
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const transformerRef = useRef<any>(null);
@@ -178,6 +180,9 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
       width: rect.w * scaleX,
       height: rect.h * scaleY,
     };
+    const hasValue = !!(fieldValues[field] || '').trim();
+    const strokeColor = hasValue ? 'rgba(16,185,129,0.75)' : 'rgba(239,68,68,0.75)';
+    const selectColor = hasValue ? 'rgba(16,185,129,0.95)' : 'rgba(239,68,68,0.95)';
     return (
       <React.Fragment key={field}>
         <Rect
@@ -186,7 +191,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
           y={display.y}
           width={display.width}
           height={display.height}
-          stroke={selectedField === field ? 'rgba(239,68,68,0.9)' : 'rgba(239,68,68,0.6)'}
+          stroke={selectedField === field ? selectColor : strokeColor}
           strokeWidth={2}
           draggable
           onClick={() => setSelectedField(field)}
@@ -214,7 +219,7 @@ const RoiEditor: React.FC<RoiEditorProps> = ({
           y={Math.max(0, display.y - 18)}
           text={LABELS[field]}
           fontSize={12}
-          fill="rgba(239,68,68,0.9)"
+          fill={selectedField === field ? selectColor : strokeColor}
           padding={2}
         />
       </React.Fragment>
