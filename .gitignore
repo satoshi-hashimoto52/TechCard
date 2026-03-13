@@ -6,6 +6,7 @@
 # TechCard data (PII)
 backend/techcard.db
 backend/data/
+backend/uploads/
 
 # Logs
 *.log
