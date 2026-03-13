@@ -926,7 +926,7 @@ const NetworkGraph: React.FC = () => {
       });
     });
 
-    const radialForce = (strength = 0.18) => {
+    const radialForce = (strength = 0.6) => {
       let nodes: any[] = [];
       const force = (alpha: number) => {
         nodes.forEach(node => {
@@ -1051,7 +1051,7 @@ const NetworkGraph: React.FC = () => {
     if (centerForce && typeof centerForce.y === 'function') {
       centerForce.y(0);
     }
-    fg.d3Force('radial', radialForce(0.18));
+    fg.d3Force('radial', radialForce(0.6));
     fg.d3Force('company-cluster', companyClusterForce(0.15));
     fg.d3Force('collide', collideForce(40));
 
