@@ -119,6 +119,7 @@ const ContactRegister: React.FC = () => {
   const [simpleMobileStatus, setSimpleMobileStatus] = useState<'idle' | 'waiting' | 'done' | 'error'>('idle');
   const [simpleMobileError, setSimpleMobileError] = useState<string | null>(null);
   const [simpleMobileLastTimestamp, setSimpleMobileLastTimestamp] = useState(0);
+  const [simpleMobileSessionStart, setSimpleMobileSessionStart] = useState(0);
   const [mobileContinuous, setMobileContinuous] = useState(false);
   const [flashMessage, setFlashMessage] = useState<string | null>(null);
   const [cropPointCount, setCropPointCount] = useState(0);
@@ -940,6 +941,7 @@ const ContactRegister: React.FC = () => {
       setSimpleMobileStatus('idle');
       setSimpleMobileError(null);
       setSimpleMobileLastTimestamp(0);
+      setSimpleMobileSessionStart(0);
       return;
     }
     setSimpleMobileError(null);
@@ -950,6 +952,7 @@ const ContactRegister: React.FC = () => {
       if (!baseUrl) {
         throw new Error('missing base url');
       }
+      setSimpleMobileSessionStart(Date.now());
       setSimpleMobileQrUrl(`${baseUrl}/mobile-upload`);
       setSimpleMobileOpen(true);
     } catch (error) {
@@ -974,7 +977,13 @@ const ContactRegister: React.FC = () => {
           setSimpleMobileStatus('waiting');
           return;
         }
-        if (response.data.timestamp <= simpleMobileLastTimestamp) {
+        const uploadTimestampMs = Math.round(response.data.timestamp * 1000);
+        // このQRセッション開始前の画像は無視する
+        if (simpleMobileSessionStart && uploadTimestampMs <= simpleMobileSessionStart) {
+          setSimpleMobileStatus('waiting');
+          return;
+        }
+        if (uploadTimestampMs <= simpleMobileLastTimestamp) {
           return;
         }
         const cacheBusted = `${response.data.url}?t=${Date.now()}`;
@@ -984,7 +993,7 @@ const ContactRegister: React.FC = () => {
         setIsCropActive(true);
         setOcrText(null);
         setCardFilename(response.data.filename || 'mobile-upload.png');
-        setSimpleMobileLastTimestamp(response.data.timestamp);
+        setSimpleMobileLastTimestamp(uploadTimestampMs);
         setAutoCropPoints(null);
         detectCardPointsFrom(cacheBusted, null);
         setSimpleMobileStatus('done');
@@ -1001,7 +1010,7 @@ const ContactRegister: React.FC = () => {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [simpleMobileOpen, simpleMobileLastTimestamp]);
+  }, [simpleMobileOpen, simpleMobileLastTimestamp, simpleMobileSessionStart]);
 
   const canRunOcr = mode === 'upload' && !isCropActive && Boolean(selectedImage);
 
