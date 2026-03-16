@@ -121,6 +121,7 @@ const NetworkGraph: React.FC = () => {
   const zoomScaleRef = useRef(1);
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const gridCenterRef = useRef<{ x: number; y: number } | null>(null);
+  const fixedNodeIdsRef = useRef(new Set<string>());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
   const saveLayoutTimerRef = useRef<number | null>(null);
   const layoutSeedRef = useRef<number | null>(null);
@@ -1149,6 +1150,7 @@ const NetworkGraph: React.FC = () => {
       (node as any).fx = null;
       (node as any).fy = null;
     });
+    fixedNodeIdsRef.current.clear();
     const fg = graphRef.current;
     if (fg) {
       fg.d3ReheatSimulation();
@@ -1440,6 +1442,9 @@ const NetworkGraph: React.FC = () => {
         angles?: Record<string, number>;
         fixed?: Record<string, boolean>;
       };
+      const fixedNodeIds = new Set<string>(
+        parsed.fixed ? Object.entries(parsed.fixed).filter(([, isFixed]) => isFixed).map(([nodeId]) => nodeId) : [],
+      );
       if (parsed.positions) {
         graph.nodes.forEach(node => {
           const saved = parsed.positions?.[node.id];
@@ -1449,13 +1454,14 @@ const NetworkGraph: React.FC = () => {
             (node as any).y = saved.y;
             (node as any).vx = 0;
             (node as any).vy = 0;
-            if (parsed.fixed?.[node.id]) {
+            if (fixedNodeIds.has(node.id)) {
               (node as any).fx = saved.x;
               (node as any).fy = saved.y;
             }
           }
         });
       }
+      fixedNodeIdsRef.current = fixedNodeIds;
       labelOffsetsRef.current = new Map(Object.entries(parsed.labels ?? {}).map(([key, value]) => [key, value]));
       labelAngleOverridesRef.current = new Map(
         Object.entries(parsed.angles ?? {}).map(([key, value]) => [key, value]),
@@ -1980,6 +1986,16 @@ const NetworkGraph: React.FC = () => {
             onNodeDrag={(node: NodeObject) => {
               const typed = node as GraphNode;
               if (typed.is_self) return;
+              if (!gridConfig.enabled && fixedNodeIdsRef.current.has(typed.id)) {
+                const fx = (node as any).fx;
+                const fy = (node as any).fy;
+                if (Number.isFinite(fx) && Number.isFinite(fy)) {
+                  (node as any).x = fx;
+                  (node as any).y = fy;
+                }
+                return;
+              }
+              fixedNodeIdsRef.current.delete(typed.id);
               (node as any).fx = (node as any).x;
               (node as any).fy = (node as any).y;
               if (gridConfig.enabled) {
@@ -1989,6 +2005,16 @@ const NetworkGraph: React.FC = () => {
             onNodeDragEnd={(node: NodeObject) => {
               const typed = node as GraphNode;
               if (typed.is_self) return;
+              if (!gridConfig.enabled && fixedNodeIdsRef.current.has(typed.id)) {
+                const fx = (node as any).fx;
+                const fy = (node as any).fy;
+                if (Number.isFinite(fx) && Number.isFinite(fy)) {
+                  (node as any).x = fx;
+                  (node as any).y = fy;
+                }
+                return;
+              }
+              fixedNodeIdsRef.current.delete(typed.id);
               (node as any).fx = null;
               (node as any).fy = null;
               if (gridConfig.enabled) {
