@@ -2056,7 +2056,9 @@ const NetworkGraph: React.FC = () => {
                   <div>イベント: {(contactEvents.get(hoveredNode.id) || []).join(' / ') || '-'}</div>
                   <div>電話: {hoveredNode.mobile || hoveredNode.phone || '-'}</div>
                   <div>メール: {hoveredNode.email || '-'}</div>
-                  {hoveredNode.notes ? <div>メモ: {hoveredNode.notes}</div> : null}
+                  {hoveredNode.notes ? (
+                    <div className="whitespace-pre-wrap break-words">メモ: {hoveredNode.notes}</div>
+                  ) : null}
                 </>
               ) : hoveredNode.type === 'company' ? (
                 <>

@@ -32,7 +32,7 @@ const ContextPanel: React.FC<ContextPanelProps> = ({ data }) => {
             {data.rows.map(row => (
               <div key={row.label} className="text-sm">
                 <span className="text-gray-500">{row.label}: </span>
-                <span className="text-gray-900">{row.value || '-'}</span>
+                <span className="text-gray-900 whitespace-pre-wrap break-words">{row.value || '-'}</span>
               </div>
             ))}
           </div>
