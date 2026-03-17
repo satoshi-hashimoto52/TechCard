@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from datetime import datetime
 import asyncio
+import hashlib
 import json
 import re
 import socket
@@ -19,6 +20,31 @@ _GEOCODE_SEMAPHORE = asyncio.Semaphore(1)
 _ADDRESS_GEOCODE_CACHE: dict[tuple[str, str], tuple[float, float]] = {}
 _ADDRESS_GEOCODE_INFLIGHT: set[tuple[str, str]] = set()
 _MAX_ADDRESS_GEOCODES_PER_REQUEST = 6
+_EVENT_TOP_LEVELS = ("Cards", "Expo", "Mixer", "OJT")
+_EVENT_TOP_LABELS = {key: f"#{key}" for key in _EVENT_TOP_LEVELS}
+
+
+def _parse_event_tag_name(raw_name: str | None) -> tuple[str, str] | None:
+    if not raw_name:
+        return None
+    name = raw_name.strip()
+    for separator in ("::", "/", "／", ">", "＞"):
+        if separator not in name:
+            continue
+        top_raw, child_raw = name.split(separator, 1)
+        top_token = top_raw.replace("#", "").strip().lower()
+        child = child_raw.strip()
+        if not child:
+            continue
+        canonical_top = next((item for item in _EVENT_TOP_LEVELS if item.lower() == top_token), None)
+        if canonical_top is None:
+            continue
+        return canonical_top, child
+    return None
+
+
+def _event_key(top_name: str, sub_name: str) -> str:
+    return f"{top_name.strip().lower()}::{sub_name.strip().lower()}"
 
 
 def get_db():
@@ -133,15 +159,8 @@ def get_network(
             joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
             joinedload(models.Contact.tags),
             joinedload(models.Contact.tech_tags),
-            joinedload(models.Contact.events),
             joinedload(models.Contact.business_cards),
         )
-        .all()
-    )
-
-    events = (
-        db.query(models.Event)
-        .options(joinedload(models.Event.contacts))
         .all()
     )
 
@@ -262,41 +281,164 @@ def get_network(
         if contact.company_id is not None:
             add_edge(contact_id, f"company_{contact.company_id}", "employment")
 
-    # Events
-    if events:
-        for event in events:
-            event_id = f"event_{event.id}"
-            event_contacts = [contact for contact in (event.contacts or []) if contact.id in contact_id_set]
+    # Event hierarchy (#Cards / #Expo / #Mixer / #OJT)
+    self_contact = next((contact for contact in contacts if contact.is_self), None)
+    self_contact_node_id = f"contact_{self_contact.id}" if self_contact else None
+    self_company_node_id = (
+        f"company_{self_contact.company_id}"
+        if self_contact is not None and self_contact.company_id is not None
+        else None
+    )
+
+    top_counts: dict[str, int] = {}
+    sub_counts: dict[str, int] = {}
+    event_meta_by_key: dict[str, tuple[str, str]] = {}
+    contact_event_keys: dict[int, set[str]] = {}
+    company_event_keys: dict[int, set[str]] = {}
+
+    for contact in contacts:
+        keys: set[str] = set()
+        for tag in contact.tags or []:
+            if normalize_tag_type(tag.type) != "event":
+                continue
+            parsed = _parse_event_tag_name(tag.name)
+            if parsed is None:
+                continue
+            top_name, sub_name = parsed
+            key = _event_key(top_name, sub_name)
+            event_meta_by_key[key] = (top_name, sub_name)
+            keys.add(key)
+        if keys:
+            contact_event_keys[contact.id] = keys
+
+    for company in companies:
+        keys: set[str] = set()
+        for tag in company.tech_tags or []:
+            if normalize_tag_type(tag.type) != "event":
+                continue
+            parsed = _parse_event_tag_name(tag.name)
+            if parsed is None:
+                continue
+            top_name, sub_name = parsed
+            key = _event_key(top_name, sub_name)
+            event_meta_by_key[key] = (top_name, sub_name)
+            keys.add(key)
+        if company.group:
+            for tag in company.group.tags or []:
+                if normalize_tag_type(tag.type) != "event":
+                    continue
+                parsed = _parse_event_tag_name(tag.name)
+                if parsed is None:
+                    continue
+                top_name, sub_name = parsed
+                key = _event_key(top_name, sub_name)
+                event_meta_by_key[key] = (top_name, sub_name)
+                keys.add(key)
+        if keys:
+            company_event_keys[company.id] = keys
+
+    self_person_event_keys = (
+        contact_event_keys.get(self_contact.id, set())
+        if self_contact is not None
+        else set()
+    )
+    self_company_event_keys = (
+        company_event_keys.get(self_contact.company_id or -1, set())
+        if self_contact is not None and self_contact.company_id is not None
+        else set()
+    )
+
+    def ensure_event_top_node(top_name: str) -> str:
+        top_id = f"event_top_{top_name.lower()}"
+        if top_id not in node_ids:
             add_node(
                 {
-                    "id": event_id,
+                    "id": top_id,
                     "type": "event",
-                    "label": event.name or "",
-                    "size": len(event_contacts) or 1,
+                    "label": _EVENT_TOP_LABELS.get(top_name, top_name),
+                    "size": 1,
                 }
             )
-            for contact in event_contacts:
-                add_edge(event_id, f"contact_{contact.id}", "event_attendance")
-    else:
-        # Fallback: use tags of type event
-        event_tags = [tag for tag in tag_rows if normalize_tag_type(tag.type) == "event"]
-        if event_tags:
-            event_tag_ids = {tag.id for tag in event_tags}
-            tag_contact_counts: dict[int, int] = {}
-            for contact in contacts:
-                for tag in contact.tags or []:
-                    if tag.id in event_tag_ids:
-                        tag_contact_counts[tag.id] = tag_contact_counts.get(tag.id, 0) + 1
-                        add_edge(f"event_{tag.id}", f"contact_{contact.id}", "event_attendance")
-            for tag in event_tags:
-                add_node(
-                    {
-                        "id": f"event_{tag.id}",
-                        "type": "event",
-                        "label": tag.name or "",
-                        "size": tag_contact_counts.get(tag.id, 1),
-                    }
-                )
+        return top_id
+
+    def ensure_event_sub_node(event_key: str, sub_name: str) -> str:
+        digest = hashlib.md5(event_key.encode("utf-8")).hexdigest()[:12]
+        sub_id = f"event_sub_{digest}"
+        if sub_id not in node_ids:
+            add_node(
+                {
+                    "id": sub_id,
+                    "type": "event",
+                    "label": sub_name,
+                    "size": 1,
+                }
+            )
+        return sub_id
+
+    # 個人参加: 自分(個人) -> Event上位 -> Event下位 -> 相手個人
+    if self_contact_node_id and self_person_event_keys:
+        for contact in contacts:
+            if self_contact is not None and contact.id == self_contact.id:
+                continue
+            matched = sorted(contact_event_keys.get(contact.id, set()) & self_person_event_keys)
+            for event_key in matched:
+                meta = event_meta_by_key.get(event_key)
+                if meta is None:
+                    continue
+                top_name, sub_name = meta
+                top_id = ensure_event_top_node(top_name)
+                sub_id = ensure_event_sub_node(event_key, sub_name)
+                add_edge(self_contact_node_id, top_id, "event_attendance")
+                add_edge(top_id, sub_id, "relation_event")
+                add_edge(sub_id, f"contact_{contact.id}", "event_attendance")
+                top_counts[top_id] = top_counts.get(top_id, 0) + 1
+                sub_counts[sub_id] = sub_counts.get(sub_id, 0) + 1
+
+    # 会社参加: 自分の会社 -> Event上位 -> Event下位 -> 相手個人 or 相手会社（タグ保持側）
+    if self_company_node_id and self_company_event_keys:
+        for contact in contacts:
+            if self_contact is not None and contact.id == self_contact.id:
+                continue
+            matched = sorted(contact_event_keys.get(contact.id, set()) & self_company_event_keys)
+            for event_key in matched:
+                meta = event_meta_by_key.get(event_key)
+                if meta is None:
+                    continue
+                top_name, sub_name = meta
+                top_id = ensure_event_top_node(top_name)
+                sub_id = ensure_event_sub_node(event_key, sub_name)
+                add_edge(self_company_node_id, top_id, "company_event")
+                add_edge(top_id, sub_id, "relation_event")
+                add_edge(sub_id, f"contact_{contact.id}", "event_attendance")
+                top_counts[top_id] = top_counts.get(top_id, 0) + 1
+                sub_counts[sub_id] = sub_counts.get(sub_id, 0) + 1
+
+        for company in companies:
+            if self_contact is not None and company.id == self_contact.company_id:
+                continue
+            matched = sorted(company_event_keys.get(company.id, set()) & self_company_event_keys)
+            for event_key in matched:
+                meta = event_meta_by_key.get(event_key)
+                if meta is None:
+                    continue
+                top_name, sub_name = meta
+                top_id = ensure_event_top_node(top_name)
+                sub_id = ensure_event_sub_node(event_key, sub_name)
+                add_edge(self_company_node_id, top_id, "company_event")
+                add_edge(top_id, sub_id, "relation_event")
+                add_edge(sub_id, f"company_{company.id}", "company_event")
+                top_counts[top_id] = top_counts.get(top_id, 0) + 1
+                sub_counts[sub_id] = sub_counts.get(sub_id, 0) + 1
+
+    if top_counts or sub_counts:
+        for node in nodes:
+            node_id = node.get("id")
+            if not isinstance(node_id, str):
+                continue
+            if node_id in top_counts:
+                node["size"] = max(top_counts[node_id], 1)
+            if node_id in sub_counts:
+                node["size"] = max(sub_counts[node_id], 1)
 
     # Tags
     relation_tag_counts: dict[int, int] = {}

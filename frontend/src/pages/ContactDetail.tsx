@@ -27,6 +27,23 @@ interface CompanyGroup {
 }
 
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
+const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
+
+const formatEventTagLabel = (rawName: string) => {
+  const name = (rawName || '').trim();
+  const separators = ['::', '/', '／', '>', '＞'];
+  for (const separator of separators) {
+    if (!name.includes(separator)) continue;
+    const [rawTop, rawChild] = name.split(separator, 2);
+    const topToken = rawTop.replace(/^#/, '').trim().toLowerCase();
+    const child = (rawChild || '').trim();
+    if (!child) continue;
+    const top = EVENT_TOP_LEVELS.find(item => item.toLowerCase() === topToken);
+    if (!top) continue;
+    return `#${top} / ${child}`;
+  }
+  return name;
+};
 
 const ContactDetail: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -184,7 +201,7 @@ const ContactDetail: React.FC = () => {
           <strong>タグ:</strong>
           {visibleTags.map(tag => (
             <span key={tag.name} className="bg-blue-100 text-blue-800 px-2 py-1 rounded mr-1">
-              {tag.name}
+              {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
             </span>
           ))}
           {visibleTags.length === 0 && <span className="ml-2 text-sm text-gray-500">-</span>}

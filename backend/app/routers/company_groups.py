@@ -5,6 +5,7 @@ from ..database import SessionLocal
 from .. import models, schemas
 
 router = APIRouter(prefix="/company-groups", tags=["company-groups"])
+_EVENT_TOP_LEVELS = ("Cards", "Expo", "Mixer", "OJT")
 
 
 def get_db():
@@ -27,11 +28,38 @@ def _normalize_tag_type(value: str | None) -> str:
     return value
 
 
+def _normalize_event_tag_name(value: str) -> str:
+    name = (value or "").strip()
+    for separator in ("::", "/", "／", ">", "＞"):
+        if separator not in name:
+            continue
+        top_raw, child_raw = name.split(separator, 1)
+        top_token = top_raw.replace("#", "").strip().lower()
+        child = child_raw.strip()
+        if not child:
+            continue
+        top = next((item for item in _EVENT_TOP_LEVELS if item.lower() == top_token), None)
+        if top is None:
+            continue
+        return f"#{top} / {child}"
+    return name
+
+
+def _normalize_tag_name(name: str, tag_type: str | None) -> str:
+    normalized = (name or "").strip()
+    if not normalized:
+        return normalized
+    if _normalize_tag_type(tag_type) == "event":
+        return _normalize_event_tag_name(normalized)
+    return normalized
+
+
 def _resolve_tag_items(db: Session, items: list[schemas.ContactTagItem]) -> list[models.Tag]:
     resolved: list[models.Tag] = []
     seen: set[str] = set()
     for item in items:
-        name = (item.name or "").strip()
+        normalized_type = _normalize_tag_type(item.type)
+        name = _normalize_tag_name(item.name or "", normalized_type)
         if not name:
             continue
         key = name.lower()
@@ -39,7 +67,6 @@ def _resolve_tag_items(db: Session, items: list[schemas.ContactTagItem]) -> list
             continue
         seen.add(key)
         tag = db.query(models.Tag).filter(func.lower(models.Tag.name) == key).first()
-        normalized_type = _normalize_tag_type(item.type)
         if tag is None:
             tag = models.Tag(name=name, type=normalized_type)
             db.add(tag)

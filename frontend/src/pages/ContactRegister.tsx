@@ -42,6 +42,36 @@ type CompanyTagResolveResponse = {
 };
 
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
+const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
+const EVENT_TAG_SEPARATOR = ' / ';
+
+const parseEventTagName = (rawName: string) => {
+  const name = (rawName || '').trim();
+  const separators = ['::', EVENT_TAG_SEPARATOR, '/', '／', '>', '＞'];
+  for (const separator of separators) {
+    if (!name.includes(separator)) continue;
+    const [rawTop, rawChild] = name.split(separator, 2);
+    const topToken = rawTop.replace(/^#/, '').trim().toLowerCase();
+    const child = (rawChild || '').trim();
+    if (!child) continue;
+    const top = EVENT_TOP_LEVELS.find(item => item.toLowerCase() === topToken);
+    if (!top) continue;
+    return { top, child };
+  }
+  return null;
+};
+
+const buildEventTagName = (top: (typeof EVENT_TOP_LEVELS)[number], childRaw: string) => {
+  const child = (childRaw || '').trim();
+  if (!child) return null;
+  return `#${top}${EVENT_TAG_SEPARATOR}${child}`;
+};
+
+const formatEventTagLabel = (name: string) => {
+  const parsed = parseEventTagName(name);
+  if (!parsed) return name;
+  return `#${parsed.top} / ${parsed.child}`;
+};
 
 type CameraCapabilities = MediaTrackCapabilities & {
   focusMode?: string[];
@@ -87,6 +117,7 @@ const ContactRegister: React.FC = () => {
   const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
   const [newTagType, setNewTagType] = useState<'tech' | 'event' | 'relation'>('tech');
+  const [eventTop, setEventTop] = useState<(typeof EVENT_TOP_LEVELS)[number]>('Cards');
   const [manageTagId, setManageTagId] = useState<number | ''>('');
   const [manageTagType, setManageTagType] = useState<'tech' | 'event' | 'relation'>('tech');
   const [groupTagNames, setGroupTagNames] = useState<string[]>([]);
@@ -175,6 +206,7 @@ const ContactRegister: React.FC = () => {
     setManageTagId('');
     setManageTagType('tech');
     setNewTagType('tech');
+    setEventTop('Cards');
     setResolvedCompanyId(null);
     setResolvedGroupId(null);
     setResolvedGroupName('');
@@ -711,6 +743,11 @@ const ContactRegister: React.FC = () => {
     () => availableTags.filter(tag => !isGroupTagName(tag.name)),
     [availableTags, isGroupTagName],
   );
+  const renderTagLabel = useCallback((name: string, type?: string) => {
+    if (type === 'event') return formatEventTagLabel(name);
+    const parsed = parseEventTagName(name);
+    return parsed ? formatEventTagLabel(name) : name;
+  }, []);
   const selectedTagsByScope = useMemo(() => {
     if (tagScope === 'company') return selectedCompanyTags;
     if (tagScope === 'group') return selectedGroupTags;
@@ -1649,7 +1686,7 @@ const ContactRegister: React.FC = () => {
                       key={tag}
                       className={`inline-flex items-center gap-2 px-2 py-1 rounded text-sm ${styleClass}`}
                     >
-                      {tag}
+                      {renderTagLabel(tag, tagType)}
                     <button
                       type="button"
                       onClick={() => {
@@ -1697,7 +1734,7 @@ const ContactRegister: React.FC = () => {
                         .filter(tag => tag.type === 'event')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
-                            {tag.name}
+                            {renderTagLabel(tag.name, tag.type)}
                           </option>
                           ))}
                       </optgroup>
@@ -1731,8 +1768,19 @@ const ContactRegister: React.FC = () => {
                       value={customTag}
                       onChange={e => setCustomTag(e.target.value)}
                       className="border rounded px-3 py-2 min-w-[140px] w-40"
-                      placeholder="タグを追加"
+                      placeholder={newTagType === 'event' ? 'イベント下位名を入力' : 'タグを追加'}
                     />
+                    {newTagType === 'event' && (
+                      <select
+                        value={eventTop}
+                        onChange={e => setEventTop(e.target.value as (typeof EVENT_TOP_LEVELS)[number])}
+                        className="border rounded px-2 py-2 text-sm bg-orange-50 text-orange-700 border-orange-300"
+                      >
+                        {EVENT_TOP_LEVELS.map(top => (
+                          <option key={top} value={top}>#{top}</option>
+                        ))}
+                      </select>
+                    )}
                     <select
                       value={newTagType}
                       onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
@@ -1751,7 +1799,9 @@ const ContactRegister: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        const normalized = customTag.trim();
+                        const normalized = newTagType === 'event'
+                          ? buildEventTagName(eventTop, customTag)
+                          : customTag.trim();
                         if (!normalized) return;
                         addTagToScope(normalized);
                         setAvailableTags(prev => {
@@ -1775,7 +1825,7 @@ const ContactRegister: React.FC = () => {
                       <option value="">タグ管理対象を選択</option>
                       {visibleTags.map(tag => (
                         <option key={tag.id} value={tag.id}>
-                          {tag.name}
+                          {renderTagLabel(tag.name, tag.type)}
                         </option>
                       ))}
                     </select>
@@ -1820,7 +1870,7 @@ const ContactRegister: React.FC = () => {
                       onClick={async () => {
                         const target = availableTags.find(tag => tag.id === manageTagId);
                         if (!target) return;
-                        const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
+                        const confirmed = window.confirm(`タグ「${renderTagLabel(target.name, target.type)}」を削除しますか？`);
                         if (!confirmed) return;
                         try {
                           await axios.delete(`http://localhost:8000/tags/${target.id}`);
@@ -1865,7 +1915,7 @@ const ContactRegister: React.FC = () => {
                         .filter(tag => tag.type === 'event')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
-                            {tag.name}
+                            {renderTagLabel(tag.name, tag.type)}
                           </option>
                           ))}
                       </optgroup>
@@ -1899,8 +1949,19 @@ const ContactRegister: React.FC = () => {
                       value={customTag}
                       onChange={e => setCustomTag(e.target.value)}
                       className="border rounded px-3 py-2 min-w-[140px] w-40"
-                      placeholder="タグを追加"
+                      placeholder={newTagType === 'event' ? 'イベント下位名を入力' : 'タグを追加'}
                     />
+                    {newTagType === 'event' && (
+                      <select
+                        value={eventTop}
+                        onChange={e => setEventTop(e.target.value as (typeof EVENT_TOP_LEVELS)[number])}
+                        className="border rounded px-2 py-2 text-sm bg-orange-50 text-orange-700 border-orange-300"
+                      >
+                        {EVENT_TOP_LEVELS.map(top => (
+                          <option key={top} value={top}>#{top}</option>
+                        ))}
+                      </select>
+                    )}
                     <select
                       value={newTagType}
                       onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
@@ -1919,7 +1980,9 @@ const ContactRegister: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        const normalized = customTag.trim();
+                        const normalized = newTagType === 'event'
+                          ? buildEventTagName(eventTop, customTag)
+                          : customTag.trim();
                         if (!normalized) return;
                         addTagToScope(normalized);
                         setAvailableTags(prev => {
@@ -1943,7 +2006,7 @@ const ContactRegister: React.FC = () => {
                       <option value="">タグ管理対象を選択</option>
                       {visibleTags.map(tag => (
                         <option key={tag.id} value={tag.id}>
-                          {tag.name}
+                          {renderTagLabel(tag.name, tag.type)}
                         </option>
                       ))}
                     </select>
@@ -1988,7 +2051,7 @@ const ContactRegister: React.FC = () => {
                       onClick={async () => {
                         const target = availableTags.find(tag => tag.id === manageTagId);
                         if (!target) return;
-                        const confirmed = window.confirm(`タグ「${target.name}」を削除しますか？`);
+                        const confirmed = window.confirm(`タグ「${renderTagLabel(target.name, target.type)}」を削除しますか？`);
                         if (!confirmed) return;
                         try {
                           await axios.delete(`http://localhost:8000/tags/${target.id}`);

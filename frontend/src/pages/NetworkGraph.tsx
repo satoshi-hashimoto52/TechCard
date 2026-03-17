@@ -35,13 +35,15 @@ const COMPANY_MEMBER_RING_MEMBER_GAP = 68;
 const LAYOUT_CHARGE_STRENGTH = -820;
 const LAYOUT_COLLIDE_RADIUS = 52;
 const CONNECTED_ANCHOR_RADIUS_RATIO = 0.82;
+const CONNECTED_BRANCH_ANGLE_BLEND = 0.9;
+const RELAXED_ANCHOR_HOLD_STRENGTH = 0.42;
 const SAVED_LAYOUT_RADIALIZE_BLEND = 0.55;
 const SAVED_LAYOUT_RADIUS_LIMIT_RATIO = 1.7;
 const SAVED_LAYOUT_RADIUS_PADDING = 120;
 const GRID_STORAGE_KEY = 'techcard_grid_config';
 const GUIDE_STORAGE_KEY = 'techcard_distance_guide_config';
 const HOVER_TOOLTIP_DELAY_MS = 220;
-const CUT_ALL_CONNECTIONS = true;
+const CUT_ALL_CONNECTIONS = false;
 const HIDE_RING_VISUALS = true;
 const ENABLE_NODE_HOVER_TOOLTIP = false;
 const defaultVisibleTypes = {
@@ -277,6 +279,7 @@ const NetworkGraph: React.FC = () => {
   const gridCenterRef = useRef<{ x: number; y: number } | null>(null);
   const fixedNodeIdsRef = useRef(new Set<string>());
   const relaxedNodeIdsRef = useRef(new Set<string>());
+  const relaxedAnchorPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const dragLastPositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
   const gridNodeKeyRef = useRef<Map<string, string>>(new Map());
@@ -866,7 +869,7 @@ const NetworkGraph: React.FC = () => {
 
     const membersByCompany = new Map<string, GraphNode[]>();
     graph.nodes.forEach(node => {
-      if (node.type !== 'contact' || node.is_self) return;
+      if (node.type !== 'contact') return;
       const typed = node as GraphNode;
       const preferredCompanyId = typed.company_node_id;
       const employmentCompanyId = employmentByContact.get(typed.id) || null;
@@ -1218,6 +1221,7 @@ const NetworkGraph: React.FC = () => {
       node.fy = null;
       fixedNodeIdsRef.current.delete(contactId);
       relaxedNodeIdsRef.current.delete(contactId);
+      relaxedAnchorPositionsRef.current.delete(contactId);
     });
     const nodeTypeById = new Map(graph.nodes.map(node => [node.id, node.type]));
     const adjacency = new Map<string, Set<string>>();
@@ -1435,7 +1439,7 @@ const NetworkGraph: React.FC = () => {
           const firstHop = resolveFirstHop(node.id);
           const straightAngle = firstHopAngles.get(firstHop);
           angle = Number.isFinite(straightAngle)
-            ? blendAngle(Number(straightAngle), ringEvenAngle, 0.28)
+            ? blendAngle(Number(straightAngle), ringEvenAngle, 0.08)
             : ringEvenAngle;
         } else {
           const presetAngle = Number((node as any).ringAngle);
@@ -1477,14 +1481,6 @@ const NetworkGraph: React.FC = () => {
       contactNode.companyRingAngle = assignment.angle;
       contactNode.companyRingRadius = assignment.radius;
     });
-
-    if (!Number.isFinite((selfNode as any).x) || !Number.isFinite((selfNode as any).y)) {
-      (selfNode as any).x = 0;
-      (selfNode as any).y = 0;
-    }
-    // 自分を必ず原点に固定
-    (selfNode as any).fx = 0;
-    (selfNode as any).fy = 0;
 
     // 初期座標を放射状にばらまく（保存済みがある場合は維持）
     graph.nodes.forEach(node => {
@@ -1529,6 +1525,11 @@ const NetworkGraph: React.FC = () => {
 
     const depthAnchorForce = (strength = 0.14) => {
       let nodes: any[] = [];
+      const blendAngle = (primary: number, secondary: number, ratio: number) =>
+        Math.atan2(
+          (1 - ratio) * Math.sin(primary) + ratio * Math.sin(secondary),
+          (1 - ratio) * Math.cos(primary) + ratio * Math.cos(secondary),
+        );
       const force = (alpha: number) => {
         const pull = Math.max(0, alpha) * strength;
         if (!pull) return;
@@ -1541,6 +1542,14 @@ const NetworkGraph: React.FC = () => {
           const depth = Number.isFinite(node.depth) ? node.depth : defaultHop;
           const isConnectedToSelf = connectedNodeIds.has(String(node.id));
           let baseAngle = Number.isFinite(node.ringAngle) ? node.ringAngle : Math.atan2(currentY, currentX);
+          if (isConnectedToSelf) {
+            const firstHop = resolveFirstHop(String(node.id));
+            const branchAngle = firstHopAngles.get(firstHop);
+            if (Number.isFinite(branchAngle)) {
+              baseAngle = blendAngle(baseAngle, Number(branchAngle), CONNECTED_BRANCH_ANGLE_BLEND);
+              node.ringAngle = baseAngle;
+            }
+          }
           const anchorRatio = isConnectedToSelf ? CONNECTED_ANCHOR_RADIUS_RATIO : 1;
           const targetRadius = Math.max(1, depth) * DEPTH_LAYOUT_RADIUS_STEP * anchorRatio;
           const targetX = Math.cos(baseAngle) * targetRadius;
@@ -1548,7 +1557,7 @@ const NetworkGraph: React.FC = () => {
           let nodePull = isConnectedToSelf ? pull : pull * 0.85;
           if (node.type === 'contact') {
             if (companyMemberContactIdsRef.current.has(String(node.id))) return;
-            nodePull *= 0.22;
+            nodePull *= isConnectedToSelf ? 0.52 : 0.34;
           }
           node.vx = (node.vx || 0) + (targetX - currentX) * nodePull;
           node.vy = (node.vy || 0) + (targetY - currentY) * nodePull;
@@ -1569,7 +1578,7 @@ const NetworkGraph: React.FC = () => {
           const contactNode = nodeMap.get(contactId);
           const companyNode = nodeMap.get(assignment.companyId);
           if (!contactNode || !companyNode) return;
-          if ((contactNode.fx != null && contactNode.fy != null) || contactNode.id === selfNode.id) return;
+          if (contactNode.fx != null && contactNode.fy != null) return;
           const companyX = Number.isFinite(companyNode.x) ? companyNode.x : 0;
           const companyY = Number.isFinite(companyNode.y) ? companyNode.y : 0;
           const currentX = Number.isFinite(contactNode.x) ? contactNode.x : companyX;
@@ -1578,6 +1587,36 @@ const NetworkGraph: React.FC = () => {
           const targetY = companyY + Math.sin(assignment.angle) * assignment.radius;
           contactNode.vx = (contactNode.vx || 0) + (targetX - currentX) * pull;
           contactNode.vy = (contactNode.vy || 0) + (targetY - currentY) * pull;
+        });
+      };
+      (force as any).initialize = (nextNodes: any[]) => {
+        nodeMap = new Map(nextNodes.map(node => [String(node.id), node]));
+      };
+      return force;
+    };
+
+    const relaxedAnchorForce = (strength = RELAXED_ANCHOR_HOLD_STRENGTH) => {
+      let nodeMap = new Map<string, any>();
+      const force = (alpha: number) => {
+        const basePull = Math.max(0.06, Math.max(0, alpha) * strength);
+        relaxedAnchorPositionsRef.current.forEach((anchor, id) => {
+          const node = nodeMap.get(id);
+          if (!node) return;
+          if (draggingNodeIdRef.current === id) return;
+          if (!relaxedNodeIdsRef.current.has(id)) return;
+          if (node.fx != null && node.fy != null) return;
+          const currentX = Number.isFinite(node.x) ? node.x : anchor.x;
+          const currentY = Number.isFinite(node.y) ? node.y : anchor.y;
+          const vx = Number.isFinite(node.vx) ? node.vx : 0;
+          const vy = Number.isFinite(node.vy) ? node.vy : 0;
+          node.vx = (vx + (anchor.x - currentX) * basePull) * 0.72;
+          node.vy = (vy + (anchor.y - currentY) * basePull) * 0.72;
+          const speed = Math.hypot(node.vx, node.vy);
+          if (speed > 1.8) {
+            const ratio = 1.8 / speed;
+            node.vx *= ratio;
+            node.vy *= ratio;
+          }
         });
       };
       (force as any).initialize = (nextNodes: any[]) => {
@@ -1628,6 +1667,7 @@ const NetworkGraph: React.FC = () => {
     fg.d3Force('align', null);
     fg.d3Force('company-cluster', null);
     fg.d3Force('company-member-ring', companyMemberRingForce(0.46));
+    fg.d3Force('relaxed-anchor', relaxedAnchorForce(RELAXED_ANCHOR_HOLD_STRENGTH));
     fg.d3Force('collide', collideForce(LAYOUT_COLLIDE_RADIUS));
 
     if (typeof (fg as any).cooldownTicks === 'function') {
@@ -1700,15 +1740,6 @@ const NetworkGraph: React.FC = () => {
     gridCenterRef.current = null;
     layoutSeedRef.current = 1;
     graph.nodes.forEach(node => {
-      if ((node as GraphNode).is_self) {
-        (node as any).x = 0;
-        (node as any).y = 0;
-        (node as any).vx = 0;
-        (node as any).vy = 0;
-        (node as any).fx = 0;
-        (node as any).fy = 0;
-        return;
-      }
       delete (node as any).x;
       delete (node as any).y;
       (node as any).vx = 0;
@@ -1718,6 +1749,7 @@ const NetworkGraph: React.FC = () => {
     });
     fixedNodeIdsRef.current.clear();
     relaxedNodeIdsRef.current.clear();
+    relaxedAnchorPositionsRef.current.clear();
     dragLastPositionRef.current.clear();
     const fg = graphRef.current;
     if (fg) {
@@ -3012,15 +3044,6 @@ const NetworkGraph: React.FC = () => {
               });
               const nextPositions = new Map<string, { x: number; y: number }>();
               graph.nodes.forEach(node => {
-                const typed = node as GraphNode;
-                if (typed.is_self) {
-                  (node as any).x = 0;
-                  (node as any).y = 0;
-                  (node as any).vx = 0;
-                  (node as any).vy = 0;
-                  (node as any).fx = 0;
-                  (node as any).fy = 0;
-                }
                 const nx = (node as any).x;
                 const ny = (node as any).y;
                 if (typeof nx === 'number' && typeof ny === 'number') {
@@ -3083,15 +3106,6 @@ const NetworkGraph: React.FC = () => {
               }
               setHoveredNode(null);
               setHoveredPos(null);
-              if (typed.is_self) {
-                (node as any).x = 0;
-                (node as any).y = 0;
-                (node as any).vx = 0;
-                (node as any).vy = 0;
-                (node as any).fx = 0;
-                (node as any).fy = 0;
-                return;
-              }
               Array.from(gridOccupancyRef.current.entries()).forEach(([key, val]) => {
                 if (val === typed.id) gridOccupancyRef.current.delete(key);
               });
@@ -3100,6 +3114,9 @@ const NetworkGraph: React.FC = () => {
               relaxedNodeIdsRef.current.add(typed.id);
               const currentX = Number((node as any).x);
               const currentY = Number((node as any).y);
+              if (Number.isFinite(currentX) && Number.isFinite(currentY)) {
+                relaxedAnchorPositionsRef.current.set(typed.id, { x: currentX, y: currentY });
+              }
               const prev = dragLastPositionRef.current.get(typed.id);
               if (
                 !gridConfig.enabled
@@ -3122,8 +3139,8 @@ const NetworkGraph: React.FC = () => {
                     if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
                     follower.x += mx;
                     follower.y += my;
-                    follower.vx = (follower.vx || 0) + mx * 0.2;
-                    follower.vy = (follower.vy || 0) + my * 0.2;
+                    follower.vx = 0;
+                    follower.vy = 0;
                     follower.ringAngle = Math.atan2(follower.y, follower.x);
                     if (follower.fx != null && follower.fy != null) {
                       follower.fx += mx;
@@ -3135,6 +3152,8 @@ const NetworkGraph: React.FC = () => {
               if (Number.isFinite(currentX) && Number.isFinite(currentY)) {
                 dragLastPositionRef.current.set(typed.id, { x: currentX, y: currentY });
               }
+              (node as any).vx = 0;
+              (node as any).vy = 0;
               (node as any).fx = (node as any).x;
               (node as any).fy = (node as any).y;
             }}
@@ -3144,19 +3163,15 @@ const NetworkGraph: React.FC = () => {
               window.setTimeout(() => {
                 didDragNodeRef.current = false;
               }, 0);
-              if (typed.is_self) {
-                (node as any).x = 0;
-                (node as any).y = 0;
-                (node as any).vx = 0;
-                (node as any).vy = 0;
-                (node as any).fx = 0;
-                (node as any).fy = 0;
-                return;
-              }
               dragLastPositionRef.current.delete(typed.id);
               fixedNodeIdsRef.current.delete(typed.id);
               (node as any).fx = null;
               (node as any).fy = null;
+              (node as any).vx = 0;
+              (node as any).vy = 0;
+              if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) {
+                relaxedAnchorPositionsRef.current.set(typed.id, { x: Number((node as any).x), y: Number((node as any).y) });
+              }
               const assignment = companyMemberAssignmentsRef.current.get(typed.id);
               if (assignment) {
                 const companyNode = graphNodeById.get(assignment.companyId) as any;
@@ -3167,12 +3182,16 @@ const NetworkGraph: React.FC = () => {
                   (node as any).vy = 0;
                 }
                 relaxedNodeIdsRef.current.delete(typed.id);
+                relaxedAnchorPositionsRef.current.delete(typed.id);
               }
               if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) {
                 (node as any).ringAngle = Math.atan2((node as any).y, (node as any).x);
               }
               if (gridConfig.enabled && gridConfig.autoSnap) {
                 snapNodeToGrid(node as any, gridConfig);
+                if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) {
+                  relaxedAnchorPositionsRef.current.set(typed.id, { x: Number((node as any).x), y: Number((node as any).y) });
+                }
               } else {
                 gridNodeKeyRef.current.delete(typed.id);
                 Array.from(gridOccupancyRef.current.entries()).forEach(([key, val]) => {

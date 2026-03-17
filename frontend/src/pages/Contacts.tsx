@@ -28,6 +28,41 @@ type TagOption = {
 };
 
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
+const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
+const EVENT_TAG_SEPARATOR = ' / ';
+
+const normalizeTagType = (value?: string) => {
+  if (!value || value === 'technology') return 'tech';
+  return value;
+};
+
+const parseEventTagName = (rawName: string) => {
+  const name = (rawName || '').trim();
+  const separators = ['::', EVENT_TAG_SEPARATOR, '/', '／', '>', '＞'];
+  for (const separator of separators) {
+    if (!name.includes(separator)) continue;
+    const [rawTop, rawChild] = name.split(separator, 2);
+    const topToken = rawTop.replace(/^#/, '').trim().toLowerCase();
+    const child = (rawChild || '').trim();
+    if (!child) continue;
+    const top = EVENT_TOP_LEVELS.find(item => item.toLowerCase() === topToken);
+    if (!top) continue;
+    return { top, child };
+  }
+  return null;
+};
+
+const buildEventTagName = (top: (typeof EVENT_TOP_LEVELS)[number], childRaw: string) => {
+  const child = (childRaw || '').trim();
+  if (!child) return null;
+  return `#${top}${EVENT_TAG_SEPARATOR}${child}`;
+};
+
+const formatEventTagLabel = (rawName: string) => {
+  const parsed = parseEventTagName(rawName);
+  if (!parsed) return rawName;
+  return `#${parsed.top} / ${parsed.child}`;
+};
 
 type SortOption = 'group' | 'prefecture' | 'company' | 'name' | 'tech';
 
@@ -46,6 +81,7 @@ const Contacts: React.FC = () => {
   const [tagEditorSelectedTag, setTagEditorSelectedTag] = useState('');
   const [tagEditorCustomTag, setTagEditorCustomTag] = useState('');
   const [tagEditorCustomType, setTagEditorCustomType] = useState<'tech' | 'event' | 'relation'>('tech');
+  const [tagEditorEventTop, setTagEditorEventTop] = useState<(typeof EVENT_TOP_LEVELS)[number]>('Cards');
   const [tagEditorLoading, setTagEditorLoading] = useState(false);
   const [tagEditorSaving, setTagEditorSaving] = useState(false);
   const [tagEditorError, setTagEditorError] = useState<string | null>(null);
@@ -177,7 +213,11 @@ const Contacts: React.FC = () => {
   useEffect(() => {
     axios.get<TagOption[]>('http://localhost:8000/tags')
       .then(response => {
-        setAvailableTags((response.data || []).filter(tag => Boolean(tag.name)));
+        setAvailableTags(
+          (response.data || [])
+            .filter(tag => Boolean(tag.name))
+            .map(tag => ({ ...tag, type: normalizeTagType(tag.type) })),
+        );
       })
       .catch(() => setAvailableTags([]));
   }, []);
@@ -346,6 +386,7 @@ const Contacts: React.FC = () => {
     setTagEditorSelectedTag('');
     setTagEditorCustomTag('');
     setTagEditorCustomType('tech');
+    setTagEditorEventTop('Cards');
     setTagEditorError(null);
     setTagEditorLoading(true);
     try {
@@ -353,11 +394,17 @@ const Contacts: React.FC = () => {
         ? `http://localhost:8000/companies/${id}/tags`
         : `http://localhost:8000/company-groups/${id}/tags`;
       const response = await axios.get<TagOption[]>(url);
-      const tags = response.data || [];
-      setTagEditorDraft(tags.map(tag => tag.name).filter(Boolean));
+      const tags = (response.data || [])
+        .filter(tag => Boolean(tag.name))
+        .map(tag => {
+          const type = normalizeTagType(tag.type);
+          const name = type === 'event' ? formatEventTagLabel(tag.name) : tag.name;
+          return { ...tag, name, type };
+        });
+      setTagEditorDraft(tags.map(tag => tag.name));
       const nextTypes: Record<string, string> = {};
       tags.forEach(tag => {
-        if (tag.name) nextTypes[tag.name] = tag.type || 'tech';
+        if (tag.name) nextTypes[tag.name] = normalizeTagType(tag.type);
       });
       setTagEditorTypes(nextTypes);
     } catch {
@@ -374,17 +421,19 @@ const Contacts: React.FC = () => {
     setTagEditorSelectedTag('');
     setTagEditorCustomTag('');
     setTagEditorCustomType('tech');
+    setTagEditorEventTop('Cards');
     setTagEditorError(null);
     setTagEditorLoading(false);
     setTagEditorSaving(false);
   };
 
   const addEditorTag = (name: string, fallbackType: string) => {
-    const normalized = name.trim();
+    const normalizedType = normalizeTagType(fallbackType);
+    const normalized = normalizedType === 'event' ? formatEventTagLabel(name).trim() : name.trim();
     if (!normalized) return;
     if (tagEditorDraft.includes(normalized)) return;
     setTagEditorDraft(prev => [...prev, normalized]);
-    setTagEditorTypes(prev => ({ ...prev, [normalized]: prev[normalized] || fallbackType }));
+    setTagEditorTypes(prev => ({ ...prev, [normalized]: prev[normalized] || normalizedType }));
   };
 
   const removeEditorTag = (name: string) => {
@@ -404,8 +453,7 @@ const Contacts: React.FC = () => {
       const payload = {
         tag_items: tagEditorDraft.map(name => {
           const known = availableTags.find(tag => tag.name === name);
-          let type = tagEditorTypes[name] || known?.type || 'tech';
-          if (type === 'technology') type = 'tech';
+          const type = normalizeTagType(tagEditorTypes[name] || known?.type || 'tech');
           return { name, type };
         }),
       };
@@ -446,7 +494,7 @@ const Contacts: React.FC = () => {
               {tagEditorDraft.length === 0 && <span className="text-sm text-gray-500">タグ未設定</span>}
               {tagEditorDraft.map(tag => (
                 <span key={tag} className="inline-flex items-center gap-2 rounded bg-white px-2 py-1 text-sm border border-blue-200">
-                  {tag}
+                  {tagEditorTypes[tag] === 'event' ? formatEventTagLabel(tag) : tag}
                   <button type="button" onClick={() => removeEditorTag(tag)} className="text-blue-700 hover:text-blue-900">×</button>
                 </span>
               ))}
@@ -459,7 +507,9 @@ const Contacts: React.FC = () => {
               >
                 <option value="">既存タグを選択</option>
                 {availableTags.map(tag => (
-                  <option key={tag.id} value={tag.name}>{tag.name}</option>
+                  <option key={tag.id} value={tag.name}>
+                    {normalizeTagType(tag.type) === 'event' ? formatEventTagLabel(tag.name) : tag.name}
+                  </option>
                 ))}
               </select>
               <button
@@ -468,7 +518,7 @@ const Contacts: React.FC = () => {
                   const selected = tagEditorSelectedTag.trim();
                   if (!selected) return;
                   const target = availableTags.find(tag => tag.name === selected);
-                  addEditorTag(selected, target?.type === 'technology' ? 'tech' : (target?.type || 'tech'));
+                  addEditorTag(selected, normalizeTagType(target?.type));
                   setTagEditorSelectedTag('');
                 }}
                 className="rounded bg-blue-600 px-3 py-1 text-sm text-white"
@@ -482,8 +532,19 @@ const Contacts: React.FC = () => {
                 value={tagEditorCustomTag}
                 onChange={event => setTagEditorCustomTag(event.target.value)}
                 className="border rounded px-2 py-1 text-sm min-w-[180px]"
-                placeholder="新規タグ"
+                placeholder={tagEditorCustomType === 'event' ? 'イベント下位名を入力' : '新規タグ'}
               />
+              {tagEditorCustomType === 'event' && (
+                <select
+                  value={tagEditorEventTop}
+                  onChange={event => setTagEditorEventTop(event.target.value as (typeof EVENT_TOP_LEVELS)[number])}
+                  className="border rounded px-2 py-1 text-sm bg-orange-50 text-orange-700 border-orange-300"
+                >
+                  {EVENT_TOP_LEVELS.map(top => (
+                    <option key={top} value={top}>#{top}</option>
+                  ))}
+                </select>
+              )}
               <select
                 value={tagEditorCustomType}
                 onChange={event => setTagEditorCustomType(event.target.value as 'tech' | 'event' | 'relation')}
@@ -496,7 +557,9 @@ const Contacts: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  const custom = tagEditorCustomTag.trim();
+                  const custom = tagEditorCustomType === 'event'
+                    ? buildEventTagName(tagEditorEventTop, tagEditorCustomTag)
+                    : tagEditorCustomTag.trim();
                   if (!custom) return;
                   addEditorTag(custom, tagEditorCustomType);
                   setTagEditorCustomTag('');
@@ -654,7 +717,7 @@ const Contacts: React.FC = () => {
                                 .filter(tag => !isGroupTagName(tag.name))
                                 .map(tag => (
                                   <span key={tag.name} className="bg-blue-100 text-blue-800 px-2 py-1 rounded mr-1">
-                                    {tag.name}
+                                    {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
                                   </span>
                                 ))}
                             </div>

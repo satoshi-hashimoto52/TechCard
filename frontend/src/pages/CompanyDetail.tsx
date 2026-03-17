@@ -10,6 +10,23 @@ type CompanyDetailData = {
   tech_tags: string[];
   contacts: { id: number; name: string }[];
 };
+const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
+
+const formatEventTagLabel = (rawName: string) => {
+  const name = (rawName || '').trim();
+  const separators = ['::', '/', '／', '>', '＞'];
+  for (const separator of separators) {
+    if (!name.includes(separator)) continue;
+    const [rawTop, rawChild] = name.split(separator, 2);
+    const topToken = rawTop.replace(/^#/, '').trim().toLowerCase();
+    const child = (rawChild || '').trim();
+    if (!child) continue;
+    const top = EVENT_TOP_LEVELS.find(item => item.toLowerCase() === topToken);
+    if (!top) continue;
+    return `#${top} / ${child}`;
+  }
+  return name;
+};
 
 type CompanyGroup = {
   id: number;
@@ -147,12 +164,12 @@ const CompanyDetail: React.FC = () => {
         </div>
 
         <div>
-          <label className="text-sm font-semibold">技術</label>
+          <label className="text-sm font-semibold">タグ</label>
           <div className="mt-2 flex flex-wrap gap-2">
             {company.tech_tags.length === 0 && <span className="text-sm text-gray-500">未登録</span>}
             {company.tech_tags.map(tag => (
               <span key={tag} className="px-2 py-1 rounded bg-blue-50 text-blue-700 text-xs">
-                {tag}
+                {formatEventTagLabel(tag)}
               </span>
             ))}
           </div>
