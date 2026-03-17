@@ -348,14 +348,16 @@ def get_network(
         else set()
     )
 
-    def ensure_event_top_node(top_name: str) -> str:
-        top_id = f"event_top_{top_name.lower()}"
+    def ensure_event_top_node(top_name: str, source_scope: str) -> str:
+        scope = "company" if source_scope == "company" else "person"
+        scope_label = "会社" if scope == "company" else "個人"
+        top_id = f"event_top_{scope}_{top_name.lower()}"
         if top_id not in node_ids:
             add_node(
                 {
                     "id": top_id,
                     "type": "event",
-                    "label": _EVENT_TOP_LABELS.get(top_name, top_name),
+                    "label": f"{_EVENT_TOP_LABELS.get(top_name, top_name)} ({scope_label})",
                     "size": 1,
                 }
             )
@@ -386,7 +388,7 @@ def get_network(
                 if meta is None:
                     continue
                 top_name, sub_name = meta
-                top_id = ensure_event_top_node(top_name)
+                top_id = ensure_event_top_node(top_name, "person")
                 sub_id = ensure_event_sub_node(event_key, sub_name)
                 add_edge(self_contact_node_id, top_id, "event_attendance")
                 add_edge(top_id, sub_id, "relation_event")
@@ -405,7 +407,7 @@ def get_network(
                 if meta is None:
                     continue
                 top_name, sub_name = meta
-                top_id = ensure_event_top_node(top_name)
+                top_id = ensure_event_top_node(top_name, "company")
                 sub_id = ensure_event_sub_node(event_key, sub_name)
                 add_edge(self_company_node_id, top_id, "company_event")
                 add_edge(top_id, sub_id, "relation_event")
@@ -422,7 +424,7 @@ def get_network(
                 if meta is None:
                     continue
                 top_name, sub_name = meta
-                top_id = ensure_event_top_node(top_name)
+                top_id = ensure_event_top_node(top_name, "company")
                 sub_id = ensure_event_sub_node(event_key, sub_name)
                 add_edge(self_company_node_id, top_id, "company_event")
                 add_edge(top_id, sub_id, "relation_event")
@@ -490,7 +492,7 @@ def get_network(
     for tag_id in all_contact_tech_tag_ids:
         tag = tag_by_id.get(tag_id)
         label = tag.name if tag else ""
-        contact_label = f"{label} (個人)" if label else "個人タグ"
+        contact_label = label if label else "技術タグ"
         add_node(
             {
                 "id": f"tech_contact_{tag_id}",
@@ -505,7 +507,7 @@ def get_network(
         group_ids = company_tech_tag_group_counts.get(tag_id, set())
         tag = tag_by_id.get(tag_id)
         label = tag.name if tag else ""
-        company_label = f"{label} (会社)" if label else "会社タグ"
+        company_label = label if label else "技術タグ"
         add_node(
             {
                 "id": f"tech_company_{tag_id}",

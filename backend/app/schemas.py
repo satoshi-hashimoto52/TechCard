@@ -74,6 +74,7 @@ class CompanyCreate(CompanyBase):
 
 class CompanyRead(CompanyBase):
     id: int
+    tech_tags: List[TagRead] = []
 
     class Config:
         from_attributes = True

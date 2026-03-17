@@ -8,7 +8,14 @@ interface Contact {
   email?: string;
   phone?: string;
   role?: string;
-  company?: { id: number; name: string; group_id?: number | null; postal_code?: string | null; address?: string | null };
+  company?: {
+    id: number;
+    name: string;
+    group_id?: number | null;
+    postal_code?: string | null;
+    address?: string | null;
+    tech_tags?: { name: string; type?: string }[];
+  };
   tags: { name: string; type?: string }[];
   first_met_at?: string;
   notes?: string;
@@ -30,11 +37,15 @@ type TagOption = {
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
 const EVENT_TAG_SEPARATOR = ' / ';
+const TAG_NAME_COLLATOR = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
 
 const normalizeTagType = (value?: string) => {
   if (!value || value === 'technology') return 'tech';
   return value;
 };
+
+const sortTagsByNaturalOrder = (items: TagOption[]) =>
+  [...items].sort((a, b) => TAG_NAME_COLLATOR.compare(a.name || '', b.name || ''));
 
 const parseEventTagName = (rawName: string) => {
   const name = (rawName || '').trim();
@@ -214,9 +225,10 @@ const Contacts: React.FC = () => {
     axios.get<TagOption[]>('http://localhost:8000/tags')
       .then(response => {
         setAvailableTags(
-          (response.data || [])
+          sortTagsByNaturalOrder((response.data || [])
             .filter(tag => Boolean(tag.name))
             .map(tag => ({ ...tag, type: normalizeTagType(tag.type) })),
+          ),
         );
       })
       .catch(() => setAvailableTags([]));
@@ -310,6 +322,17 @@ const Contacts: React.FC = () => {
         const prefecture = extractPrefecture(address);
         const companyId = items.find(item => item.company?.id)?.company?.id;
         const techList = companyId ? (companyTechMap.get(companyId) || []) : [];
+        const companyTagMap = new Map<string, string | undefined>();
+        items.forEach(item => {
+          (item.company?.tech_tags || []).forEach(tag => {
+            const name = (tag.name || '').trim();
+            if (!name) return;
+            companyTagMap.set(name, normalizeTagType(tag.type));
+          });
+        });
+        const companyTags = Array.from(companyTagMap.entries())
+          .map(([name, type]) => ({ name, type }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'ja'));
         const techKey = techList[0] || '';
         const nameKey = sortedContacts[0]?.name || '';
         return {
@@ -321,6 +344,7 @@ const Contacts: React.FC = () => {
           prefecture,
           techKey,
           techList,
+          companyTags,
           nameKey,
         };
       });
@@ -401,9 +425,10 @@ const Contacts: React.FC = () => {
           const name = type === 'event' ? formatEventTagLabel(tag.name) : tag.name;
           return { ...tag, name, type };
         });
-      setTagEditorDraft(tags.map(tag => tag.name));
+      const sortedTags = sortTagsByNaturalOrder(tags);
+      setTagEditorDraft(sortedTags.map(tag => tag.name));
       const nextTypes: Record<string, string> = {};
-      tags.forEach(tag => {
+      sortedTags.forEach(tag => {
         if (tag.name) nextTypes[tag.name] = normalizeTagType(tag.type);
       });
       setTagEditorTypes(nextTypes);
@@ -460,7 +485,59 @@ const Contacts: React.FC = () => {
       const url = tagEditorTarget.scope === 'company'
         ? `http://localhost:8000/companies/${tagEditorTarget.id}/tags`
         : `http://localhost:8000/company-groups/${tagEditorTarget.id}/tags`;
-      await axios.put(url, payload);
+      const response = await axios.put<TagOption[]>(url, payload);
+      const savedTags = (response.data || [])
+        .filter(tag => Boolean(tag.name))
+        .map(tag => ({
+          id: tag.id,
+          name: tag.name,
+          type: normalizeTagType(tag.type),
+        }));
+
+      setAvailableTags(prev => {
+        const nextByName = new Map<string, TagOption>();
+        prev.forEach(tag => {
+          const key = (tag.name || '').trim().toLowerCase();
+          if (!key) return;
+          nextByName.set(key, { ...tag, type: normalizeTagType(tag.type) });
+        });
+        savedTags.forEach((tag, index) => {
+          const key = (tag.name || '').trim().toLowerCase();
+          if (!key) return;
+          const existing = nextByName.get(key);
+          nextByName.set(key, {
+            id: existing?.id ?? tag.id ?? Date.now() + index,
+            name: tag.name,
+            type: normalizeTagType(tag.type),
+          });
+        });
+        return sortTagsByNaturalOrder(Array.from(nextByName.values()));
+      });
+
+      if (tagEditorTarget.scope === 'company') {
+        const companyId = tagEditorTarget.id;
+        const normalizedCompanyTags = savedTags.map(tag => ({ name: tag.name, type: normalizeTagType(tag.type) }));
+        setContacts(prev => prev.map(contact => {
+          if (contact.company?.id !== companyId) return contact;
+          return {
+            ...contact,
+            company: {
+              ...contact.company,
+              tech_tags: normalizedCompanyTags,
+            },
+          };
+        }));
+        const techTags = savedTags
+          .filter(tag => normalizeTagType(tag.type) === 'tech')
+          .map(tag => tag.name)
+          .sort((a, b) => a.localeCompare(b, 'ja'));
+        setCompanyTechMap(prev => {
+          const next = new Map(prev);
+          next.set(companyId, techTags);
+          return next;
+        });
+      }
+
       closeTagEditor();
     } catch {
       setTagEditorError('タグの保存に失敗しました。');
@@ -527,13 +604,15 @@ const Contacts: React.FC = () => {
               </button>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              <input
-                type="text"
-                value={tagEditorCustomTag}
-                onChange={event => setTagEditorCustomTag(event.target.value)}
-                className="border rounded px-2 py-1 text-sm min-w-[180px]"
-                placeholder={tagEditorCustomType === 'event' ? 'イベント下位名を入力' : '新規タグ'}
-              />
+              <select
+                value={tagEditorCustomType}
+                onChange={event => setTagEditorCustomType(event.target.value as 'tech' | 'event' | 'relation')}
+                className="border rounded px-2 py-1 text-sm"
+              >
+                <option value="tech">タグ/技術</option>
+                <option value="event">タグ/イベント</option>
+                <option value="relation">タグ/関係</option>
+              </select>
               {tagEditorCustomType === 'event' && (
                 <select
                   value={tagEditorEventTop}
@@ -545,15 +624,13 @@ const Contacts: React.FC = () => {
                   ))}
                 </select>
               )}
-              <select
-                value={tagEditorCustomType}
-                onChange={event => setTagEditorCustomType(event.target.value as 'tech' | 'event' | 'relation')}
-                className="border rounded px-2 py-1 text-sm"
-              >
-                <option value="tech">タグ/技術</option>
-                <option value="event">タグ/イベント</option>
-                <option value="relation">タグ/関係</option>
-              </select>
+              <input
+                type="text"
+                value={tagEditorCustomTag}
+                onChange={event => setTagEditorCustomTag(event.target.value)}
+                className="border rounded px-2 py-1 text-sm min-w-[180px]"
+                placeholder={tagEditorCustomType === 'event' ? 'イベント下位名を入力' : '新規タグ'}
+              />
               <button
                 type="button"
                 onClick={() => {
@@ -565,7 +642,7 @@ const Contacts: React.FC = () => {
                   setTagEditorCustomTag('');
                   setAvailableTags(prev => {
                     if (prev.some(tag => tag.name === custom)) return prev;
-                    return [...prev, { id: Date.now(), name: custom, type: tagEditorCustomType }];
+                    return sortTagsByNaturalOrder([...prev, { id: Date.now(), name: custom, type: tagEditorCustomType }]);
                   });
                 }}
                 className="rounded bg-gray-800 px-3 py-1 text-sm text-white"
@@ -668,6 +745,16 @@ const Contacts: React.FC = () => {
                               技術:{' '}
                               <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-blue-700">
                                 {companyEntry.techList.length > 0 ? companyEntry.techList.join(' / ') : '-'}
+                              </span>
+                            </div>
+                            <div className="text-sm font-semibold text-indigo-700">
+                              会社タグ:{' '}
+                              <span className="inline-flex flex-wrap items-center gap-1">
+                                {companyEntry.companyTags.length > 0 ? companyEntry.companyTags.map(tag => (
+                                  <span key={tag.name} className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-700">
+                                    {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
+                                  </span>
+                                )) : <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-500">-</span>}
                               </span>
                             </div>
                             <div>連絡先数: {companyEntry.contacts.length}</div>

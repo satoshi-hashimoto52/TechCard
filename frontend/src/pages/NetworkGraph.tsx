@@ -36,6 +36,8 @@ const LAYOUT_CHARGE_STRENGTH = -820;
 const LAYOUT_COLLIDE_RADIUS = 52;
 const CONNECTED_ANCHOR_RADIUS_RATIO = 0.82;
 const CONNECTED_BRANCH_ANGLE_BLEND = 0.9;
+const COMPANY_BRANCH_RADIUS_STEP_RATIO = 0.74;
+const COMPANY_BRANCH_FAN_RADIANS = 1.05;
 const RELAXED_ANCHOR_HOLD_STRENGTH = 0.42;
 const SAVED_LAYOUT_RADIALIZE_BLEND = 0.55;
 const SAVED_LAYOUT_RADIUS_LIMIT_RATIO = 1.7;
@@ -56,11 +58,7 @@ const defaultVisibleTypes = {
 };
 const defaultGridConfig = {
   enabled: false,
-  radialLines: 12,
-  ringCount: 8,
-  radiusStep: 120,
-  snapRadius: 30,
-  autoSnap: true,
+  cellSize: 120,
 };
 const defaultGuideConfig = {
   enabled: true,
@@ -155,6 +153,37 @@ const defaultDisplayConfig: DisplayConfig = {
   groupCollapsed: false,
   searchType: 'tech',
   relationEventEnabled: true,
+};
+
+const splitCompanyLabelForDisplay = (label: string): { corporateType: string; companyName: string } | null => {
+  const raw = String(label || '').trim();
+  if (!raw) return null;
+  const toCorpType = (value: string): string | null => {
+    if (value === '株式会社' || value === '株' || value === '㈱') return '株式会社';
+    if (value === '有限会社' || value === '有' || value === '㈲') return '有限会社';
+    return null;
+  };
+  const patterns: RegExp[] = [
+    /^(株式会社|有限会社|㈱|㈲)\s*(.+)$/u,
+    /^(.+?)\s*(株式会社|有限会社|㈱|㈲)$/u,
+    /^[（(](株|有)[）)]\s*(.+)$/u,
+    /^(.+?)\s*[（(](株|有)[）)]$/u,
+  ];
+  for (const pattern of patterns) {
+    const match = raw.match(pattern);
+    if (!match) continue;
+    const first = String(match[1] || '').trim();
+    const second = String(match[2] || '').trim();
+    const typeFirst = toCorpType(first);
+    if (typeFirst && second) {
+      return { corporateType: typeFirst, companyName: second };
+    }
+    const typeSecond = toCorpType(second);
+    if (typeSecond && first) {
+      return { corporateType: typeSecond, companyName: first };
+    }
+  }
+  return null;
 };
 
 const loadDisplayConfig = (): DisplayConfig => {
@@ -288,6 +317,7 @@ const NetworkGraph: React.FC = () => {
   const layoutSeedRef = useRef<number | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const draggingNodeIdRef = useRef<string | null>(null);
+  const rotatingCompanyIdRef = useRef<string | null>(null);
   const hoveredNodeRef = useRef<GraphNode | null>(null);
   const didDragNodeRef = useRef(false);
   const companyMemberAssignmentsRef = useRef<Map<string, CompanyMemberAssignment>>(new Map());
@@ -1402,6 +1432,70 @@ const NetworkGraph: React.FC = () => {
       });
     }
 
+    const selfCompanyId = selfNode.company_node_id ?? null;
+    const selfCompanyNode = selfCompanyId ? (nodesById.get(selfCompanyId) as GraphNode | undefined) : undefined;
+    const companyHopMap = new Map<string, number>();
+    if (selfCompanyId && nodesById.has(selfCompanyId)) {
+      const queue: string[] = [selfCompanyId];
+      companyHopMap.set(selfCompanyId, 0);
+      while (queue.length) {
+        const current = queue.shift() as string;
+        const currentHop = companyHopMap.get(current) ?? 0;
+        const neighbors = adjacency.get(current);
+        if (!neighbors) continue;
+        neighbors.forEach(next => {
+          if (!connectedNodeIds.has(next)) return;
+          if (companyHopMap.has(next)) return;
+          companyHopMap.set(next, currentHop + 1);
+          queue.push(next);
+        });
+      }
+    }
+    const resolveCompanyFirstHop = (nodeId: string): string | null => {
+      if (!selfCompanyId) return null;
+      if (nodeId === selfCompanyId) return selfCompanyId;
+      let current: string | null = nodeId;
+      while (current) {
+        const parentNode: string | null = parentMap.get(current) ?? null;
+        if (parentNode === selfCompanyId) {
+          return current;
+        }
+        if (!parentNode || parentNode === selfNode.id) {
+          return null;
+        }
+        current = parentNode;
+      }
+      return null;
+    };
+    const companyBranchNodeIds = new Set<string>();
+    connectedNodeIds.forEach(nodeId => {
+      if (nodeId === selfNode.id || nodeId === selfCompanyId) return;
+      const firstHop = resolveFirstHop(nodeId);
+      if (selfCompanyId && firstHop === selfCompanyId) {
+        companyBranchNodeIds.add(nodeId);
+      }
+    });
+    const companyFirstHopAngles = new Map<string, number>();
+    if (selfCompanyId) {
+      const companyBaseAngle = Number.isFinite((selfCompanyNode as any)?.ringAngle)
+        ? Number((selfCompanyNode as any)?.ringAngle)
+        : (firstHopAngles.get(selfCompanyId) ?? (-Math.PI / 2));
+      const directChildren = Array.from(adjacency.get(selfCompanyId) ?? [])
+        .filter(id => id !== selfNode.id && connectedNodeIds.has(id));
+      const orderedChildren = [...directChildren].sort((a, b) => {
+        const aLabel = (nodesById.get(a)?.label || a);
+        const bLabel = (nodesById.get(b)?.label || b);
+        return aLabel.localeCompare(bLabel, 'ja');
+      });
+      const total = Math.max(1, orderedChildren.length);
+      orderedChildren.forEach((nodeId, index) => {
+        const spread = total <= 1
+          ? 0
+          : (((index / (total - 1)) - 0.5) * 2 * COMPANY_BRANCH_FAN_RADIANS);
+        companyFirstHopAngles.set(nodeId, companyBaseAngle + spread);
+      });
+    }
+
     const depthGroups = new Map<number, GraphNode[]>();
     graph.nodes.forEach(node => {
       if (node.id === selfNode.id) return;
@@ -1436,11 +1530,20 @@ const NetworkGraph: React.FC = () => {
         let angle: number;
         const ringEvenAngle = (index / Math.max(1, ordered.length)) * Math.PI * 2 - Math.PI / 2;
         if (connectedNodeIds.has(node.id)) {
-          const firstHop = resolveFirstHop(node.id);
-          const straightAngle = firstHopAngles.get(firstHop);
-          angle = Number.isFinite(straightAngle)
-            ? blendAngle(Number(straightAngle), ringEvenAngle, 0.08)
-            : ringEvenAngle;
+          const isCompanyBranch = companyBranchNodeIds.has(node.id);
+          if (isCompanyBranch) {
+            const companyFirstHop = resolveCompanyFirstHop(node.id);
+            const companyAngle = companyFirstHop ? companyFirstHopAngles.get(companyFirstHop) : null;
+            angle = Number.isFinite(companyAngle)
+              ? blendAngle(Number(companyAngle), ringEvenAngle, 0.04)
+              : ringEvenAngle;
+          } else {
+            const firstHop = resolveFirstHop(node.id);
+            const straightAngle = firstHopAngles.get(firstHop);
+            angle = Number.isFinite(straightAngle)
+              ? blendAngle(Number(straightAngle), ringEvenAngle, 0.08)
+              : ringEvenAngle;
+          }
         } else {
           const presetAngle = Number((node as any).ringAngle);
           if (Number.isFinite(presetAngle)) {
@@ -1450,8 +1553,27 @@ const NetworkGraph: React.FC = () => {
             disconnectedIndex += 1;
           }
         }
-        const x = Math.cos(angle) * ringRadius;
-        const y = Math.sin(angle) * ringRadius;
+        let x = Math.cos(angle) * ringRadius;
+        let y = Math.sin(angle) * ringRadius;
+        if (connectedNodeIds.has(node.id) && selfCompanyId && companyBranchNodeIds.has(node.id)) {
+          const fallbackCompanyAngle = Number.isFinite((selfCompanyNode as any)?.ringAngle)
+            ? Number((selfCompanyNode as any).ringAngle)
+            : (firstHopAngles.get(selfCompanyId) ?? (-Math.PI / 2));
+          const companyDepth = Number.isFinite((selfCompanyNode as any)?.depth)
+            ? Number((selfCompanyNode as any).depth)
+            : 1;
+          const companyRadiusFromSelf = Math.max(1, companyDepth) * DEPTH_LAYOUT_RADIUS_STEP * seedFactor;
+          const companyX = Number.isFinite((selfCompanyNode as any)?.x)
+            ? Number((selfCompanyNode as any).x)
+            : Math.cos(fallbackCompanyAngle) * companyRadiusFromSelf;
+          const companyY = Number.isFinite((selfCompanyNode as any)?.y)
+            ? Number((selfCompanyNode as any).y)
+            : Math.sin(fallbackCompanyAngle) * companyRadiusFromSelf;
+          const companyHop = Math.max(1, companyHopMap.get(node.id) ?? 1);
+          const localRadius = companyHop * DEPTH_LAYOUT_RADIUS_STEP * COMPANY_BRANCH_RADIUS_STEP_RATIO * seedFactor;
+          x = companyX + Math.cos(angle) * localRadius;
+          y = companyY + Math.sin(angle) * localRadius;
+        }
         (node as any).ringAngle = angle;
         if (!Number.isFinite((node as any).x) || !Number.isFinite((node as any).y)) {
           (node as any).x = x;
@@ -1525,6 +1647,7 @@ const NetworkGraph: React.FC = () => {
 
     const depthAnchorForce = (strength = 0.14) => {
       let nodes: any[] = [];
+      let nodeMap = new Map<string, any>();
       const blendAngle = (primary: number, secondary: number, ratio: number) =>
         Math.atan2(
           (1 - ratio) * Math.sin(primary) + ratio * Math.sin(secondary),
@@ -1540,20 +1663,52 @@ const NetworkGraph: React.FC = () => {
           const currentX = Number.isFinite(node.x) ? node.x : 0;
           const currentY = Number.isFinite(node.y) ? node.y : 0;
           const depth = Number.isFinite(node.depth) ? node.depth : defaultHop;
-          const isConnectedToSelf = connectedNodeIds.has(String(node.id));
+          const nodeId = String(node.id);
+          const isConnectedToSelf = connectedNodeIds.has(nodeId);
+          const isCompanyBranch = isConnectedToSelf && companyBranchNodeIds.has(nodeId);
           let baseAngle = Number.isFinite(node.ringAngle) ? node.ringAngle : Math.atan2(currentY, currentX);
-          if (isConnectedToSelf) {
-            const firstHop = resolveFirstHop(String(node.id));
+          if (isCompanyBranch) {
+            const companyFirstHop = resolveCompanyFirstHop(nodeId);
+            const branchAngle = companyFirstHop ? companyFirstHopAngles.get(companyFirstHop) : null;
+            if (Number.isFinite(branchAngle)) {
+              baseAngle = blendAngle(baseAngle, Number(branchAngle), CONNECTED_BRANCH_ANGLE_BLEND);
+              node.ringAngle = baseAngle;
+            }
+          } else if (isConnectedToSelf) {
+            const firstHop = resolveFirstHop(nodeId);
             const branchAngle = firstHopAngles.get(firstHop);
             if (Number.isFinite(branchAngle)) {
               baseAngle = blendAngle(baseAngle, Number(branchAngle), CONNECTED_BRANCH_ANGLE_BLEND);
               node.ringAngle = baseAngle;
             }
           }
-          const anchorRatio = isConnectedToSelf ? CONNECTED_ANCHOR_RADIUS_RATIO : 1;
-          const targetRadius = Math.max(1, depth) * DEPTH_LAYOUT_RADIUS_STEP * anchorRatio;
-          const targetX = Math.cos(baseAngle) * targetRadius;
-          const targetY = Math.sin(baseAngle) * targetRadius;
+          let targetX: number;
+          let targetY: number;
+          if (isCompanyBranch && selfCompanyId) {
+            const companyNodeObj = nodeMap.get(selfCompanyId);
+            const fallbackCompanyAngle = Number.isFinite((companyNodeObj as any)?.ringAngle)
+              ? Number((companyNodeObj as any).ringAngle)
+              : (firstHopAngles.get(selfCompanyId) ?? (-Math.PI / 2));
+            const companyDepth = Number.isFinite((companyNodeObj as any)?.depth)
+              ? Number((companyNodeObj as any).depth)
+              : 1;
+            const companyRadiusFromSelf = Math.max(1, companyDepth) * DEPTH_LAYOUT_RADIUS_STEP;
+            const companyX = Number.isFinite((companyNodeObj as any)?.x)
+              ? Number((companyNodeObj as any).x)
+              : Math.cos(fallbackCompanyAngle) * companyRadiusFromSelf;
+            const companyY = Number.isFinite((companyNodeObj as any)?.y)
+              ? Number((companyNodeObj as any).y)
+              : Math.sin(fallbackCompanyAngle) * companyRadiusFromSelf;
+            const companyHop = Math.max(1, companyHopMap.get(nodeId) ?? depth);
+            const targetRadius = companyHop * DEPTH_LAYOUT_RADIUS_STEP * COMPANY_BRANCH_RADIUS_STEP_RATIO;
+            targetX = companyX + Math.cos(baseAngle) * targetRadius;
+            targetY = companyY + Math.sin(baseAngle) * targetRadius;
+          } else {
+            const anchorRatio = isConnectedToSelf ? CONNECTED_ANCHOR_RADIUS_RATIO : 1;
+            const targetRadius = Math.max(1, depth) * DEPTH_LAYOUT_RADIUS_STEP * anchorRatio;
+            targetX = Math.cos(baseAngle) * targetRadius;
+            targetY = Math.sin(baseAngle) * targetRadius;
+          }
           let nodePull = isConnectedToSelf ? pull : pull * 0.85;
           if (node.type === 'contact') {
             if (companyMemberContactIdsRef.current.has(String(node.id))) return;
@@ -1565,6 +1720,7 @@ const NetworkGraph: React.FC = () => {
       };
       (force as any).initialize = (nextNodes: any[]) => {
         nodes = nextNodes;
+        nodeMap = new Map(nextNodes.map(node => [String(node.id), node]));
       };
       return force;
     };
@@ -1915,88 +2071,71 @@ const NetworkGraph: React.FC = () => {
     return gridCenterRef.current;
   }, [getLayoutCenter, gridConfig.enabled]);
 
-  const getGridPoints = useCallback(
-    (config: typeof gridConfig) => {
-      const points: { x: number; y: number; key: string }[] = [];
-      const step = (Math.PI * 2) / Math.max(1, config.radialLines);
-      for (let r = 1; r <= config.ringCount; r += 1) {
-        const radius = r * config.radiusStep;
-        for (let i = 0; i < config.radialLines; i += 1) {
-          const angle = i * step;
-          points.push({
-            x: Math.cos(angle) * radius,
-            y: Math.sin(angle) * radius,
-            key: `${r}_${i}`,
-          });
-        }
-      }
-      return points;
-    },
-    [],
-  );
-
-  const gridIntersections = useMemo(() => {
-    if (!gridConfig.enabled) return [];
-    return getGridPoints(gridConfig).map(p => ({ x: p.x, y: p.y }));
-  }, [gridConfig, getGridPoints]);
-
   const gridOccupancyRef = useRef(new Map<string, string>());
+
+  const findNearestSquareCell = useCallback(
+    (
+      x: number,
+      y: number,
+      config: typeof gridConfig,
+      ignoreNodeId?: string | null,
+    ): { key: string; x: number; y: number } | null => {
+      const center = getGridCenter();
+      const cellSize = Math.max(24, Number(config.cellSize) || 120);
+      const baseIx = Math.round((x - center.x) / cellSize);
+      const baseIy = Math.round((y - center.y) / cellSize);
+      let best: { key: string; x: number; y: number } | null = null;
+      let bestDist = Infinity;
+      const searchRadius = 12;
+      for (let r = 0; r <= searchRadius; r += 1) {
+        for (let dx = -r; dx <= r; dx += 1) {
+          for (let dy = -r; dy <= r; dy += 1) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            const ix = baseIx + dx;
+            const iy = baseIy + dy;
+            const key = `${ix}_${iy}`;
+            const occupiedBy = gridOccupancyRef.current.get(key);
+            if (occupiedBy && occupiedBy !== ignoreNodeId) continue;
+            const px = center.x + ix * cellSize;
+            const py = center.y + iy * cellSize;
+            const dist = Math.hypot(px - x, py - y);
+            if (dist < bestDist) {
+              bestDist = dist;
+              best = { key, x: px, y: py };
+            }
+          }
+        }
+        if (best) break;
+      }
+      return best;
+    },
+    [getGridCenter],
+  );
 
   const snapNodeToGrid = useCallback(
     (node: any, config: typeof gridConfig) => {
       if (!config.enabled) return;
+      if (node.type === 'contact') return;
       // release previous occupancy by this node
       Array.from(gridOccupancyRef.current.entries()).forEach(([key, val]) => {
         if (val === node.id) gridOccupancyRef.current.delete(key);
       });
       gridNodeKeyRef.current.delete(String(node.id));
-      const points = getGridPoints(config);
-      const center = getGridCenter();
-      let best: { x: number; y: number; key: string } | null = null;
-      let minDist = Infinity;
-      points.forEach(p => {
-        if (gridOccupancyRef.current.has(p.key)) return;
-        const px = center.x + p.x;
-        const py = center.y + p.y;
-        const dx = px - (node.x ?? 0);
-        const dy = py - (node.y ?? 0);
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < config.snapRadius && d < minDist) {
-          minDist = d;
-          best = { ...p, x: px, y: py };
-        }
-      });
-      if (best) {
-        const chosen = best as { x: number; y: number; key: string };
+      const nx = Number.isFinite(node.x) ? Number(node.x) : 0;
+      const ny = Number.isFinite(node.y) ? Number(node.y) : 0;
+      const chosen: { key: string; x: number; y: number } | null = findNearestSquareCell(nx, ny, config, String(node.id));
+      if (chosen) {
+        node.x = chosen.x;
+        node.y = chosen.y;
+        node.vx = 0;
+        node.vy = 0;
         node.fx = chosen.x;
         node.fy = chosen.y;
-        gridOccupancyRef.current.set(chosen.key, node.id);
+        gridOccupancyRef.current.set(chosen.key, String(node.id));
         gridNodeKeyRef.current.set(String(node.id), chosen.key);
       }
     },
-    [getGridCenter, getGridPoints],
-  );
-
-  const snapToGrid = useCallback(
-    (x: number, y: number) => {
-      if (!gridConfig.enabled || !gridConfig.autoSnap || gridIntersections.length === 0) return null;
-      const center = getGridCenter();
-      let closest: { x: number; y: number } | null = null;
-      let minDist = Infinity;
-      for (const p of gridIntersections) {
-        const px = center.x + p.x;
-        const py = center.y + p.y;
-        const dx = px - x;
-        const dy = py - y;
-        const d = Math.sqrt(dx * dx + dy * dy);
-        if (d < gridConfig.snapRadius && d < minDist) {
-          closest = { x: px, y: py };
-          minDist = d;
-        }
-      }
-      return closest;
-    },
-    [gridConfig.enabled, gridConfig.autoSnap, gridConfig.snapRadius, gridIntersections, getGridCenter],
+    [findNearestSquareCell],
   );
 
   useEffect(() => {
@@ -2061,7 +2200,7 @@ const NetworkGraph: React.FC = () => {
     const guide = getSelfCompanyGuide();
     if (!guide) return;
 
-    const step = Math.max(20, Number(gridConfig.radiusStep) || 120);
+    const step = Math.max(20, Number(gridConfig.cellSize) || 120);
     const placedLabelPoints: Array<{ x: number; y: number; r: number }> = [];
     const drawArcLabel = (text: string, radius: number, color: string) => {
       const normalized = text.trim();
@@ -2164,46 +2303,66 @@ const NetworkGraph: React.FC = () => {
     });
     ctx.setLineDash([]);
     ctx.restore();
-  }, [getSelfCompanyGuide, graph.nodes, gridConfig.radiusStep, guideConfig, nodeSize]);
+  }, [getSelfCompanyGuide, graph.nodes, gridConfig.cellSize, guideConfig, nodeSize]);
 
-  const drawRadialGrid = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
-    const { radialLines, ringCount, radiusStep } = gridConfig;
+  const drawSquareGrid = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
+    if (!gridConfig.enabled) return;
+    const cellSize = Math.max(24, Number(gridConfig.cellSize) || 120);
     const center = getGridCenter();
+    const halfW = graphSize.width / Math.max(2, 2 * scale);
+    const halfH = graphSize.height / Math.max(2, 2 * scale);
+    let nodeMinX = Infinity;
+    let nodeMaxX = -Infinity;
+    let nodeMinY = Infinity;
+    let nodeMaxY = -Infinity;
+    graph.nodes.forEach(node => {
+      const pos = nodePositionsRef.current.get(node.id);
+      const x = Number.isFinite(pos?.x) ? Number(pos?.x) : (Number.isFinite((node as any).x) ? Number((node as any).x) : null);
+      const y = Number.isFinite(pos?.y) ? Number(pos?.y) : (Number.isFinite((node as any).y) ? Number((node as any).y) : null);
+      if (x == null || y == null) return;
+      nodeMinX = Math.min(nodeMinX, x);
+      nodeMaxX = Math.max(nodeMaxX, x);
+      nodeMinY = Math.min(nodeMinY, y);
+      nodeMaxY = Math.max(nodeMaxY, y);
+    });
+    const hasNodeBounds = Number.isFinite(nodeMinX) && Number.isFinite(nodeMaxX) && Number.isFinite(nodeMinY) && Number.isFinite(nodeMaxY);
+    const minX = Math.min(center.x - halfW, hasNodeBounds ? nodeMinX : center.x - halfW) - cellSize * 4;
+    const maxX = Math.max(center.x + halfW, hasNodeBounds ? nodeMaxX : center.x + halfW) + cellSize * 4;
+    const minY = Math.min(center.y - halfH, hasNodeBounds ? nodeMinY : center.y - halfH) - cellSize * 4;
+    const maxY = Math.max(center.y + halfH, hasNodeBounds ? nodeMaxY : center.y + halfH) + cellSize * 4;
+    const startIx = Math.floor((minX - center.x) / cellSize);
+    const endIx = Math.ceil((maxX - center.x) / cellSize);
+    const startIy = Math.floor((minY - center.y) / cellSize);
+    const endIy = Math.ceil((maxY - center.y) / cellSize);
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
-    // 青緑系で白背景でも視認性を確保
     ctx.strokeStyle = GRID_RING_BASE_STROKE;
-    ctx.lineWidth = 0.6 / scale;
-    ctx.translate(center.x, center.y);
-    if (!HIDE_RING_VISUALS) {
-      for (let i = 1; i <= ringCount; i += 1) {
-        const r = i * radiusStep;
-        const emphasize = i >= 6 && i % 2 === 0;
-        ctx.strokeStyle = emphasize ? GRID_RING_ALT_STROKE : GRID_RING_BASE_STROKE;
-        ctx.lineWidth = 0.6 / scale;
-        ctx.beginPath();
-        ctx.arc(0, 0, r, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    ctx.strokeStyle = GRID_RING_BASE_STROKE;
-    const step = (Math.PI * 2) / Math.max(1, radialLines);
-    for (let i = 0; i < radialLines; i += 1) {
-      const angle = i * step;
-      const x = Math.cos(angle) * ringCount * radiusStep;
-      const y = Math.sin(angle) * ringCount * radiusStep;
+    ctx.lineWidth = Math.max(0.5 / scale, 0.4);
+    for (let ix = startIx; ix <= endIx; ix += 1) {
+      const x = center.x + ix * cellSize;
+      const emphasize = ix % 2 === 0;
+      ctx.strokeStyle = emphasize ? GRID_RING_ALT_STROKE : GRID_RING_BASE_STROKE;
       ctx.beginPath();
-      ctx.moveTo(0, 0);
-      ctx.lineTo(x, y);
+      ctx.moveTo(x, minY);
+      ctx.lineTo(x, maxY);
+      ctx.stroke();
+    }
+    for (let iy = startIy; iy <= endIy; iy += 1) {
+      const y = center.y + iy * cellSize;
+      const emphasize = iy % 2 === 0;
+      ctx.strokeStyle = emphasize ? GRID_RING_ALT_STROKE : GRID_RING_BASE_STROKE;
+      ctx.beginPath();
+      ctx.moveTo(minX, y);
+      ctx.lineTo(maxX, y);
       ctx.stroke();
     }
     ctx.restore();
-  }, [getGridCenter, gridConfig]);
+  }, [getGridCenter, graph.nodes, graphSize.height, graphSize.width, gridConfig.cellSize, gridConfig.enabled]);
 
   const drawPrivateArea = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
     if (HIDE_RING_VISUALS) return;
     const center = getLayoutCenter();
-    const radius = Math.max(40, gridConfig.radiusStep * PRIVATE_AREA_RING_COUNT);
+    const radius = Math.max(40, gridConfig.cellSize * PRIVATE_AREA_RING_COUNT);
     ctx.save();
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = PRIVATE_AREA_FILL;
@@ -2215,7 +2374,7 @@ const NetworkGraph: React.FC = () => {
     ctx.fill();
     ctx.stroke();
     ctx.restore();
-  }, [getLayoutCenter, gridConfig.radiusStep]);
+  }, [getLayoutCenter, gridConfig.cellSize]);
 
   const scheduleLayoutSave = useCallback(() => {
     if (saveLayoutTimerRef.current) {
@@ -2247,7 +2406,13 @@ const NetworkGraph: React.FC = () => {
           angles[key] = value;
         }
       });
-      const payload = { positions, labels, angles, fixed };
+      const companyMemberAngles: Record<string, number> = {};
+      companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
+        if (Number.isFinite(assignment.angle)) {
+          companyMemberAngles[contactId] = assignment.angle;
+        }
+      });
+      const payload = { positions, labels, angles, fixed, companyMemberAngles };
       try {
         localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(payload));
       } catch (error) {
@@ -2260,110 +2425,51 @@ const NetworkGraph: React.FC = () => {
     const prev = prevGridConfigRef.current;
     const changed =
       prev.enabled !== gridConfig.enabled
-      || prev.radialLines !== gridConfig.radialLines
-      || prev.ringCount !== gridConfig.ringCount
-      || prev.radiusStep !== gridConfig.radiusStep;
+      || prev.cellSize !== gridConfig.cellSize;
     if (!changed) return;
 
     if (!gridConfig.enabled) {
-      const nodesById = new Map(graph.nodes.map(node => [node.id, node as any]));
-      gridNodeKeyRef.current.forEach((_, nodeId) => {
-        const node = nodesById.get(nodeId);
-        if (!node || node.is_self) return;
-        node.fx = null;
-        node.fy = null;
-      });
-      gridNodeKeyRef.current.clear();
-      gridOccupancyRef.current.clear();
+      // 非表示時も固定は維持し、編集だけロックする
       prevGridConfigRef.current = { ...gridConfig };
       return;
     }
 
     const center = getGridCenter();
     const nodesById = new Map(graph.nodes.map(node => [node.id, node as any]));
-    const nextAssignments = new Map<string, { key: string; x: number; y: number }>();
-    const releasedIds = new Set<string>();
-    const lineCount = Math.max(1, gridConfig.radialLines);
-    gridNodeKeyRef.current.forEach((key, nodeId) => {
+    const cellSize = Math.max(24, Number(gridConfig.cellSize) || 120);
+    const nextKeyMap = new Map<string, string>();
+    const nextOccupancy = new Map<string, string>();
+    let changedAny = false;
+
+    Array.from(gridNodeKeyRef.current.entries()).forEach(([nodeId, key]) => {
       const node = nodesById.get(nodeId);
-      if (!node || node.is_self) {
-        releasedIds.add(nodeId);
+      if (!node || node.is_self || node.type === 'contact') {
         return;
       }
       const parts = key.split('_');
-      const ring = Number(parts[0]);
-      const line = Number(parts[1]);
-      if (!Number.isFinite(ring) || !Number.isFinite(line)) {
-        releasedIds.add(nodeId);
-        return;
+      let ix = Number(parts[0]);
+      let iy = Number(parts[1]);
+      if (!Number.isFinite(ix) || !Number.isFinite(iy)) {
+        const px = Number.isFinite(node.fx) ? Number(node.fx) : (Number.isFinite(node.x) ? Number(node.x) : center.x);
+        const py = Number.isFinite(node.fy) ? Number(node.fy) : (Number.isFinite(node.y) ? Number(node.y) : center.y);
+        ix = Math.round((px - center.x) / cellSize);
+        iy = Math.round((py - center.y) / cellSize);
       }
-      if (ring < 1 || ring > gridConfig.ringCount || line < 0 || line >= lineCount) {
-        releasedIds.add(nodeId);
-        return;
-      }
-      const angle = (line / lineCount) * Math.PI * 2;
-      const radius = ring * gridConfig.radiusStep;
-      const x = center.x + Math.cos(angle) * radius;
-      const y = center.y + Math.sin(angle) * radius;
-      nextAssignments.set(nodeId, { key: `${ring}_${line}`, x, y });
-    });
-
-    const isShrinking =
-      gridConfig.radiusStep < prev.radiusStep
-      || gridConfig.ringCount < prev.ringCount
-      || gridConfig.radialLines < prev.radialLines;
-    const collisionIds = new Set<string>();
-    const entries = Array.from(nextAssignments.entries());
-    if (isShrinking && entries.length >= 2) {
-      for (let i = 0; i < entries.length; i += 1) {
-        const [idA, posA] = entries[i];
-        const nodeA = nodesById.get(idA);
-        if (!nodeA) continue;
-        for (let j = i + 1; j < entries.length; j += 1) {
-          const [idB, posB] = entries[j];
-          const nodeB = nodesById.get(idB);
-          if (!nodeB) continue;
-          const dist = Math.hypot(posA.x - posB.x, posA.y - posB.y);
-          const rA = Math.sqrt(nodeSize(nodeA)) * NODE_REL_SIZE;
-          const rB = Math.sqrt(nodeSize(nodeB)) * NODE_REL_SIZE;
-          if (dist < rA + rB + 8) {
-            collisionIds.add(idA);
-            collisionIds.add(idB);
-          }
-        }
-      }
-    }
-
-    let changedAny = false;
-    gridOccupancyRef.current.clear();
-    const nextKeyMap = new Map<string, string>();
-    nextAssignments.forEach((pos, nodeId) => {
-      const node = nodesById.get(nodeId);
-      if (!node) return;
-      if (collisionIds.has(nodeId)) {
-        node.fx = null;
-        node.fy = null;
-        releasedIds.add(nodeId);
-        changedAny = true;
-        return;
-      }
-      node.x = pos.x;
-      node.y = pos.y;
+      const nextKey = `${ix}_${iy}`;
+      if (nextOccupancy.has(nextKey)) return;
+      const x = center.x + ix * cellSize;
+      const y = center.y + iy * cellSize;
+      node.x = x;
+      node.y = y;
       node.vx = 0;
       node.vy = 0;
-      node.fx = pos.x;
-      node.fy = pos.y;
-      gridOccupancyRef.current.set(pos.key, nodeId);
-      nextKeyMap.set(nodeId, pos.key);
+      node.fx = x;
+      node.fy = y;
+      nextKeyMap.set(nodeId, nextKey);
+      nextOccupancy.set(nextKey, nodeId);
       changedAny = true;
     });
-
-    releasedIds.forEach(nodeId => {
-      const node = nodesById.get(nodeId);
-      if (!node || node.is_self) return;
-      node.fx = null;
-      node.fy = null;
-    });
+    gridOccupancyRef.current = nextOccupancy;
     gridNodeKeyRef.current = nextKeyMap;
 
     if (changedAny) {
@@ -2376,10 +2482,7 @@ const NetworkGraph: React.FC = () => {
     graph.nodes,
     getGridCenter,
     gridConfig.enabled,
-    gridConfig.radialLines,
-    gridConfig.radiusStep,
-    gridConfig.ringCount,
-    nodeSize,
+    gridConfig.cellSize,
     scheduleLayoutSave,
   ]);
 
@@ -2393,7 +2496,27 @@ const NetworkGraph: React.FC = () => {
         labels?: Record<string, { x: number; y: number }>;
         angles?: Record<string, number>;
         fixed?: Record<string, boolean>;
+        companyMemberAngles?: Record<string, number>;
       };
+      if (parsed.companyMemberAngles) {
+        const nodeMap = new Map(graph.nodes.map(node => [node.id, node as any]));
+        Object.entries(parsed.companyMemberAngles).forEach(([contactId, savedAngle]) => {
+          if (!Number.isFinite(savedAngle)) return;
+          const assignment = companyMemberAssignmentsRef.current.get(contactId);
+          if (!assignment) return;
+          assignment.angle = Number(savedAngle);
+          const contactNode = nodeMap.get(contactId);
+          const companyNode = nodeMap.get(assignment.companyId);
+          if (!contactNode || !companyNode) return;
+          const companyX = Number.isFinite(companyNode.x) ? Number(companyNode.x) : 0;
+          const companyY = Number.isFinite(companyNode.y) ? Number(companyNode.y) : 0;
+          contactNode.x = companyX + Math.cos(assignment.angle) * assignment.radius;
+          contactNode.y = companyY + Math.sin(assignment.angle) * assignment.radius;
+          contactNode.vx = 0;
+          contactNode.vy = 0;
+          adjusted = true;
+        });
+      }
       const fixedNodeIds = new Set<string>(
         parsed.fixed ? Object.entries(parsed.fixed).filter(([, isFixed]) => isFixed).map(([nodeId]) => nodeId) : [],
       );
@@ -2464,41 +2587,82 @@ const NetworkGraph: React.FC = () => {
       labelAngleOverridesRef.current = new Map(
         Object.entries(parsed.angles ?? {}).map(([key, value]) => [key, value]),
       );
-      if (gridConfig.enabled && parsed.fixed) {
+      if (parsed.fixed) {
         const center = getGridCenter();
-        const points = getGridPoints(gridConfig);
+        const cellSize = Math.max(24, Number(gridConfig.cellSize) || 120);
         gridOccupancyRef.current.clear();
         gridNodeKeyRef.current.clear();
         graph.nodes.forEach(node => {
           if (!parsed.fixed?.[node.id]) return;
           if (companyMemberContactIdsRef.current.has(node.id)) return;
+          if (node.type === 'contact') return;
           const px = (node as any).fx ?? (node as any).x;
           const py = (node as any).fy ?? (node as any).y;
           if (!Number.isFinite(px) || !Number.isFinite(py)) return;
-          let bestKey: string | null = null;
+          const baseIx = Math.round((Number(px) - center.x) / cellSize);
+          const baseIy = Math.round((Number(py) - center.y) / cellSize);
+          let best: { key: string; x: number; y: number } | null = null;
           let bestDist = Infinity;
-          points.forEach(p => {
-            const dx = center.x + p.x - px;
-            const dy = center.y + p.y - py;
-            const d = Math.sqrt(dx * dx + dy * dy);
-            if (d < gridConfig.snapRadius && d < bestDist) {
-              bestDist = d;
-              bestKey = p.key;
+          for (let r = 0; r <= 12; r += 1) {
+            for (let dx = -r; dx <= r; dx += 1) {
+              for (let dy = -r; dy <= r; dy += 1) {
+                if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+                const ix = baseIx + dx;
+                const iy = baseIy + dy;
+                const key = `${ix}_${iy}`;
+                if (gridOccupancyRef.current.has(key)) continue;
+                const sx = center.x + ix * cellSize;
+                const sy = center.y + iy * cellSize;
+                const dist = Math.hypot(sx - Number(px), sy - Number(py));
+                if (dist < bestDist) {
+                  bestDist = dist;
+                  best = { key, x: sx, y: sy };
+                }
+              }
             }
-          });
-          if (bestKey && !gridOccupancyRef.current.has(bestKey)) {
-            gridOccupancyRef.current.set(bestKey, node.id);
-            gridNodeKeyRef.current.set(node.id, bestKey);
+            if (best) break;
+          }
+          if (best) {
+            const chosen = best as { key: string; x: number; y: number };
+            (node as any).x = chosen.x;
+            (node as any).y = chosen.y;
+            (node as any).vx = 0;
+            (node as any).vy = 0;
+            (node as any).fx = chosen.x;
+            (node as any).fy = chosen.y;
+            gridOccupancyRef.current.set(chosen.key, node.id);
+            gridNodeKeyRef.current.set(node.id, chosen.key);
           }
         });
       }
+      // 会社ノード座標の復元が終わった後に、氏名ノードを会社リング上へ再投影する。
+      // これを入れないと、リロード直後に旧会社座標基準の位置から一瞬補正されて見える。
+      const nodeMap = new Map(graph.nodes.map(node => [node.id, node as any]));
+      companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
+        const contactNode = nodeMap.get(contactId);
+        const companyNode = nodeMap.get(assignment.companyId);
+        if (!contactNode || !companyNode) return;
+        if (!Number.isFinite(companyNode.x) || !Number.isFinite(companyNode.y)) return;
+        const ringX = Number(companyNode.x) + Math.cos(assignment.angle) * assignment.radius;
+        const ringY = Number(companyNode.y) + Math.sin(assignment.angle) * assignment.radius;
+        if (!Number.isFinite(ringX) || !Number.isFinite(ringY)) return;
+        const prevX = Number(contactNode.x);
+        const prevY = Number(contactNode.y);
+        contactNode.x = ringX;
+        contactNode.y = ringY;
+        contactNode.vx = 0;
+        contactNode.vy = 0;
+        if (!Number.isFinite(prevX) || !Number.isFinite(prevY) || Math.hypot(prevX - ringX, prevY - ringY) > 0.5) {
+          adjusted = true;
+        }
+      });
       if (adjusted) {
         scheduleLayoutSave();
       }
     } catch (error) {
       console.warn('layout load failed', error);
     }
-  }, [graph.nodes, layoutEpoch, gridConfig.enabled, getGridCenter, getGridPoints, scheduleLayoutSave]);
+  }, [graph.nodes, layoutEpoch, gridConfig.cellSize, getGridCenter, scheduleLayoutSave]);
 
   const drawNodeLabel = useCallback((node: NodeObject, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const typed = node as GraphNode;
@@ -2527,8 +2691,24 @@ const NetworkGraph: React.FC = () => {
     ctx.shadowBlur = 4 / globalScale;
     ctx.shadowOffsetX = 0;
     ctx.shadowOffsetY = 1 / globalScale;
-    const textWidth = ctx.measureText(typed.label).width;
+    const companySplit = typed.type === 'company' ? splitCompanyLabelForDisplay(typed.label) : null;
+    const labelLines = companySplit
+      ? [companySplit.corporateType, companySplit.companyName]
+      : [typed.label];
+    const lineHeight = fontSize * 1.2;
+    const textHeight = labelLines.length === 1 ? fontSize : lineHeight * labelLines.length;
+    const textWidth = labelLines.reduce((maxWidth, line) => Math.max(maxWidth, ctx.measureText(line).width), 0);
     const padding = (3 * offsetFactor) / globalScale;
+    const drawLines = (cx: number, cy: number) => {
+      if (labelLines.length === 1) {
+        ctx.fillText(labelLines[0], cx, cy);
+        return;
+      }
+      const startY = cy - ((labelLines.length - 1) * lineHeight) / 2;
+      labelLines.forEach((line, index) => {
+        ctx.fillText(line, cx, startY + index * lineHeight);
+      });
+    };
     const overlaps = (box: { x: number; y: number; w: number; h: number; groupId?: string | null }) =>
       labelBoxesRef.current.some(existing =>
         box.x < existing.x + existing.w
@@ -2547,9 +2727,9 @@ const NetworkGraph: React.FC = () => {
     }
     const makeBox = (cx: number, cy: number) => ({
       x: cx - textWidth / 2 - padding,
-      y: cy - fontSize / 2 - padding,
+      y: cy - textHeight / 2 - padding,
       w: textWidth + padding * 2,
-      h: fontSize + padding * 2,
+      h: textHeight + padding * 2,
       groupId,
     });
     const ringAngle = labelAngleOverridesRef.current.get(typed.id)
@@ -2585,7 +2765,7 @@ const NetworkGraph: React.FC = () => {
         const hasOverlap = overlaps(box);
         if (!hasOverlap) {
           labelBoxesRef.current.push(box);
-          ctx.fillText(typed.label, cx, cy);
+          drawLines(cx, cy);
           placed = true;
           break;
         }
@@ -2600,7 +2780,7 @@ const NetworkGraph: React.FC = () => {
         );
         if (!overlapsDifferentCompany) {
           labelBoxesRef.current.push(box);
-          ctx.fillText(typed.label, cx, cy);
+          drawLines(cx, cy);
           placed = true;
           break;
         }
@@ -2872,62 +3052,21 @@ const NetworkGraph: React.FC = () => {
                       Grid表示
                     </label>
                     <label className="text-xs text-gray-600 flex items-center gap-1">
-                      <input
-                        type="checkbox"
-                        checked={gridConfig.autoSnap}
-                        onChange={event => setGridConfig((prev: typeof gridConfig) => ({ ...prev, autoSnap: event.target.checked }))}
-                      />
-                      Auto Snap
-                    </label>
-                    <label className="text-xs text-gray-600 flex items-center gap-1">
-                      線数
+                      セル
                       <input
                         type="number"
-                        min={4}
-                        max={100}
-                        step={1}
-                        value={gridConfig.radialLines}
-                        onChange={event => setGridConfig((prev: typeof gridConfig) => ({ ...prev, radialLines: Number(event.target.value) || 12 }))}
-                        className="w-16 border rounded px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label className="text-xs text-gray-600 flex items-center gap-1">
-                      リング
-                      <input
-                        type="number"
-                        min={2}
-                        max={80}
-                        step={1}
-                        value={gridConfig.ringCount}
-                        onChange={event => setGridConfig((prev: typeof gridConfig) => ({ ...prev, ringCount: Number(event.target.value) || 8 }))}
-                        className="w-16 border rounded px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label className="text-xs text-gray-600 flex items-center gap-1">
-                      間隔
-                      <input
-                        type="number"
-                        min={40}
+                        min={24}
                         max={320}
-                        step={10}
-                        value={gridConfig.radiusStep}
-                        onChange={event => setGridConfig((prev: typeof gridConfig) => ({ ...prev, radiusStep: Number(event.target.value) || 120 }))}
-                        className="w-16 border rounded px-2 py-1 text-xs"
-                      />
-                    </label>
-                    <label className="text-xs text-gray-600 flex items-center gap-1">
-                      吸着
-                      <input
-                        type="number"
-                        min={8}
-                        max={80}
-                        step={2}
-                        value={gridConfig.snapRadius}
-                        onChange={event => setGridConfig((prev: typeof gridConfig) => ({ ...prev, snapRadius: Number(event.target.value) || 30 }))}
+                        step={4}
+                        value={gridConfig.cellSize}
+                        onChange={event => setGridConfig((prev: typeof gridConfig) => ({ ...prev, cellSize: Number(event.target.value) || 120 }))}
                         className="w-16 border rounded px-2 py-1 text-xs"
                       />
                     </label>
                   </div>
+                  <p className="text-[11px] text-gray-500">
+                    Grid表示中に「個人以外」をドラッグするとセル固定。Grid非表示時は固定を維持したまま編集ロック。
+                  </p>
                 </div>
                 <div className="space-y-2 rounded border border-slate-200 bg-white p-2">
                   <p className="text-xs font-medium text-gray-700">距離区切り設定（赤線基準）</p>
@@ -3025,9 +3164,8 @@ const NetworkGraph: React.FC = () => {
               labelBoxesRef.current = [];
               zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
               const frameNodeById = new Map(graph.nodes.map(node => [node.id, node as any]));
-              const draggingId = draggingNodeIdRef.current;
+              const rotatingCompanyId = rotatingCompanyIdRef.current;
               companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
-                if (draggingId && draggingId === contactId) return;
                 const contactNode = frameNodeById.get(contactId);
                 const companyNode = frameNodeById.get(assignment.companyId);
                 if (!contactNode || !companyNode) return;
@@ -3039,8 +3177,13 @@ const NetworkGraph: React.FC = () => {
                 contactNode.y = ringY;
                 contactNode.vx = 0;
                 contactNode.vy = 0;
-                contactNode.fx = null;
-                contactNode.fy = null;
+                if (rotatingCompanyId && assignment.companyId === rotatingCompanyId) {
+                  contactNode.fx = ringX;
+                  contactNode.fy = ringY;
+                } else {
+                  contactNode.fx = null;
+                  contactNode.fy = null;
+                }
               });
               const nextPositions = new Map<string, { x: number; y: number }>();
               graph.nodes.forEach(node => {
@@ -3057,7 +3200,7 @@ const NetworkGraph: React.FC = () => {
             }}
             onRenderFramePost={(ctx, globalScale) => {
               if (gridConfig.enabled) {
-                drawRadialGrid(ctx, globalScale);
+                drawSquareGrid(ctx, globalScale);
               }
               drawDistanceGuides(ctx, globalScale);
             }}
@@ -3096,6 +3239,20 @@ const NetworkGraph: React.FC = () => {
             onNodeClick={handleNodeClick}
             onNodeDrag={(node: NodeObject) => {
               const typed = node as GraphNode;
+              if (!gridConfig.enabled && gridNodeKeyRef.current.has(typed.id)) {
+                const lockedNode = graphNodeById.get(typed.id) as any;
+                const fx = Number.isFinite(lockedNode?.fx) ? Number(lockedNode.fx) : Number((node as any).fx);
+                const fy = Number.isFinite(lockedNode?.fy) ? Number(lockedNode.fy) : Number((node as any).fy);
+                if (Number.isFinite(fx) && Number.isFinite(fy)) {
+                  (node as any).x = fx;
+                  (node as any).y = fy;
+                  (node as any).fx = fx;
+                  (node as any).fy = fy;
+                  (node as any).vx = 0;
+                  (node as any).vy = 0;
+                }
+                return;
+              }
               didDragNodeRef.current = true;
               if (typed.id != null) {
                 draggingNodeIdRef.current = String(typed.id);
@@ -3112,45 +3269,110 @@ const NetworkGraph: React.FC = () => {
               gridNodeKeyRef.current.delete(typed.id);
               fixedNodeIdsRef.current.delete(typed.id);
               relaxedNodeIdsRef.current.add(typed.id);
-              const currentX = Number((node as any).x);
-              const currentY = Number((node as any).y);
-              if (Number.isFinite(currentX) && Number.isFinite(currentY)) {
-                relaxedAnchorPositionsRef.current.set(typed.id, { x: currentX, y: currentY });
+              const rawCurrentX = Number((node as any).x);
+              const rawCurrentY = Number((node as any).y);
+              if (Number.isFinite(rawCurrentX) && Number.isFinite(rawCurrentY)) {
+                relaxedAnchorPositionsRef.current.set(typed.id, { x: rawCurrentX, y: rawCurrentY });
               }
-              const prev = dragLastPositionRef.current.get(typed.id);
+              let projectedDragPos: { x: number; y: number } | null = null;
+              const assignment = companyMemberAssignmentsRef.current.get(typed.id);
               if (
-                !gridConfig.enabled
-                && prev
-                && Number.isFinite(currentX)
-                && Number.isFinite(currentY)
+                assignment
+                && Number.isFinite(rawCurrentX)
+                && Number.isFinite(rawCurrentY)
               ) {
-                const dx = currentX - prev.x;
-                const dy = currentY - prev.y;
-                if (Math.abs(dx) + Math.abs(dy) > 0.01) {
-                  const followers = getDragFollowers(typed.id, 3);
-                  followers.forEach(({ id, depth }) => {
-                    const follower = graphNodeById.get(id) as any;
-                    if (!follower) return;
-                    if (follower.is_self) return;
-                    if (fixedNodeIdsRef.current.has(id)) return;
-                    const factor = depth === 1 ? 0.58 : depth === 2 ? 0.34 : 0.2;
-                    const mx = dx * factor;
-                    const my = dy * factor;
-                    if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
-                    follower.x += mx;
-                    follower.y += my;
-                    follower.vx = 0;
-                    follower.vy = 0;
-                    follower.ringAngle = Math.atan2(follower.y, follower.x);
-                    if (follower.fx != null && follower.fy != null) {
-                      follower.fx += mx;
-                      follower.fy += my;
-                    }
-                  });
+                const companyNode = graphNodeById.get(assignment.companyId) as any;
+                if (companyNode && Number.isFinite(companyNode.x) && Number.isFinite(companyNode.y)) {
+                  rotatingCompanyIdRef.current = assignment.companyId;
+                  const companyX = Number(companyNode.x);
+                  const companyY = Number(companyNode.y);
+                  const prev = dragLastPositionRef.current.get(typed.id);
+                  const normalizeDelta = (value: number) => {
+                    let result = value;
+                    while (result > Math.PI) result -= Math.PI * 2;
+                    while (result < -Math.PI) result += Math.PI * 2;
+                    return result;
+                  };
+                  const pointerDx = rawCurrentX - companyX;
+                  const pointerDy = rawCurrentY - companyY;
+                  const pointerDist = Math.hypot(pointerDx, pointerDy);
+                  const currentAngle = pointerDist > 1
+                    ? Math.atan2(pointerDy, pointerDx)
+                    : assignment.angle;
+                  let delta = 0;
+                  if (prev && Number.isFinite(prev.x) && Number.isFinite(prev.y)) {
+                    const prevAngle = Math.atan2(prev.y - companyY, prev.x - companyX);
+                    delta = normalizeDelta(currentAngle - prevAngle);
+                  } else {
+                    delta = normalizeDelta(currentAngle - assignment.angle);
+                  }
+                  if (Math.abs(delta) > 0.0001) {
+                    companyMemberAssignmentsRef.current.forEach((member, memberId) => {
+                      if (member.companyId !== assignment.companyId) return;
+                      member.angle += delta;
+                      const memberNode = graphNodeById.get(memberId) as any;
+                      if (!memberNode) return;
+                      const mx = companyX + Math.cos(member.angle) * member.radius;
+                      const my = companyY + Math.sin(member.angle) * member.radius;
+                      memberNode.x = mx;
+                      memberNode.y = my;
+                      memberNode.vx = 0;
+                      memberNode.vy = 0;
+                      memberNode.fx = mx;
+                      memberNode.fy = my;
+                      relaxedAnchorPositionsRef.current.set(memberId, { x: mx, y: my });
+                    });
+                  }
+                  const updated = companyMemberAssignmentsRef.current.get(typed.id) || assignment;
+                  const ringX = companyX + Math.cos(updated.angle) * updated.radius;
+                  const ringY = companyY + Math.sin(updated.angle) * updated.radius;
+                  (node as any).x = ringX;
+                  (node as any).y = ringY;
+                  (node as any).fx = ringX;
+                  (node as any).fy = ringY;
+                  projectedDragPos = { x: ringX, y: ringY };
+                  if (Number.isFinite(ringX) && Number.isFinite(ringY)) {
+                    relaxedAnchorPositionsRef.current.set(typed.id, { x: ringX, y: ringY });
+                  }
+                }
+              } else {
+                const prev = dragLastPositionRef.current.get(typed.id);
+                if (
+                  !gridConfig.enabled
+                  && prev
+                  && Number.isFinite(rawCurrentX)
+                  && Number.isFinite(rawCurrentY)
+                ) {
+                  const dx = rawCurrentX - prev.x;
+                  const dy = rawCurrentY - prev.y;
+                  if (Math.abs(dx) + Math.abs(dy) > 0.01) {
+                    const followers = getDragFollowers(typed.id, 3);
+                    followers.forEach(({ id, depth }) => {
+                      const follower = graphNodeById.get(id) as any;
+                      if (!follower) return;
+                      if (follower.is_self) return;
+                      if (fixedNodeIdsRef.current.has(id)) return;
+                      const factor = depth === 1 ? 0.58 : depth === 2 ? 0.34 : 0.2;
+                      const mx = dx * factor;
+                      const my = dy * factor;
+                      if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
+                      follower.x += mx;
+                      follower.y += my;
+                      follower.vx = 0;
+                      follower.vy = 0;
+                      follower.ringAngle = Math.atan2(follower.y, follower.x);
+                      if (follower.fx != null && follower.fy != null) {
+                        follower.fx += mx;
+                        follower.fy += my;
+                      }
+                    });
+                  }
                 }
               }
-              if (Number.isFinite(currentX) && Number.isFinite(currentY)) {
-                dragLastPositionRef.current.set(typed.id, { x: currentX, y: currentY });
+              if (projectedDragPos) {
+                dragLastPositionRef.current.set(typed.id, projectedDragPos);
+              } else if (Number.isFinite(rawCurrentX) && Number.isFinite(rawCurrentY)) {
+                dragLastPositionRef.current.set(typed.id, { x: rawCurrentX, y: rawCurrentY });
               }
               (node as any).vx = 0;
               (node as any).vy = 0;
@@ -3181,13 +3403,21 @@ const NetworkGraph: React.FC = () => {
                   (node as any).vx = 0;
                   (node as any).vy = 0;
                 }
+                companyMemberAssignmentsRef.current.forEach((member, memberId) => {
+                  if (member.companyId !== assignment.companyId) return;
+                  const memberNode = graphNodeById.get(memberId) as any;
+                  if (!memberNode) return;
+                  memberNode.fx = null;
+                  memberNode.fy = null;
+                });
+                rotatingCompanyIdRef.current = null;
                 relaxedNodeIdsRef.current.delete(typed.id);
                 relaxedAnchorPositionsRef.current.delete(typed.id);
               }
               if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) {
                 (node as any).ringAngle = Math.atan2((node as any).y, (node as any).x);
               }
-              if (gridConfig.enabled && gridConfig.autoSnap) {
+              if (gridConfig.enabled && typed.type !== 'contact') {
                 snapNodeToGrid(node as any, gridConfig);
                 if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) {
                   relaxedAnchorPositionsRef.current.set(typed.id, { x: Number((node as any).x), y: Number((node as any).y) });

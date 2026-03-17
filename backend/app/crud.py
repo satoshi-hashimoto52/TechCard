@@ -44,7 +44,10 @@ def create_contact(db: Session, contact: schemas.ContactCreate) -> models.Contac
 def get_contact(db: Session, contact_id: int) -> models.Contact:
     return (
         db.query(models.Contact)
-        .options(joinedload(models.Contact.company))
+        .options(
+            joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
+            joinedload(models.Contact.tags),
+        )
         .filter(models.Contact.id == contact_id)
         .first()
     )
@@ -52,7 +55,10 @@ def get_contact(db: Session, contact_id: int) -> models.Contact:
 def get_contacts(db: Session, skip: int = 0, limit: Optional[int] = None) -> List[models.Contact]:
     query = (
         db.query(models.Contact)
-        .options(joinedload(models.Contact.company))
+        .options(
+            joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
+            joinedload(models.Contact.tags),
+        )
         .offset(skip)
     )
     if limit is not None:

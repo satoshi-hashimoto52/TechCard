@@ -44,6 +44,8 @@ type CompanyTagResolveResponse = {
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
 const EVENT_TAG_SEPARATOR = ' / ';
+const TAG_TYPE_ORDER: Record<string, number> = { tech: 0, event: 1, relation: 2 };
+const TAG_NAME_COLLATOR = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
 
 const parseEventTagName = (rawName: string) => {
   const name = (rawName || '').trim();
@@ -72,6 +74,13 @@ const formatEventTagLabel = (name: string) => {
   if (!parsed) return name;
   return `#${parsed.top} / ${parsed.child}`;
 };
+
+const sortTagOptions = (tags: TagOption[]) =>
+  [...tags].sort((a, b) => {
+    const typeDiff = (TAG_TYPE_ORDER[a.type] ?? 99) - (TAG_TYPE_ORDER[b.type] ?? 99);
+    if (typeDiff !== 0) return typeDiff;
+    return TAG_NAME_COLLATOR.compare(a.name || '', b.name || '');
+  });
 
 type CameraCapabilities = MediaTrackCapabilities & {
   focusMode?: string[];
@@ -692,18 +701,7 @@ const ContactRegister: React.FC = () => {
         const tags = response.data
           .filter(tag => tag.name)
           .map(tag => ({ ...tag, type: normalizeType(tag.type) }));
-        tags.sort((a, b) => {
-          const typeOrder = (value: string) => {
-            if (value === 'tech') return 0;
-            if (value === 'event') return 1;
-            if (value === 'relation') return 2;
-            return 3;
-          };
-          const diff = typeOrder(a.type) - typeOrder(b.type);
-          if (diff !== 0) return diff;
-          return a.name.localeCompare(b.name, 'ja');
-        });
-        setAvailableTags(tags);
+        setAvailableTags(sortTagOptions(tags));
       })
       .catch(() => setAvailableTags([]));
   }, []);
@@ -1763,24 +1761,6 @@ const ContactRegister: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-3 flex-wrap">
                     <span className="text-sm font-medium text-gray-600">作成:</span>
-                    <input
-                      type="text"
-                      value={customTag}
-                      onChange={e => setCustomTag(e.target.value)}
-                      className="border rounded px-3 py-2 min-w-[140px] w-40"
-                      placeholder={newTagType === 'event' ? 'イベント下位名を入力' : 'タグを追加'}
-                    />
-                    {newTagType === 'event' && (
-                      <select
-                        value={eventTop}
-                        onChange={e => setEventTop(e.target.value as (typeof EVENT_TOP_LEVELS)[number])}
-                        className="border rounded px-2 py-2 text-sm bg-orange-50 text-orange-700 border-orange-300"
-                      >
-                        {EVENT_TOP_LEVELS.map(top => (
-                          <option key={top} value={top}>#{top}</option>
-                        ))}
-                      </select>
-                    )}
                     <select
                       value={newTagType}
                       onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
@@ -1796,6 +1776,24 @@ const ContactRegister: React.FC = () => {
                       <option value="event">タグ/イベント</option>
                       <option value="relation">タグ/関係</option>
                     </select>
+                    {newTagType === 'event' && (
+                      <select
+                        value={eventTop}
+                        onChange={e => setEventTop(e.target.value as (typeof EVENT_TOP_LEVELS)[number])}
+                        className="border rounded px-2 py-2 text-sm bg-orange-50 text-orange-700 border-orange-300"
+                      >
+                        {EVENT_TOP_LEVELS.map(top => (
+                          <option key={top} value={top}>#{top}</option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      type="text"
+                      value={customTag}
+                      onChange={e => setCustomTag(e.target.value)}
+                      className="border rounded px-3 py-2 min-w-[140px] w-40"
+                      placeholder={newTagType === 'event' ? 'イベント下位名を入力' : 'タグを追加'}
+                    />
                     <button
                       type="button"
                       onClick={() => {
@@ -1806,7 +1804,7 @@ const ContactRegister: React.FC = () => {
                         addTagToScope(normalized);
                         setAvailableTags(prev => {
                           if (prev.some(tag => tag.name === normalized)) return prev;
-                          return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
+                          return sortTagOptions([...prev, { id: Date.now(), name: normalized, type: newTagType }]);
                         });
                         setCustomTag('');
                       }}
@@ -1851,9 +1849,9 @@ const ContactRegister: React.FC = () => {
                             name: target.name,
                             type: manageTagType,
                           });
-                          setAvailableTags(prev =>
+                          setAvailableTags(prev => sortTagOptions(
                             prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
-                          );
+                          ));
                           setFlashMessage('タグ属性を更新しました。');
                         } catch (error) {
                           console.error('tag update failed', error);
@@ -1944,24 +1942,6 @@ const ContactRegister: React.FC = () => {
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
                     <span className="text-sm font-medium text-gray-600">作成:</span>
-                    <input
-                      type="text"
-                      value={customTag}
-                      onChange={e => setCustomTag(e.target.value)}
-                      className="border rounded px-3 py-2 min-w-[140px] w-40"
-                      placeholder={newTagType === 'event' ? 'イベント下位名を入力' : 'タグを追加'}
-                    />
-                    {newTagType === 'event' && (
-                      <select
-                        value={eventTop}
-                        onChange={e => setEventTop(e.target.value as (typeof EVENT_TOP_LEVELS)[number])}
-                        className="border rounded px-2 py-2 text-sm bg-orange-50 text-orange-700 border-orange-300"
-                      >
-                        {EVENT_TOP_LEVELS.map(top => (
-                          <option key={top} value={top}>#{top}</option>
-                        ))}
-                      </select>
-                    )}
                     <select
                       value={newTagType}
                       onChange={e => setNewTagType(e.target.value as 'tech' | 'event' | 'relation')}
@@ -1977,6 +1957,24 @@ const ContactRegister: React.FC = () => {
                       <option value="event">タグ/イベント</option>
                       <option value="relation">タグ/関係</option>
                     </select>
+                    {newTagType === 'event' && (
+                      <select
+                        value={eventTop}
+                        onChange={e => setEventTop(e.target.value as (typeof EVENT_TOP_LEVELS)[number])}
+                        className="border rounded px-2 py-2 text-sm bg-orange-50 text-orange-700 border-orange-300"
+                      >
+                        {EVENT_TOP_LEVELS.map(top => (
+                          <option key={top} value={top}>#{top}</option>
+                        ))}
+                      </select>
+                    )}
+                    <input
+                      type="text"
+                      value={customTag}
+                      onChange={e => setCustomTag(e.target.value)}
+                      className="border rounded px-3 py-2 min-w-[140px] w-40"
+                      placeholder={newTagType === 'event' ? 'イベント下位名を入力' : 'タグを追加'}
+                    />
                     <button
                       type="button"
                       onClick={() => {
@@ -1987,7 +1985,7 @@ const ContactRegister: React.FC = () => {
                         addTagToScope(normalized);
                         setAvailableTags(prev => {
                           if (prev.some(tag => tag.name === normalized)) return prev;
-                          return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
+                          return sortTagOptions([...prev, { id: Date.now(), name: normalized, type: newTagType }]);
                         });
                         setCustomTag('');
                       }}
@@ -2032,9 +2030,9 @@ const ContactRegister: React.FC = () => {
                             name: target.name,
                             type: manageTagType,
                           });
-                          setAvailableTags(prev =>
+                          setAvailableTags(prev => sortTagOptions(
                             prev.map(tag => (tag.id === target.id ? { ...tag, type: manageTagType } : tag)),
-                          );
+                          ));
                           setFlashMessage('タグ属性を更新しました。');
                         } catch (error) {
                           console.error('tag update failed', error);

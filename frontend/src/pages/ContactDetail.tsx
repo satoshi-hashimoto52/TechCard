@@ -13,7 +13,7 @@ interface Contact {
   address?: string;
   first_met_at?: string;
   branch?: string;
-  company?: { name: string };
+  company?: { name: string; tech_tags?: { name: string; type?: string }[] };
   tags: { name: string; type?: string }[];
   notes?: string;
   meetings: { timestamp: string; notes?: string }[];
@@ -93,6 +93,12 @@ const ContactDetail: React.FC = () => {
     if (!contact) return [];
     return contact.tags.filter(tag => !groupTagSet.has(tag.name.trim().toUpperCase()));
   }, [contact, groupTagSet]);
+  const companyTags = useMemo(() => {
+    if (!contact?.company?.tech_tags) return [];
+    return [...contact.company.tech_tags]
+      .filter(tag => Boolean(tag.name))
+      .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'ja'));
+  }, [contact]);
 
   if (!contact) return <div>読み込み中...</div>;
 
@@ -196,6 +202,15 @@ const ContactDetail: React.FC = () => {
         <p><strong>郵便番号:</strong> {contact.postal_code}</p>
         <p><strong>住所:</strong> {contact.address}</p>
         <p><strong>会社:</strong> {contact.company?.name}</p>
+        <div className="mt-2">
+          <strong>会社タグ:</strong>
+          {companyTags.map(tag => (
+            <span key={tag.name} className="bg-indigo-100 text-indigo-800 px-2 py-1 rounded mr-1">
+              {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
+            </span>
+          ))}
+          {companyTags.length === 0 && <span className="ml-2 text-sm text-gray-500">-</span>}
+        </div>
         <p><strong>メモ:</strong> {contact.notes || '-'}</p>
         <div className="mt-2">
           <strong>タグ:</strong>
