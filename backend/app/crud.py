@@ -1,6 +1,6 @@
 from sqlalchemy.orm import Session, joinedload
 from . import models, schemas
-from typing import List
+from typing import List, Optional
 
 # Company CRUD
 def create_company(db: Session, company: schemas.CompanyCreate) -> models.Company:
@@ -49,14 +49,15 @@ def get_contact(db: Session, contact_id: int) -> models.Contact:
         .first()
     )
 
-def get_contacts(db: Session, skip: int = 0, limit: int = 100) -> List[models.Contact]:
-    return (
+def get_contacts(db: Session, skip: int = 0, limit: Optional[int] = None) -> List[models.Contact]:
+    query = (
         db.query(models.Contact)
         .options(joinedload(models.Contact.company))
         .offset(skip)
-        .limit(limit)
-        .all()
     )
+    if limit is not None:
+        query = query.limit(limit)
+    return query.all()
 
 def update_contact(db: Session, contact_id: int, contact: schemas.ContactBase) -> models.Contact:
     db_contact = db.query(models.Contact).filter(models.Contact.id == contact_id).first()

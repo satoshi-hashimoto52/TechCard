@@ -111,7 +111,7 @@ const Contacts: React.FC = () => {
 
   useEffect(() => {
     Promise.all([
-      axios.get('http://localhost:8000/contacts/'),
+      axios.get('http://localhost:8000/contacts/', { params: { limit: 5000 } }),
       axios.get<CompanyGroup[]>('http://localhost:8000/company-groups'),
     ]).then(([contactResponse, groupResponse]) => {
       const nextContacts = contactResponse.data as Contact[];

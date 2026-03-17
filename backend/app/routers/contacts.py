@@ -196,7 +196,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
     return contact
 
 @router.get("/", response_model=list[schemas.ContactRead])
-def read_contacts(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+def read_contacts(skip: int = 0, limit: int | None = None, db: Session = Depends(get_db)):
     contacts = crud.get_contacts(db, skip=skip, limit=limit)
     return contacts
 
