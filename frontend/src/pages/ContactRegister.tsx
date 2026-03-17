@@ -33,6 +33,14 @@ type CompanyGroup = {
   name: string;
 };
 
+type CompanyTagResolveResponse = {
+  company_id: number | null;
+  group_id: number | null;
+  group_name: string | null;
+  company_tags: TagOption[];
+  group_tags: TagOption[];
+};
+
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 
 type CameraCapabilities = MediaTrackCapabilities & {
@@ -68,8 +76,13 @@ const ContactRegister: React.FC = () => {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [detectedTags, setDetectedTags] = useState<string[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [selectedCompanyTags, setSelectedCompanyTags] = useState<string[]>([]);
+  const [selectedGroupTags, setSelectedGroupTags] = useState<string[]>([]);
   const [initialTags, setInitialTags] = useState<string[]>([]);
   const [tagsTouched, setTagsTouched] = useState(false);
+  const [companyTagsTouched, setCompanyTagsTouched] = useState(false);
+  const [groupTagsTouched, setGroupTagsTouched] = useState(false);
+  const [tagScope, setTagScope] = useState<'contact' | 'company' | 'group'>('contact');
   const [customTag, setCustomTag] = useState('');
   const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
   const [selectedTagOption, setSelectedTagOption] = useState('');
@@ -77,6 +90,10 @@ const ContactRegister: React.FC = () => {
   const [manageTagId, setManageTagId] = useState<number | ''>('');
   const [manageTagType, setManageTagType] = useState<'tech' | 'event' | 'relation'>('tech');
   const [groupTagNames, setGroupTagNames] = useState<string[]>([]);
+  const [resolvedCompanyId, setResolvedCompanyId] = useState<number | null>(null);
+  const [resolvedGroupId, setResolvedGroupId] = useState<number | null>(null);
+  const [resolvedGroupName, setResolvedGroupName] = useState<string>('');
+  const resolveCompanySeqRef = useRef(0);
   const todayString = (() => {
     const today = new Date();
     const yyyy = today.getFullYear();
@@ -147,18 +164,36 @@ const ContactRegister: React.FC = () => {
     setForm(buildInitialForm());
     setDetectedTags([]);
     setSelectedTags([]);
+    setSelectedCompanyTags([]);
+    setSelectedGroupTags([]);
     setSelectedTagOption('');
     setCustomTag('');
     setTagsTouched(false);
+    setCompanyTagsTouched(false);
+    setGroupTagsTouched(false);
+    setTagScope('contact');
     setManageTagId('');
     setManageTagType('tech');
     setNewTagType('tech');
+    setResolvedCompanyId(null);
+    setResolvedGroupId(null);
+    setResolvedGroupName('');
     setOcrText(null);
     setSubmitError(null);
   };
 
   const handleChange = (field: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
     setForm(prev => ({ ...prev, [field]: event.target.value }));
+  };
+
+  const handleCompanyChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const value = event.target.value;
+    setForm(prev => ({ ...prev, company: value }));
+    setResolvedCompanyId(null);
+    setResolvedGroupId(null);
+    setResolvedGroupName('');
+    setCompanyTagsTouched(false);
+    setGroupTagsTouched(false);
   };
 
   const resizeImageFile = (inputFile: File) => {
@@ -676,14 +711,92 @@ const ContactRegister: React.FC = () => {
     () => availableTags.filter(tag => !isGroupTagName(tag.name)),
     [availableTags, isGroupTagName],
   );
+  const selectedTagsByScope = useMemo(() => {
+    if (tagScope === 'company') return selectedCompanyTags;
+    if (tagScope === 'group') return selectedGroupTags;
+    return selectedTags;
+  }, [selectedCompanyTags, selectedGroupTags, selectedTags, tagScope]);
+  const markScopeTouched = useCallback(() => {
+    if (tagScope === 'company') {
+      setCompanyTagsTouched(true);
+      return;
+    }
+    if (tagScope === 'group') {
+      setGroupTagsTouched(true);
+      return;
+    }
+    setTagsTouched(true);
+  }, [tagScope]);
+  const setSelectedTagsByScope = useCallback((updater: (prev: string[]) => string[]) => {
+    if (tagScope === 'company') {
+      setSelectedCompanyTags(updater);
+      return;
+    }
+    if (tagScope === 'group') {
+      setSelectedGroupTags(updater);
+      return;
+    }
+    setSelectedTags(updater);
+  }, [tagScope]);
+  const addTagToScope = useCallback((name: string) => {
+    const normalized = name.trim();
+    if (!normalized) return;
+    if (selectedTagsByScope.includes(normalized)) return;
+    markScopeTouched();
+    setSelectedTagsByScope(prev => [...prev, normalized]);
+  }, [markScopeTouched, selectedTagsByScope, setSelectedTagsByScope]);
   const visibleSelectedTags = useMemo(
-    () => selectedTags.filter(tag => !isGroupTagName(tag)),
-    [isGroupTagName, selectedTags],
+    () => selectedTagsByScope.filter(tag => !isGroupTagName(tag)),
+    [isGroupTagName, selectedTagsByScope],
   );
   const visibleDetectedTags = useMemo(
     () => detectedTags.filter(tag => !isGroupTagName(tag)),
     [detectedTags, isGroupTagName],
   );
+
+  useEffect(() => {
+    const companyName = form.company.trim();
+    const seq = resolveCompanySeqRef.current + 1;
+    resolveCompanySeqRef.current = seq;
+    if (!companyName) {
+      setResolvedCompanyId(null);
+      setResolvedGroupId(null);
+      setResolvedGroupName('');
+      if (!companyTagsTouched) setSelectedCompanyTags([]);
+      if (!groupTagsTouched) setSelectedGroupTags([]);
+      if (tagScope !== 'contact') setTagScope('contact');
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      axios.get<CompanyTagResolveResponse>('http://localhost:8000/companies/resolve', { params: { name: companyName } })
+        .then(response => {
+          if (resolveCompanySeqRef.current !== seq) return;
+          const resolved = response.data;
+          setResolvedCompanyId(resolved.company_id ?? null);
+          setResolvedGroupId(resolved.group_id ?? null);
+          setResolvedGroupName(resolved.group_name || '');
+          if (!companyTagsTouched) {
+            setSelectedCompanyTags((resolved.company_tags || []).map(tag => tag.name).filter(Boolean));
+          }
+          if (!groupTagsTouched) {
+            setSelectedGroupTags((resolved.group_tags || []).map(tag => tag.name).filter(Boolean));
+          }
+          if (!resolved.group_id && tagScope === 'group') {
+            setTagScope('contact');
+          }
+        })
+        .catch(() => {
+          if (resolveCompanySeqRef.current !== seq) return;
+          setResolvedCompanyId(null);
+          setResolvedGroupId(null);
+          setResolvedGroupName('');
+          if (!companyTagsTouched) setSelectedCompanyTags([]);
+          if (!groupTagsTouched) setSelectedGroupTags([]);
+          if (tagScope === 'group') setTagScope('contact');
+        });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [companyTagsTouched, form.company, groupTagsTouched, tagScope]);
 
   useEffect(() => {
     if (!isEdit || !id) return;
@@ -706,6 +819,9 @@ const ContactRegister: React.FC = () => {
       setSelectedTags((data.tags || []).map((tag: { name: string }) => tag.name));
       setInitialTags((data.tags || []).map((tag: { name: string }) => tag.name));
       setTagsTouched(false);
+      setCompanyTagsTouched(false);
+      setGroupTagsTouched(false);
+      setTagScope('contact');
       setDetectedTags([]);
       setCustomTag('');
     });
@@ -896,6 +1012,20 @@ const ContactRegister: React.FC = () => {
         type: normalizeTagType(found?.type),
       };
     });
+    const companyTagItems = selectedCompanyTags.map(name => {
+      const found = availableTags.find(tag => tag.name === name);
+      return {
+        name,
+        type: normalizeTagType(found?.type),
+      };
+    });
+    const groupTagItems = selectedGroupTags.map(name => {
+      const found = availableTags.find(tag => tag.name === name);
+      return {
+        name,
+        type: normalizeTagType(found?.type),
+      };
+    });
     const payload = {
       name: form.name,
       email: form.email || null,
@@ -909,6 +1039,8 @@ const ContactRegister: React.FC = () => {
       first_met_at: form.first_met_at || null,
       tags: tagsPayload,
       tag_items: tagItems,
+      company_tag_items: companyTagsTouched ? companyTagItems : null,
+      group_tag_items: resolvedGroupId && groupTagsTouched ? groupTagItems : null,
       notes: form.notes || null,
       card_filename: cardFilename,
       ocr_text: ocrText,
@@ -1381,7 +1513,7 @@ const ContactRegister: React.FC = () => {
               <input
                 type="text"
                 value={form.company}
-                onChange={handleChange('company')}
+                onChange={handleCompanyChange}
                 className="flex-[4] border rounded px-3 py-2"
                 placeholder="会社"
               />
@@ -1472,6 +1604,38 @@ const ContactRegister: React.FC = () => {
           <div className="flex items-start gap-4">
             <label className="w-32 text-sm font-medium pt-2">タグ</label>
             <div className="flex-1 space-y-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setTagScope('contact')}
+                  className={`px-3 py-1 rounded text-xs border ${tagScope === 'contact' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300'}`}
+                >
+                  個人
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTagScope('company')}
+                  disabled={!form.company.trim()}
+                  className={`px-3 py-1 rounded text-xs border disabled:opacity-40 ${tagScope === 'company' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300'}`}
+                >
+                  会社
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTagScope('group')}
+                  disabled={!resolvedGroupId}
+                  className={`px-3 py-1 rounded text-xs border disabled:opacity-40 ${tagScope === 'group' ? 'bg-slate-800 text-white border-slate-800' : 'bg-white text-slate-700 border-slate-300'}`}
+                >
+                  グループ企業
+                </button>
+                <span className="text-xs text-gray-500">
+                  {tagScope === 'contact'
+                    ? '個人タグ'
+                    : tagScope === 'company'
+                    ? `会社タグ: ${form.company || '-'}`
+                    : `グループタグ: ${resolvedGroupName || '-'}`}
+                </span>
+              </div>
               <div className="flex flex-wrap gap-2">
                 {visibleSelectedTags.map(tag => {
                   const tagType = visibleTags.find(item => item.name === tag)?.type;
@@ -1489,8 +1653,8 @@ const ContactRegister: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
-                        setTagsTouched(true);
-                        setSelectedTags(prev => prev.filter(item => item !== tag));
+                        markScopeTouched();
+                        setSelectedTagsByScope(prev => prev.filter(item => item !== tag));
                       }}
                       className={
                         tagType === 'relation'
@@ -1552,9 +1716,7 @@ const ContactRegister: React.FC = () => {
                       onClick={() => {
                         const normalized = selectedTagOption.trim();
                         if (!normalized) return;
-                        if (selectedTags.includes(normalized)) return;
-                        setTagsTouched(true);
-                        setSelectedTags(prev => [...prev, normalized]);
+                        addTagToScope(normalized);
                         setSelectedTagOption('');
                       }}
                       className="bg-blue-600 text-white px-3 py-2 rounded"
@@ -1591,9 +1753,7 @@ const ContactRegister: React.FC = () => {
                       onClick={() => {
                         const normalized = customTag.trim();
                         if (!normalized) return;
-                        if (selectedTags.includes(normalized)) return;
-                        setTagsTouched(true);
-                        setSelectedTags(prev => [...prev, normalized]);
+                        addTagToScope(normalized);
                         setAvailableTags(prev => {
                           if (prev.some(tag => tag.name === normalized)) return prev;
                           return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
@@ -1666,6 +1826,8 @@ const ContactRegister: React.FC = () => {
                           await axios.delete(`http://localhost:8000/tags/${target.id}`);
                           setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
                           setSelectedTags(prev => prev.filter(tag => tag !== target.name));
+                          setSelectedCompanyTags(prev => prev.filter(tag => tag !== target.name));
+                          setSelectedGroupTags(prev => prev.filter(tag => tag !== target.name));
                           setDetectedTags(prev => prev.filter(tag => tag !== target.name));
                           setManageTagId('');
                           setFlashMessage('タグを削除しました。');
@@ -1722,9 +1884,7 @@ const ContactRegister: React.FC = () => {
                       onClick={() => {
                         const normalized = selectedTagOption.trim();
                         if (!normalized) return;
-                        if (selectedTags.includes(normalized)) return;
-                        setTagsTouched(true);
-                        setSelectedTags(prev => [...prev, normalized]);
+                        addTagToScope(normalized);
                         setSelectedTagOption('');
                       }}
                       className="bg-blue-600 text-white px-3 py-2 rounded"
@@ -1761,9 +1921,7 @@ const ContactRegister: React.FC = () => {
                       onClick={() => {
                         const normalized = customTag.trim();
                         if (!normalized) return;
-                        if (selectedTags.includes(normalized)) return;
-                        setTagsTouched(true);
-                        setSelectedTags(prev => [...prev, normalized]);
+                        addTagToScope(normalized);
                         setAvailableTags(prev => {
                           if (prev.some(tag => tag.name === normalized)) return prev;
                           return [...prev, { id: Date.now(), name: normalized, type: newTagType }];
@@ -1836,6 +1994,8 @@ const ContactRegister: React.FC = () => {
                           await axios.delete(`http://localhost:8000/tags/${target.id}`);
                           setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
                           setSelectedTags(prev => prev.filter(tag => tag !== target.name));
+                          setSelectedCompanyTags(prev => prev.filter(tag => tag !== target.name));
+                          setSelectedGroupTags(prev => prev.filter(tag => tag !== target.name));
                           setDetectedTags(prev => prev.filter(tag => tag !== target.name));
                           setManageTagId('');
                           setFlashMessage('タグを削除しました。');

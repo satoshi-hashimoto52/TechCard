@@ -18,6 +18,45 @@ def get_db():
     finally:
         db.close()
 
+
+def _normalize_tag_type(value: str | None) -> str | None:
+    if not value:
+        return None
+    if value in ("tech", "technology"):
+        return "tech"
+    if value == "event":
+        return "event"
+    if value == "relation":
+        return "relation"
+    return value
+
+
+def _resolve_tag_items(db: Session, items: list[schemas.ContactTagItem]) -> list[models.Tag]:
+    resolved: list[models.Tag] = []
+    seen = set()
+    for item in items:
+        name = (item.name or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tag = (
+            db.query(models.Tag)
+            .filter(func.lower(models.Tag.name) == key)
+            .first()
+        )
+        normalized_type = _normalize_tag_type(item.type) or "tech"
+        if tag is None:
+            tag = models.Tag(name=name, type=normalized_type)
+            db.add(tag)
+            db.flush()
+        elif item.type and tag.type in (None, "technology"):
+            tag.type = normalized_type
+        resolved.append(tag)
+    return resolved
+
 def _unique_card_filename(db: Session, filename: str) -> str:
     if not filename:
         return filename
@@ -45,6 +84,8 @@ def _sync_company_tech_tags(db: Session, company_id: int | None) -> None:
     if not company:
         return
     tag_map = {}
+    for tag in company.tech_tags or []:
+        tag_map[tag.id] = tag
     for contact in company.contacts or []:
         for tag in contact.tech_tags or []:
             tag_map[tag.id] = tag
@@ -122,17 +163,6 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
     combined_tags: list[tuple[str, str | None]] = []
     seen = set()
 
-    def normalize_tag_type(value: str | None) -> str | None:
-        if not value:
-            return None
-        if value in ("tech", "technology"):
-            return "tech"
-        if value == "event":
-            return "event"
-        if value == "relation":
-            return "relation"
-        return value
-
     def add_tag_item(name: str, tag_type: str | None) -> None:
         normalized = name.strip()
         if not normalized:
@@ -141,7 +171,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
         if key in seen:
             return
         seen.add(key)
-        combined_tags.append((normalized, normalize_tag_type(tag_type)))
+        combined_tags.append((normalized, _normalize_tag_type(tag_type)))
 
     if payload.tag_items:
         for item in payload.tag_items:
@@ -159,7 +189,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
             .filter(func.lower(models.Tag.name) == tag_name.lower())
             .first()
         )
-        normalized_type = normalize_tag_type(tag_type) or "tech"
+        normalized_type = _normalize_tag_type(tag_type) or "tech"
         if tag is None:
             tag = models.Tag(name=tag_name, type=normalized_type)
             db.add(tag)
@@ -167,7 +197,7 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
         else:
             if tag_type and tag.type in (None, "technology"):
                 tag.type = normalized_type
-        effective_type = normalize_tag_type(tag.type) or normalized_type
+        effective_type = _normalize_tag_type(tag.type) or normalized_type
         if tag not in contact.tags:
             contact.tags.append(tag)
         if effective_type == "tech":
@@ -175,6 +205,18 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
                 contact.tech_tags.append(tag)
             if company is not None and tag not in company.tech_tags:
                 company.tech_tags.append(tag)
+
+    if company is not None and payload.company_tag_items is not None:
+        company.tech_tags = _resolve_tag_items(db, payload.company_tag_items)
+    if company is not None and company.group_id and payload.group_tag_items is not None:
+        group = (
+            db.query(models.CompanyGroup)
+            .options(joinedload(models.CompanyGroup.tags))
+            .filter(models.CompanyGroup.id == company.group_id)
+            .first()
+        )
+        if group is not None:
+            group.tags = _resolve_tag_items(db, payload.group_tag_items)
 
     if payload.card_filename:
         unique_filename = _unique_card_filename(db, payload.card_filename)
@@ -185,7 +227,8 @@ def register_contact(payload: schemas.ContactRegisterRequest, db: Session = Depe
         )
         db.add(business_card)
 
-    _sync_company_tech_tags(db, contact.company_id)
+    if payload.company_tag_items is None:
+        _sync_company_tech_tags(db, contact.company_id)
 
     try:
         db.commit()
@@ -269,17 +312,6 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
     combined_tags: list[tuple[str, str | None]] = []
     seen = set()
 
-    def normalize_tag_type(value: str | None) -> str | None:
-        if not value:
-            return None
-        if value in ("tech", "technology"):
-            return "tech"
-        if value == "event":
-            return "event"
-        if value == "relation":
-            return "relation"
-        return value
-
     def add_tag_item(name: str, tag_type: str | None) -> None:
         normalized = name.strip()
         if not normalized:
@@ -288,7 +320,7 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
         if key in seen:
             return
         seen.add(key)
-        combined_tags.append((normalized, normalize_tag_type(tag_type)))
+        combined_tags.append((normalized, _normalize_tag_type(tag_type)))
 
     if payload.tag_items:
         for item in payload.tag_items:
@@ -308,7 +340,7 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
             .filter(func.lower(models.Tag.name) == tag_name.lower())
             .first()
         )
-        normalized_type = normalize_tag_type(tag_type) or "tech"
+        normalized_type = _normalize_tag_type(tag_type) or "tech"
         if tag is None:
             tag = models.Tag(name=tag_name, type=normalized_type)
             db.add(tag)
@@ -316,7 +348,7 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
         else:
             if tag_type and tag.type in (None, "technology"):
                 tag.type = normalized_type
-        effective_type = normalize_tag_type(tag.type) or normalized_type
+        effective_type = _normalize_tag_type(tag.type) or normalized_type
         if tag not in db_contact.tags:
             db_contact.tags.append(tag)
         if effective_type == "tech":
@@ -324,6 +356,18 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
                 db_contact.tech_tags.append(tag)
             if company is not None and tag not in company.tech_tags:
                 company.tech_tags.append(tag)
+
+    if company is not None and payload.company_tag_items is not None:
+        company.tech_tags = _resolve_tag_items(db, payload.company_tag_items)
+    if company is not None and company.group_id and payload.group_tag_items is not None:
+        group = (
+            db.query(models.CompanyGroup)
+            .options(joinedload(models.CompanyGroup.tags))
+            .filter(models.CompanyGroup.id == company.group_id)
+            .first()
+        )
+        if group is not None:
+            group.tags = _resolve_tag_items(db, payload.group_tag_items)
 
     if payload.card_filename:
         unique_filename = _unique_card_filename(db, payload.card_filename)
@@ -334,9 +378,10 @@ def update_registered_contact(contact_id: int, payload: schemas.ContactRegisterR
         )
         db.add(business_card)
 
-    _sync_company_tech_tags(db, db_contact.company_id)
-    if old_company_id and old_company_id != db_contact.company_id:
-        _sync_company_tech_tags(db, old_company_id)
+    if payload.company_tag_items is None:
+        _sync_company_tech_tags(db, db_contact.company_id)
+        if old_company_id and old_company_id != db_contact.company_id:
+            _sync_company_tech_tags(db, old_company_id)
 
     try:
         db.commit()

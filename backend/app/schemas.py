@@ -14,6 +14,9 @@ class ContactTagItem(BaseModel):
     name: str
     type: Optional[str] = None
 
+class TagBindingRequest(BaseModel):
+    tag_items: List[ContactTagItem] = Field(default_factory=list)
+
 class TagRead(TagBase):
     id: int
 
@@ -104,6 +107,13 @@ class CompanyDetail(BaseModel):
 class CompanyGroupUpdate(BaseModel):
     group_id: Optional[int] = None
 
+class CompanyTagResolveResponse(BaseModel):
+    company_id: Optional[int] = None
+    group_id: Optional[int] = None
+    group_name: Optional[str] = None
+    company_tags: List[TagRead] = []
+    group_tags: List[TagRead] = []
+
 # BusinessCard schemas
 class BusinessCardBase(BaseModel):
     filename: str
@@ -175,6 +185,8 @@ class ContactRegisterRequest(BaseModel):
     company_name: Optional[str] = None
     tags: List[str] = Field(default_factory=list)
     tag_items: List[ContactTagItem] = Field(default_factory=list)
+    company_tag_items: Optional[List[ContactTagItem]] = None
+    group_tag_items: Optional[List[ContactTagItem]] = None
     notes: Optional[str] = None
     card_filename: Optional[str] = None
     ocr_text: Optional[str] = None

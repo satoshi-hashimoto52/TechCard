@@ -21,6 +21,12 @@ interface CompanyGroup {
   name: string;
 }
 
+type TagOption = {
+  id: number;
+  name: string;
+  type?: string;
+};
+
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 
 type SortOption = 'group' | 'prefecture' | 'company' | 'name' | 'tech';
@@ -33,6 +39,16 @@ const Contacts: React.FC = () => {
   const [expandedCompanies, setExpandedCompanies] = useState<Record<string, boolean>>({});
   const [sortOption, setSortOption] = useState<SortOption>('group');
   const [companyTechMap, setCompanyTechMap] = useState<Map<number, string[]>>(new Map());
+  const [availableTags, setAvailableTags] = useState<TagOption[]>([]);
+  const [tagEditorTarget, setTagEditorTarget] = useState<{ scope: 'company' | 'group'; id: number; name: string } | null>(null);
+  const [tagEditorDraft, setTagEditorDraft] = useState<string[]>([]);
+  const [tagEditorTypes, setTagEditorTypes] = useState<Record<string, string>>({});
+  const [tagEditorSelectedTag, setTagEditorSelectedTag] = useState('');
+  const [tagEditorCustomTag, setTagEditorCustomTag] = useState('');
+  const [tagEditorCustomType, setTagEditorCustomType] = useState<'tech' | 'event' | 'relation'>('tech');
+  const [tagEditorLoading, setTagEditorLoading] = useState(false);
+  const [tagEditorSaving, setTagEditorSaving] = useState(false);
+  const [tagEditorError, setTagEditorError] = useState<string | null>(null);
 
   const prefectures = [
     '北海道',
@@ -159,6 +175,14 @@ const Contacts: React.FC = () => {
   }, [location.state]);
 
   useEffect(() => {
+    axios.get<TagOption[]>('http://localhost:8000/tags')
+      .then(response => {
+        setAvailableTags((response.data || []).filter(tag => Boolean(tag.name)));
+      })
+      .catch(() => setAvailableTags([]));
+  }, []);
+
+  useEffect(() => {
     if (companyTechMap.size > 0) return;
     axios.get('http://localhost:8000/stats/network')
       .then(response => {
@@ -191,14 +215,19 @@ const Contacts: React.FC = () => {
   }, [companyTechMap]);
 
   const groupedEntries = useMemo(() => {
-    const grouped = new Map<string, Map<string, Contact[]>>();
+    const grouped = new Map<string, { groupId: number | null; companies: Map<string, Contact[]> }>();
     contacts.forEach(contact => {
-      const groupName = contact.company?.group_id ? groupNameMap.get(contact.company.group_id) || 'Other' : 'Other';
+      const groupId = contact.company?.group_id ?? null;
+      const groupName = groupId ? groupNameMap.get(groupId) || 'Other' : 'Other';
       const companyName = contact.company?.name?.trim() || '未設定';
       if (!grouped.has(groupName)) {
-        grouped.set(groupName, new Map());
+        grouped.set(groupName, { groupId, companies: new Map() });
       }
-      const companyMap = grouped.get(groupName) as Map<string, Contact[]>;
+      const groupBucket = grouped.get(groupName) as { groupId: number | null; companies: Map<string, Contact[]> };
+      if (!groupBucket.groupId && groupId) {
+        groupBucket.groupId = groupId;
+      }
+      const companyMap = groupBucket.companies;
       if (!companyMap.has(companyName)) {
         companyMap.set(companyName, []);
       }
@@ -221,8 +250,8 @@ const Contacts: React.FC = () => {
       return best || null;
     };
 
-    const groupEntries = Array.from(grouped.entries()).map(([groupName, companyMap]) => {
-      const companies = Array.from(companyMap.entries()).map(([company, items]) => {
+    const groupEntries = Array.from(grouped.entries()).map(([groupName, groupBucket]) => {
+      const companies = Array.from(groupBucket.companies.entries()).map(([company, items]) => {
         const sortedContacts = [...items].sort((a, b) => a.name.localeCompare(b.name, 'ja'));
         const postalCounts = new Map<string, number>();
         const addressCounts = new Map<string, number>();
@@ -244,6 +273,7 @@ const Contacts: React.FC = () => {
         const techKey = techList[0] || '';
         const nameKey = sortedContacts[0]?.name || '';
         return {
+          companyId: companyId ?? null,
           company,
           contacts: sortedContacts,
           postal_code: postalCode,
@@ -273,7 +303,7 @@ const Contacts: React.FC = () => {
         return a.company.localeCompare(b.company, 'ja');
       });
 
-      return { group: groupName, companies };
+      return { group: groupName, groupId: groupBucket.groupId, companies };
     });
 
     groupEntries.sort((a, b) => {
@@ -307,6 +337,193 @@ const Contacts: React.FC = () => {
       persistExpandedCompanies(next);
       return next;
     });
+  };
+
+  const openTagEditor = async (scope: 'company' | 'group', id: number, name: string) => {
+    setTagEditorTarget({ scope, id, name });
+    setTagEditorDraft([]);
+    setTagEditorTypes({});
+    setTagEditorSelectedTag('');
+    setTagEditorCustomTag('');
+    setTagEditorCustomType('tech');
+    setTagEditorError(null);
+    setTagEditorLoading(true);
+    try {
+      const url = scope === 'company'
+        ? `http://localhost:8000/companies/${id}/tags`
+        : `http://localhost:8000/company-groups/${id}/tags`;
+      const response = await axios.get<TagOption[]>(url);
+      const tags = response.data || [];
+      setTagEditorDraft(tags.map(tag => tag.name).filter(Boolean));
+      const nextTypes: Record<string, string> = {};
+      tags.forEach(tag => {
+        if (tag.name) nextTypes[tag.name] = tag.type || 'tech';
+      });
+      setTagEditorTypes(nextTypes);
+    } catch {
+      setTagEditorError('タグの取得に失敗しました。');
+    } finally {
+      setTagEditorLoading(false);
+    }
+  };
+
+  const closeTagEditor = () => {
+    setTagEditorTarget(null);
+    setTagEditorDraft([]);
+    setTagEditorTypes({});
+    setTagEditorSelectedTag('');
+    setTagEditorCustomTag('');
+    setTagEditorCustomType('tech');
+    setTagEditorError(null);
+    setTagEditorLoading(false);
+    setTagEditorSaving(false);
+  };
+
+  const addEditorTag = (name: string, fallbackType: string) => {
+    const normalized = name.trim();
+    if (!normalized) return;
+    if (tagEditorDraft.includes(normalized)) return;
+    setTagEditorDraft(prev => [...prev, normalized]);
+    setTagEditorTypes(prev => ({ ...prev, [normalized]: prev[normalized] || fallbackType }));
+  };
+
+  const removeEditorTag = (name: string) => {
+    setTagEditorDraft(prev => prev.filter(item => item !== name));
+    setTagEditorTypes(prev => {
+      const next = { ...prev };
+      delete next[name];
+      return next;
+    });
+  };
+
+  const saveTagEditor = async () => {
+    if (!tagEditorTarget) return;
+    setTagEditorSaving(true);
+    setTagEditorError(null);
+    try {
+      const payload = {
+        tag_items: tagEditorDraft.map(name => {
+          const known = availableTags.find(tag => tag.name === name);
+          let type = tagEditorTypes[name] || known?.type || 'tech';
+          if (type === 'technology') type = 'tech';
+          return { name, type };
+        }),
+      };
+      const url = tagEditorTarget.scope === 'company'
+        ? `http://localhost:8000/companies/${tagEditorTarget.id}/tags`
+        : `http://localhost:8000/company-groups/${tagEditorTarget.id}/tags`;
+      await axios.put(url, payload);
+      closeTagEditor();
+    } catch {
+      setTagEditorError('タグの保存に失敗しました。');
+    } finally {
+      setTagEditorSaving(false);
+    }
+  };
+
+  const renderTagEditor = () => {
+    if (!tagEditorTarget) return null;
+    return (
+      <div className="mt-3 rounded border border-blue-200 bg-blue-50 p-3 space-y-3">
+        <div className="flex items-center justify-between">
+          <div className="text-sm font-semibold text-blue-800">
+            {tagEditorTarget.scope === 'company' ? '会社タグ編集' : 'グループタグ編集'}: {tagEditorTarget.name}
+          </div>
+          <button
+            type="button"
+            onClick={closeTagEditor}
+            className="text-xs rounded border border-gray-300 bg-white px-2 py-1"
+          >
+            閉じる
+          </button>
+        </div>
+        {tagEditorError && <div className="text-sm text-red-600">{tagEditorError}</div>}
+        {tagEditorLoading ? (
+          <div className="text-sm text-gray-600">読み込み中...</div>
+        ) : (
+          <>
+            <div className="flex flex-wrap gap-2">
+              {tagEditorDraft.length === 0 && <span className="text-sm text-gray-500">タグ未設定</span>}
+              {tagEditorDraft.map(tag => (
+                <span key={tag} className="inline-flex items-center gap-2 rounded bg-white px-2 py-1 text-sm border border-blue-200">
+                  {tag}
+                  <button type="button" onClick={() => removeEditorTag(tag)} className="text-blue-700 hover:text-blue-900">×</button>
+                </span>
+              ))}
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <select
+                value={tagEditorSelectedTag}
+                onChange={event => setTagEditorSelectedTag(event.target.value)}
+                className="border rounded px-2 py-1 text-sm min-w-[180px]"
+              >
+                <option value="">既存タグを選択</option>
+                {availableTags.map(tag => (
+                  <option key={tag.id} value={tag.name}>{tag.name}</option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  const selected = tagEditorSelectedTag.trim();
+                  if (!selected) return;
+                  const target = availableTags.find(tag => tag.name === selected);
+                  addEditorTag(selected, target?.type === 'technology' ? 'tech' : (target?.type || 'tech'));
+                  setTagEditorSelectedTag('');
+                }}
+                className="rounded bg-blue-600 px-3 py-1 text-sm text-white"
+              >
+                追加
+              </button>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <input
+                type="text"
+                value={tagEditorCustomTag}
+                onChange={event => setTagEditorCustomTag(event.target.value)}
+                className="border rounded px-2 py-1 text-sm min-w-[180px]"
+                placeholder="新規タグ"
+              />
+              <select
+                value={tagEditorCustomType}
+                onChange={event => setTagEditorCustomType(event.target.value as 'tech' | 'event' | 'relation')}
+                className="border rounded px-2 py-1 text-sm"
+              >
+                <option value="tech">タグ/技術</option>
+                <option value="event">タグ/イベント</option>
+                <option value="relation">タグ/関係</option>
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  const custom = tagEditorCustomTag.trim();
+                  if (!custom) return;
+                  addEditorTag(custom, tagEditorCustomType);
+                  setTagEditorCustomTag('');
+                  setAvailableTags(prev => {
+                    if (prev.some(tag => tag.name === custom)) return prev;
+                    return [...prev, { id: Date.now(), name: custom, type: tagEditorCustomType }];
+                  });
+                }}
+                className="rounded bg-gray-800 px-3 py-1 text-sm text-white"
+              >
+                作成して追加
+              </button>
+            </div>
+            <div className="pt-1">
+              <button
+                type="button"
+                onClick={saveTagEditor}
+                disabled={tagEditorSaving}
+                className="rounded bg-emerald-600 px-3 py-1 text-sm text-white disabled:opacity-50"
+              >
+                {tagEditorSaving ? '保存中...' : '保存'}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
   };
 
   return (
@@ -356,6 +573,18 @@ const Contacts: React.FC = () => {
               </button>
               {expanded && (
                 <div className="border-t border-gray-200 p-4 space-y-6">
+                  {groupEntry.groupId && (
+                    <div className="flex justify-end">
+                      <button
+                        type="button"
+                        onClick={() => openTagEditor('group', groupEntry.groupId as number, groupLabel)}
+                        className="rounded border border-blue-200 bg-blue-50 px-3 py-1 text-xs text-blue-700 hover:bg-blue-100"
+                      >
+                        グループタグ編集
+                      </button>
+                    </div>
+                  )}
+                  {tagEditorTarget?.scope === 'group' && tagEditorTarget.id === groupEntry.groupId && renderTagEditor()}
                   {groupEntry.companies.map(companyEntry => {
                     const companyKey = `${groupEntry.group}::${companyEntry.company}`;
                     const companyExpanded = expandedCompanies[companyKey] ?? false;
@@ -384,10 +613,22 @@ const Contacts: React.FC = () => {
                         </button>
                         {companyExpanded && (
                           <div className="border-t border-gray-200 p-4">
-                            <div className="mb-3 text-xs text-gray-500 space-y-1">
-                              <div>〒：{companyEntry.postal_code || '-'}</div>
-                              <div>住所：{companyEntry.address || '-'}</div>
+                            <div className="mb-3 flex items-start justify-between gap-3">
+                              <div className="text-xs text-gray-500 space-y-1">
+                                <div>〒：{companyEntry.postal_code || '-'}</div>
+                                <div>住所：{companyEntry.address || '-'}</div>
+                              </div>
+                              {companyEntry.companyId && (
+                                <button
+                                  type="button"
+                                  onClick={() => openTagEditor('company', companyEntry.companyId as number, companyEntry.company)}
+                                  className="rounded border border-blue-200 bg-blue-50 px-3 py-1 text-xs text-blue-700 hover:bg-blue-100"
+                                >
+                                  会社タグ編集
+                                </button>
+                              )}
                             </div>
+                            {tagEditorTarget?.scope === 'company' && tagEditorTarget.id === companyEntry.companyId && renderTagEditor()}
                             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                               {companyEntry.contacts.map(contact => (
                                 <Link

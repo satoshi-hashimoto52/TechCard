@@ -15,6 +15,41 @@ def get_db():
         db.close()
 
 
+def _normalize_tag_type(value: str | None) -> str:
+    if not value:
+        return "tech"
+    if value in ("tech", "technology"):
+        return "tech"
+    if value == "event":
+        return "event"
+    if value == "relation":
+        return "relation"
+    return value
+
+
+def _resolve_tag_items(db: Session, items: list[schemas.ContactTagItem]) -> list[models.Tag]:
+    resolved: list[models.Tag] = []
+    seen: set[str] = set()
+    for item in items:
+        name = (item.name or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tag = db.query(models.Tag).filter(func.lower(models.Tag.name) == key).first()
+        normalized_type = _normalize_tag_type(item.type)
+        if tag is None:
+            tag = models.Tag(name=name, type=normalized_type)
+            db.add(tag)
+            db.flush()
+        elif item.type and tag.type in (None, "technology"):
+            tag.type = normalized_type
+        resolved.append(tag)
+    return resolved
+
+
 def _group_payload(group: models.CompanyGroup) -> schemas.CompanyGroupRead:
     return schemas.CompanyGroupRead(
         id=group.id,
@@ -23,6 +58,37 @@ def _group_payload(group: models.CompanyGroup) -> schemas.CompanyGroupRead:
         company_ids=[company.id for company in (group.companies or [])],
         aliases=[alias.alias for alias in (group.aliases or []) if alias.alias],
     )
+
+
+@router.get("/{group_id}/tags", response_model=list[schemas.TagRead])
+def read_group_tags(group_id: int, db: Session = Depends(get_db)):
+    group = (
+        db.query(models.CompanyGroup)
+        .options(joinedload(models.CompanyGroup.tags))
+        .filter(models.CompanyGroup.id == group_id)
+        .first()
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    tags = sorted(group.tags or [], key=lambda tag: tag.name or "")
+    return [schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in tags]
+
+
+@router.put("/{group_id}/tags", response_model=list[schemas.TagRead])
+def update_group_tags(group_id: int, payload: schemas.TagBindingRequest, db: Session = Depends(get_db)):
+    group = (
+        db.query(models.CompanyGroup)
+        .options(joinedload(models.CompanyGroup.tags))
+        .filter(models.CompanyGroup.id == group_id)
+        .first()
+    )
+    if not group:
+        raise HTTPException(status_code=404, detail="Group not found")
+    group.tags = _resolve_tag_items(db, payload.tag_items or [])
+    db.commit()
+    db.refresh(group)
+    tags = sorted(group.tags or [], key=lambda tag: tag.name or "")
+    return [schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in tags]
 
 
 @router.get("/", response_model=list[schemas.CompanyGroupRead])

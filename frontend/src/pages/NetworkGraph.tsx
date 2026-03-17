@@ -38,6 +38,9 @@ const SAVED_LAYOUT_RADIUS_PADDING = 120;
 const GRID_STORAGE_KEY = 'techcard_grid_config';
 const GUIDE_STORAGE_KEY = 'techcard_distance_guide_config';
 const HOVER_TOOLTIP_DELAY_MS = 220;
+const CUT_ALL_CONNECTIONS = true;
+const HIDE_RING_VISUALS = true;
+const ENABLE_NODE_HOVER_TOOLTIP = false;
 const defaultVisibleTypes = {
   contact: true,
   company: true,
@@ -89,7 +92,7 @@ type NodeObject = {
 type GraphLink = {
   source: string | { id: string };
   target: string | { id: string };
-  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'contact_tech' | 'relation' | 'company_relation' | 'group_contact' | 'company_event' | 'relation_event';
+  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'group_tech' | 'contact_tech' | 'tech_bridge' | 'relation' | 'company_relation' | 'group_contact' | 'company_event' | 'relation_event';
   count?: number;
 };
 
@@ -271,6 +274,8 @@ const NetworkGraph: React.FC = () => {
   const layoutSeedRef = useRef<number | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
   const draggingNodeIdRef = useRef<string | null>(null);
+  const hoveredNodeRef = useRef<GraphNode | null>(null);
+  const didDragNodeRef = useRef(false);
 
   const searchTypeLabel = useMemo(() => {
     if (searchType === 'tech') return '技術';
@@ -387,6 +392,9 @@ const NetworkGraph: React.FC = () => {
           return true;
         })
       : nodes;
+    if (CUT_ALL_CONNECTIONS) {
+      return { nodes: filteredNodes, links: [] };
+    }
     if (collapsed) {
       const contactCompany = new Map<string, string>();
       const techConnectedToSelf = new Set<string>();
@@ -462,7 +470,7 @@ const NetworkGraph: React.FC = () => {
         links.push(edge);
       });
       rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'company_tech' && edge.type !== 'contact_tech') return;
+        if (edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'contact_tech' && edge.type !== 'tech_bridge') return;
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
         const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
         if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
@@ -556,7 +564,7 @@ const NetworkGraph: React.FC = () => {
 
       const links: GraphLink[] = [];
       rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'company_group' && edge.type !== 'company_tech') return;
+        if (edge.type !== 'company_group' && edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'tech_bridge') return;
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
         const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
         if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
@@ -1839,6 +1847,7 @@ const NetworkGraph: React.FC = () => {
   }, [getLayoutCenter, graphNodeById]);
 
   const drawSelfCompanyRing = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
+    if (HIDE_RING_VISUALS) return;
     const guide = getSelfCompanyGuide();
     if (!guide) return;
     ctx.save();
@@ -1853,6 +1862,7 @@ const NetworkGraph: React.FC = () => {
   }, [getSelfCompanyGuide]);
 
   const drawDistanceGuides = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
+    if (HIDE_RING_VISUALS) return;
     if (!guideConfig.enabled) return;
     const guide = getSelfCompanyGuide();
     if (!guide) return;
@@ -1971,14 +1981,16 @@ const NetworkGraph: React.FC = () => {
     ctx.strokeStyle = GRID_RING_BASE_STROKE;
     ctx.lineWidth = 0.6 / scale;
     ctx.translate(center.x, center.y);
-    for (let i = 1; i <= ringCount; i += 1) {
-      const r = i * radiusStep;
-      const emphasize = i >= 6 && i % 2 === 0;
-      ctx.strokeStyle = emphasize ? GRID_RING_ALT_STROKE : GRID_RING_BASE_STROKE;
-      ctx.lineWidth = 0.6 / scale;
-      ctx.beginPath();
-      ctx.arc(0, 0, r, 0, Math.PI * 2);
-      ctx.stroke();
+    if (!HIDE_RING_VISUALS) {
+      for (let i = 1; i <= ringCount; i += 1) {
+        const r = i * radiusStep;
+        const emphasize = i >= 6 && i % 2 === 0;
+        ctx.strokeStyle = emphasize ? GRID_RING_ALT_STROKE : GRID_RING_BASE_STROKE;
+        ctx.lineWidth = 0.6 / scale;
+        ctx.beginPath();
+        ctx.arc(0, 0, r, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
     ctx.strokeStyle = GRID_RING_BASE_STROKE;
     const step = (Math.PI * 2) / Math.max(1, radialLines);
@@ -1995,6 +2007,7 @@ const NetworkGraph: React.FC = () => {
   }, [getGridCenter, gridConfig]);
 
   const drawPrivateArea = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
+    if (HIDE_RING_VISUALS) return;
     const center = getLayoutCenter();
     const radius = Math.max(40, gridConfig.radiusStep * PRIVATE_AREA_RING_COUNT);
     ctx.save();
@@ -2785,7 +2798,16 @@ const NetworkGraph: React.FC = () => {
         )}
       </div>
       <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] flex w-full overflow-hidden min-w-0">
-        <div ref={containerRef} className="flex-1 min-w-0 relative overflow-hidden">
+        <div
+          ref={containerRef}
+          className="flex-1 min-w-0 relative overflow-hidden"
+          onClickCapture={() => {
+            if (didDragNodeRef.current) return;
+            const hovered = hoveredNodeRef.current;
+            if (!hovered) return;
+            handleNodeClick(hovered as unknown as NodeObject);
+          }}
+        >
           {graphSize.width > 0 && graphSize.height > 0 && (
             <ForceGraph2D
               ref={graphRef}
@@ -2828,10 +2850,10 @@ const NetworkGraph: React.FC = () => {
               }
               drawDistanceGuides(ctx, globalScale);
             }}
-            nodeLabel={(node: NodeObject) => {
+            nodeLabel={ENABLE_NODE_HOVER_TOOLTIP ? ((node: NodeObject) => {
               const typed = node as GraphNode;
               return typed.label;
-            }}
+            }) : undefined}
               nodeColor={nodeColor}
               nodeVal={nodeSize}
               nodeCanvasObjectMode={() => 'after'}
@@ -2863,6 +2885,7 @@ const NetworkGraph: React.FC = () => {
             onNodeClick={handleNodeClick}
             onNodeDrag={(node: NodeObject) => {
               const typed = node as GraphNode;
+              didDragNodeRef.current = true;
               if (typed.id != null) {
                 draggingNodeIdRef.current = String(typed.id);
               }
@@ -2927,13 +2950,12 @@ const NetworkGraph: React.FC = () => {
               (node as any).fx = (node as any).x;
               (node as any).fy = (node as any).y;
             }}
-            onNodeDragEnd={(node: NodeObject, translate?: { x: number; y: number }) => {
+            onNodeDragEnd={(node: NodeObject) => {
               const typed = node as GraphNode;
               draggingNodeIdRef.current = null;
-              const moved = Math.hypot(Number(translate?.x) || 0, Number(translate?.y) || 0);
-              if (typed.id != null && moved <= 2) {
-                setSelectedNodeId(String(typed.id));
-              }
+              window.setTimeout(() => {
+                didDragNodeRef.current = false;
+              }, 0);
               if (typed.is_self) {
                 (node as any).x = 0;
                 (node as any).y = 0;
@@ -2961,6 +2983,16 @@ const NetworkGraph: React.FC = () => {
               scheduleLayoutSave();
             }}
             onNodeHover={(node: NodeObject | null) => {
+                hoveredNodeRef.current = (node as GraphNode | null) || null;
+                if (!ENABLE_NODE_HOVER_TOOLTIP) {
+                  if (hoverTimerRef.current != null) {
+                    window.clearTimeout(hoverTimerRef.current);
+                    hoverTimerRef.current = null;
+                  }
+                  setHoveredNode(null);
+                  setHoveredPos(null);
+                  return;
+                }
                 if (hoverTimerRef.current != null) {
                   window.clearTimeout(hoverTimerRef.current);
                   hoverTimerRef.current = null;
@@ -2984,7 +3016,7 @@ const NetworkGraph: React.FC = () => {
               }}
             />
           )}
-          {hoveredNode && hoveredPos && (
+          {ENABLE_NODE_HOVER_TOOLTIP && hoveredNode && hoveredPos && (
             <div
               className="absolute bg-gray-900 text-white text-sm px-3 py-2 rounded shadow space-y-1 pointer-events-none"
               style={{

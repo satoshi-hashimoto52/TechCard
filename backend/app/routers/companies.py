@@ -1,5 +1,6 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from .. import crud, models, schemas
 from ..database import SessionLocal
 
@@ -11,6 +12,98 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def _normalize_tag_type(value: str | None) -> str:
+    if not value:
+        return "tech"
+    if value in ("tech", "technology"):
+        return "tech"
+    if value == "event":
+        return "event"
+    if value == "relation":
+        return "relation"
+    return value
+
+
+def _resolve_tag_items(db: Session, items: list[schemas.ContactTagItem]) -> list[models.Tag]:
+    resolved: list[models.Tag] = []
+    seen: set[str] = set()
+    for item in items:
+        name = (item.name or "").strip()
+        if not name:
+            continue
+        key = name.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tag = db.query(models.Tag).filter(func.lower(models.Tag.name) == key).first()
+        normalized_type = _normalize_tag_type(item.type)
+        if tag is None:
+            tag = models.Tag(name=name, type=normalized_type)
+            db.add(tag)
+            db.flush()
+        elif item.type and tag.type in (None, "technology"):
+            tag.type = normalized_type
+        resolved.append(tag)
+    return resolved
+
+
+@router.get("/resolve", response_model=schemas.CompanyTagResolveResponse)
+def resolve_company(name: str = Query(...), db: Session = Depends(get_db)):
+    normalized = (name or "").strip()
+    if not normalized:
+        return schemas.CompanyTagResolveResponse()
+    company = (
+        db.query(models.Company)
+        .options(
+            joinedload(models.Company.tech_tags),
+            joinedload(models.Company.group).joinedload(models.CompanyGroup.tags),
+        )
+        .filter(func.lower(models.Company.name) == normalized.lower())
+        .first()
+    )
+    if not company:
+        return schemas.CompanyTagResolveResponse()
+    group = company.group
+    return schemas.CompanyTagResolveResponse(
+        company_id=company.id,
+        group_id=group.id if group else None,
+        group_name=group.name if group else None,
+        company_tags=[schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in (company.tech_tags or [])],
+        group_tags=[schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in (group.tags or [])] if group else [],
+    )
+
+
+@router.get("/{company_id}/tags", response_model=list[schemas.TagRead])
+def read_company_tags(company_id: int, db: Session = Depends(get_db)):
+    company = (
+        db.query(models.Company)
+        .options(joinedload(models.Company.tech_tags))
+        .filter(models.Company.id == company_id)
+        .first()
+    )
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+    tags = sorted(company.tech_tags or [], key=lambda tag: tag.name or "")
+    return [schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in tags]
+
+
+@router.put("/{company_id}/tags", response_model=list[schemas.TagRead])
+def update_company_tags(company_id: int, payload: schemas.TagBindingRequest, db: Session = Depends(get_db)):
+    company = (
+        db.query(models.Company)
+        .options(joinedload(models.Company.tech_tags))
+        .filter(models.Company.id == company_id)
+        .first()
+    )
+    if company is None:
+        raise HTTPException(status_code=404, detail="Company not found")
+    company.tech_tags = _resolve_tag_items(db, payload.tag_items or [])
+    db.commit()
+    db.refresh(company)
+    tags = sorted(company.tech_tags or [], key=lambda tag: tag.name or "")
+    return [schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in tags]
 
 @router.post("/", response_model=schemas.CompanyRead)
 def create_company(company: schemas.CompanyCreate, db: Session = Depends(get_db)):

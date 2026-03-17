@@ -129,7 +129,7 @@ def get_network(
     contacts = (
         db.query(models.Contact)
         .options(
-            joinedload(models.Contact.company).joinedload(models.Company.group),
+            joinedload(models.Contact.company).joinedload(models.Company.group).joinedload(models.CompanyGroup.tags),
             joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
             joinedload(models.Contact.tags),
             joinedload(models.Contact.tech_tags),
@@ -300,11 +300,24 @@ def get_network(
 
     # Tags
     relation_tag_counts: dict[int, int] = {}
-    tech_tag_company_counts: dict[int, set[int]] = {}
-    tech_tag_contact_counts: dict[int, int] = {}
+    contact_tech_tag_counts: dict[int, int] = {}
+    company_tech_tag_company_counts: dict[int, set[int]] = {}
+    company_tech_tag_group_counts: dict[int, set[int]] = {}
+
+    for company in companies:
+        for tag in company.tech_tags or []:
+            if normalize_tag_type(tag.type) != "tech":
+                continue
+            company_tech_tag_company_counts.setdefault(tag.id, set()).add(company.id)
+            if company.group_id:
+                company_tech_tag_group_counts.setdefault(tag.id, set()).add(company.group_id)
+        if company.group:
+            for tag in company.group.tags or []:
+                if normalize_tag_type(tag.type) != "tech":
+                    continue
+                company_tech_tag_group_counts.setdefault(tag.id, set()).add(company.group.id)
 
     for contact in contacts:
-        company_id = contact.company_id
         for tag in contact.tags or []:
             tag_type = normalize_tag_type(tag.type)
             if tag_type == "relation":
@@ -319,35 +332,53 @@ def get_network(
                 )
                 add_edge(f"contact_{contact.id}", f"relation_{tag.id}", "relation")
             elif tag_type == "tech":
-                tech_tag_contact_counts[tag.id] = tech_tag_contact_counts.get(tag.id, 0) + 1
-                add_edge(f"contact_{contact.id}", f"tech_{tag.id}", "contact_tech")
-                if company_id:
-                    tech_tag_company_counts.setdefault(tag.id, set()).add(company_id)
+                contact_tech_tag_counts[tag.id] = contact_tech_tag_counts.get(tag.id, 0) + 1
+                add_edge(f"contact_{contact.id}", f"tech_contact_{tag.id}", "contact_tech")
 
         for tag in contact.tech_tags or []:
             tag_type = normalize_tag_type(tag.type)
             if tag_type != "tech":
                 continue
-            tech_tag_contact_counts[tag.id] = tech_tag_contact_counts.get(tag.id, 0) + 1
-            add_edge(f"contact_{contact.id}", f"tech_{tag.id}", "contact_tech")
-            if company_id:
-                tech_tag_company_counts.setdefault(tag.id, set()).add(company_id)
+            contact_tech_tag_counts[tag.id] = contact_tech_tag_counts.get(tag.id, 0) + 1
+            add_edge(f"contact_{contact.id}", f"tech_contact_{tag.id}", "contact_tech")
 
-    all_tech_tag_ids = set(tech_tag_company_counts.keys()) | set(tech_tag_contact_counts.keys())
-    for tag_id in all_tech_tag_ids:
-        company_ids = tech_tag_company_counts.get(tag_id, set())
+    all_contact_tech_tag_ids = set(contact_tech_tag_counts.keys())
+    all_company_tech_tag_ids = set(company_tech_tag_company_counts.keys()) | set(company_tech_tag_group_counts.keys())
+
+    for tag_id in all_contact_tech_tag_ids:
         tag = tag_by_id.get(tag_id)
         label = tag.name if tag else ""
+        contact_label = f"{label} (個人)" if label else "個人タグ"
         add_node(
             {
-                "id": f"tech_{tag_id}",
+                "id": f"tech_contact_{tag_id}",
                 "type": "tech",
-                "label": label,
-                "size": max(len(company_ids), tech_tag_contact_counts.get(tag_id, 0), 1),
+                "label": contact_label,
+                "size": max(contact_tech_tag_counts.get(tag_id, 0), 1),
+            }
+        )
+
+    for tag_id in all_company_tech_tag_ids:
+        company_ids = company_tech_tag_company_counts.get(tag_id, set())
+        group_ids = company_tech_tag_group_counts.get(tag_id, set())
+        tag = tag_by_id.get(tag_id)
+        label = tag.name if tag else ""
+        company_label = f"{label} (会社)" if label else "会社タグ"
+        add_node(
+            {
+                "id": f"tech_company_{tag_id}",
+                "type": "tech",
+                "label": company_label,
+                "size": max(len(company_ids), len(group_ids), 1),
             }
         )
         for company_id in company_ids:
-            add_edge(f"company_{company_id}", f"tech_{tag_id}", "company_tech")
+            add_edge(f"company_{company_id}", f"tech_company_{tag_id}", "company_tech")
+        for group_id in group_ids:
+            add_edge(f"group_{group_id}", f"tech_company_{tag_id}", "group_tech")
+
+    for tag_id in all_contact_tech_tag_ids & all_company_tech_tag_ids:
+        add_edge(f"tech_company_{tag_id}", f"tech_contact_{tag_id}", "tech_bridge")
 
     return {"nodes": nodes, "edges": edges}
 

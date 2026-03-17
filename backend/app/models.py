@@ -23,6 +23,13 @@ company_tech_tags = Table(
     Column("tag_id", ForeignKey("tags.id"), primary_key=True),
 )
 
+company_group_tags = Table(
+    "company_group_tags",
+    Base.metadata,
+    Column("group_id", ForeignKey("company_groups.id"), primary_key=True),
+    Column("tag_id", ForeignKey("tags.id"), primary_key=True),
+)
+
 event_contacts = Table(
     "event_contacts",
     Base.metadata,
@@ -39,6 +46,7 @@ class CompanyGroup(Base):
 
     companies = relationship("Company", back_populates="group")
     aliases = relationship("CompanyGroupAlias", back_populates="group", cascade="all, delete-orphan")
+    tags = relationship("Tag", secondary=company_group_tags, back_populates="groups")
 
 
 class CompanyGroupAlias(Base):
@@ -109,6 +117,7 @@ class Tag(Base):
     contacts = relationship("Contact", secondary=contact_tags, back_populates="tags")
     tech_contacts = relationship("Contact", secondary=contact_tech_tags, back_populates="tech_tags")
     companies = relationship("Company", secondary=company_tech_tags, back_populates="tech_tags")
+    groups = relationship("CompanyGroup", secondary=company_group_tags, back_populates="tags")
 
 class Meeting(Base):
     __tablename__ = "meetings"
