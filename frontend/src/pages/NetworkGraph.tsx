@@ -29,6 +29,9 @@ const PRIVATE_AREA_STROKE = 'rgba(87, 166, 111, 0.32)';
 const GRID_RING_BASE_STROKE = 'rgba(70, 150, 170, 0.32)';
 const GRID_RING_ALT_STROKE = 'rgba(28, 120, 168, 0.52)';
 const SELF_COMPANY_RING_STROKE = 'rgba(239, 68, 68, 0.32)';
+const COMPANY_MEMBER_RING_STROKE = 'rgba(96, 165, 250, 0.28)';
+const COMPANY_MEMBER_RING_MIN_RADIUS = 92;
+const COMPANY_MEMBER_RING_MEMBER_GAP = 68;
 const LAYOUT_CHARGE_STRENGTH = -820;
 const LAYOUT_COLLIDE_RADIUS = 52;
 const CONNECTED_ANCHOR_RADIUS_RATIO = 0.82;
@@ -104,6 +107,14 @@ type GraphData = {
 type GraphView = {
   nodes: GraphNode[];
   links: GraphLink[];
+};
+
+type CompanyMemberAssignment = {
+  companyId: string;
+  angle: number;
+  radius: number;
+  index: number;
+  total: number;
 };
 
 type SearchType = 'tech' | 'company' | 'contact' | 'event';
@@ -276,6 +287,9 @@ const NetworkGraph: React.FC = () => {
   const draggingNodeIdRef = useRef<string | null>(null);
   const hoveredNodeRef = useRef<GraphNode | null>(null);
   const didDragNodeRef = useRef(false);
+  const companyMemberAssignmentsRef = useRef<Map<string, CompanyMemberAssignment>>(new Map());
+  const companyMemberRingsRef = useRef<Map<string, { radius: number; count: number }>>(new Map());
+  const companyMemberContactIdsRef = useRef<Set<string>>(new Set());
 
   const searchTypeLabel = useMemo(() => {
     if (searchType === 'tech') return '技術';
@@ -825,6 +839,75 @@ const NetworkGraph: React.FC = () => {
     return new Map(rawGraph.nodes.map(node => [node.id, node]));
   }, [rawGraph.nodes]);
 
+  const companyMemberLayout = useMemo(() => {
+    const companyIds = new Set(
+      graph.nodes
+        .filter(node => node.type === 'company')
+        .map(node => node.id),
+    );
+    const employmentByContact = new Map<string, string>();
+    rawGraph.edges.forEach(edge => {
+      if (edge.type !== 'employment') return;
+      const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+      const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+      const companyId = sourceId.startsWith('company_')
+        ? sourceId
+        : targetId.startsWith('company_')
+        ? targetId
+        : null;
+      const contactId = sourceId.startsWith('contact_')
+        ? sourceId
+        : targetId.startsWith('contact_')
+        ? targetId
+        : null;
+      if (!companyId || !contactId) return;
+      employmentByContact.set(contactId, companyId);
+    });
+
+    const membersByCompany = new Map<string, GraphNode[]>();
+    graph.nodes.forEach(node => {
+      if (node.type !== 'contact' || node.is_self) return;
+      const typed = node as GraphNode;
+      const preferredCompanyId = typed.company_node_id;
+      const employmentCompanyId = employmentByContact.get(typed.id) || null;
+      const companyId = preferredCompanyId && companyIds.has(preferredCompanyId)
+        ? preferredCompanyId
+        : employmentCompanyId && companyIds.has(employmentCompanyId)
+          ? employmentCompanyId
+          : null;
+      if (!companyId) return;
+      const list = membersByCompany.get(companyId) || [];
+      list.push(typed);
+      membersByCompany.set(companyId, list);
+    });
+
+    const contactAssignments = new Map<string, CompanyMemberAssignment>();
+    const companyRings = new Map<string, { radius: number; count: number }>();
+    membersByCompany.forEach((members, companyId) => {
+      const ordered = [...members].sort((a, b) => (a.label || a.id).localeCompare(b.label || b.id));
+      const total = ordered.length;
+      if (total === 0) return;
+      const circumference = Math.max(3, total) * COMPANY_MEMBER_RING_MEMBER_GAP;
+      const radius = Math.max(COMPANY_MEMBER_RING_MIN_RADIUS, circumference / (Math.PI * 2));
+      companyRings.set(companyId, { radius, count: total });
+      ordered.forEach((member, index) => {
+        const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
+        contactAssignments.set(member.id, {
+          companyId,
+          angle,
+          radius,
+          index,
+          total,
+        });
+      });
+    });
+    return {
+      contactAssignments,
+      companyRings,
+      contactIds: new Set(contactAssignments.keys()),
+    };
+  }, [graph.nodes, rawGraph.edges]);
+
   const contactRelations = useMemo(() => {
     const map = new Map<string, string[]>();
     rawGraph.edges.forEach(edge => {
@@ -1123,8 +1206,19 @@ const NetworkGraph: React.FC = () => {
     }
     selfNodeIdRef.current = selfNode.id;
     selfCompanyNodeIdRef.current = selfNode.company_node_id ?? null;
+    companyMemberAssignmentsRef.current = companyMemberLayout.contactAssignments;
+    companyMemberRingsRef.current = companyMemberLayout.companyRings;
+    companyMemberContactIdsRef.current = companyMemberLayout.contactIds;
 
     const nodesById = new Map(graph.nodes.map(node => [node.id, node]));
+    companyMemberLayout.contactIds.forEach(contactId => {
+      const node = nodesById.get(contactId) as any;
+      if (!node) return;
+      node.fx = null;
+      node.fy = null;
+      fixedNodeIdsRef.current.delete(contactId);
+      relaxedNodeIdsRef.current.delete(contactId);
+    });
     const nodeTypeById = new Map(graph.nodes.map(node => [node.id, node.type]));
     const adjacency = new Map<string, Set<string>>();
     graph.links.forEach(link => {
@@ -1362,6 +1456,28 @@ const NetworkGraph: React.FC = () => {
       });
     });
 
+    companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
+      const companyNode = nodesById.get(assignment.companyId) as any;
+      const contactNode = nodesById.get(contactId) as any;
+      if (!companyNode || !contactNode) return;
+      const companyX = Number.isFinite(companyNode.x)
+        ? companyNode.x
+        : Math.cos(Number(companyNode.ringAngle) || 0) * Math.max(1, Number(companyNode.depth) || defaultHop) * DEPTH_LAYOUT_RADIUS_STEP;
+      const companyY = Number.isFinite(companyNode.y)
+        ? companyNode.y
+        : Math.sin(Number(companyNode.ringAngle) || 0) * Math.max(1, Number(companyNode.depth) || defaultHop) * DEPTH_LAYOUT_RADIUS_STEP;
+      const targetX = companyX + Math.cos(assignment.angle) * assignment.radius;
+      const targetY = companyY + Math.sin(assignment.angle) * assignment.radius;
+      const shouldReset = layoutSeedRef.current != null;
+      if (!Number.isFinite(contactNode.x) || !Number.isFinite(contactNode.y) || shouldReset) {
+        contactNode.x = targetX;
+        contactNode.y = targetY;
+      }
+      contactNode.companyRingCompanyId = assignment.companyId;
+      contactNode.companyRingAngle = assignment.angle;
+      contactNode.companyRingRadius = assignment.radius;
+    });
+
     if (!Number.isFinite((selfNode as any).x) || !Number.isFinite((selfNode as any).y)) {
       (selfNode as any).x = 0;
       (selfNode as any).y = 0;
@@ -1431,6 +1547,7 @@ const NetworkGraph: React.FC = () => {
           const targetY = Math.sin(baseAngle) * targetRadius;
           let nodePull = isConnectedToSelf ? pull : pull * 0.85;
           if (node.type === 'contact') {
+            if (companyMemberContactIdsRef.current.has(String(node.id))) return;
             nodePull *= 0.22;
           }
           node.vx = (node.vx || 0) + (targetX - currentX) * nodePull;
@@ -1439,6 +1556,32 @@ const NetworkGraph: React.FC = () => {
       };
       (force as any).initialize = (nextNodes: any[]) => {
         nodes = nextNodes;
+      };
+      return force;
+    };
+
+    const companyMemberRingForce = (strength = 0.24) => {
+      let nodeMap = new Map<string, any>();
+      const force = (alpha: number) => {
+        const pull = Math.max(0, alpha) * strength;
+        if (!pull) return;
+        companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
+          const contactNode = nodeMap.get(contactId);
+          const companyNode = nodeMap.get(assignment.companyId);
+          if (!contactNode || !companyNode) return;
+          if ((contactNode.fx != null && contactNode.fy != null) || contactNode.id === selfNode.id) return;
+          const companyX = Number.isFinite(companyNode.x) ? companyNode.x : 0;
+          const companyY = Number.isFinite(companyNode.y) ? companyNode.y : 0;
+          const currentX = Number.isFinite(contactNode.x) ? contactNode.x : companyX;
+          const currentY = Number.isFinite(contactNode.y) ? contactNode.y : companyY;
+          const targetX = companyX + Math.cos(assignment.angle) * assignment.radius;
+          const targetY = companyY + Math.sin(assignment.angle) * assignment.radius;
+          contactNode.vx = (contactNode.vx || 0) + (targetX - currentX) * pull;
+          contactNode.vy = (contactNode.vy || 0) + (targetY - currentY) * pull;
+        });
+      };
+      (force as any).initialize = (nextNodes: any[]) => {
+        nodeMap = new Map(nextNodes.map(node => [String(node.id), node]));
       };
       return force;
     };
@@ -1484,6 +1627,7 @@ const NetworkGraph: React.FC = () => {
     fg.d3Force('depth', null);
     fg.d3Force('align', null);
     fg.d3Force('company-cluster', null);
+    fg.d3Force('company-member-ring', companyMemberRingForce(0.46));
     fg.d3Force('collide', collideForce(LAYOUT_COLLIDE_RADIUS));
 
     if (typeof (fg as any).cooldownTicks === 'function') {
@@ -1507,7 +1651,7 @@ const NetworkGraph: React.FC = () => {
     if (layoutSeedRef.current != null) {
       layoutSeedRef.current = null;
     }
-  }, [graph, nodeDegreeMap, layoutEpoch]);
+  }, [graph, nodeDegreeMap, layoutEpoch, companyMemberLayout]);
 
   const applySearch = (value: string, type: typeof searchType) => {
     const trimmed = value.trim();
@@ -1861,6 +2005,24 @@ const NetworkGraph: React.FC = () => {
     ctx.restore();
   }, [getSelfCompanyGuide]);
 
+  const drawCompanyMemberRings = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
+    const rings = companyMemberRingsRef.current;
+    if (!rings.size) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.strokeStyle = COMPANY_MEMBER_RING_STROKE;
+    ctx.lineWidth = Math.max(1.4 / scale, 0.6);
+    rings.forEach((ring, companyId) => {
+      if (!Number.isFinite(ring.radius) || ring.radius <= 8) return;
+      const pos = nodePositionsRef.current.get(companyId);
+      if (!pos) return;
+      ctx.beginPath();
+      ctx.arc(pos.x, pos.y, ring.radius, 0, Math.PI * 2);
+      ctx.stroke();
+    });
+    ctx.restore();
+  }, []);
+
   const drawDistanceGuides = useCallback((ctx: CanvasRenderingContext2D, scale: number) => {
     if (HIDE_RING_VISUALS) return;
     if (!guideConfig.enabled) return;
@@ -2031,6 +2193,7 @@ const NetworkGraph: React.FC = () => {
       const positions: Record<string, { x: number; y: number }> = {};
       const fixed: Record<string, boolean> = {};
       graph.nodes.forEach(node => {
+        if (companyMemberContactIdsRef.current.has(node.id)) return;
         const nx = (node as any).x;
         const ny = (node as any).y;
         if (Number.isFinite(nx) && Number.isFinite(ny)) {
@@ -2202,8 +2365,12 @@ const NetworkGraph: React.FC = () => {
       const fixedNodeIds = new Set<string>(
         parsed.fixed ? Object.entries(parsed.fixed).filter(([, isFixed]) => isFixed).map(([nodeId]) => nodeId) : [],
       );
+      companyMemberContactIdsRef.current.forEach(nodeId => {
+        fixedNodeIds.delete(nodeId);
+      });
       if (parsed.positions) {
         graph.nodes.forEach(node => {
+          if (companyMemberContactIdsRef.current.has(node.id)) return;
           const saved = parsed.positions?.[node.id];
           if (!saved) return;
           if (Number.isFinite(saved.x) && Number.isFinite(saved.y)) {
@@ -2223,6 +2390,7 @@ const NetworkGraph: React.FC = () => {
       const anchorY = Number.isFinite((selfNode as any)?.y) ? Number((selfNode as any).y) : 0;
       graph.nodes.forEach(node => {
         if (node.id === selfNode?.id) return;
+        if (companyMemberContactIdsRef.current.has(node.id)) return;
         if (fixedNodeIds.has(node.id)) return;
         if (relaxedNodeIdsRef.current.has(node.id)) return;
         let nx = (node as any).x;
@@ -2271,6 +2439,7 @@ const NetworkGraph: React.FC = () => {
         gridNodeKeyRef.current.clear();
         graph.nodes.forEach(node => {
           if (!parsed.fixed?.[node.id]) return;
+          if (companyMemberContactIdsRef.current.has(node.id)) return;
           const px = (node as any).fx ?? (node as any).x;
           const py = (node as any).fy ?? (node as any).y;
           if (!Number.isFinite(px) || !Number.isFinite(py)) return;
@@ -2823,6 +2992,24 @@ const NetworkGraph: React.FC = () => {
             onRenderFramePre={(ctx, globalScale) => {
               labelBoxesRef.current = [];
               zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
+              const frameNodeById = new Map(graph.nodes.map(node => [node.id, node as any]));
+              const draggingId = draggingNodeIdRef.current;
+              companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
+                if (draggingId && draggingId === contactId) return;
+                const contactNode = frameNodeById.get(contactId);
+                const companyNode = frameNodeById.get(assignment.companyId);
+                if (!contactNode || !companyNode) return;
+                const companyX = Number.isFinite(companyNode.x) ? companyNode.x : 0;
+                const companyY = Number.isFinite(companyNode.y) ? companyNode.y : 0;
+                const ringX = companyX + Math.cos(assignment.angle) * assignment.radius;
+                const ringY = companyY + Math.sin(assignment.angle) * assignment.radius;
+                contactNode.x = ringX;
+                contactNode.y = ringY;
+                contactNode.vx = 0;
+                contactNode.vy = 0;
+                contactNode.fx = null;
+                contactNode.fy = null;
+              });
               const nextPositions = new Map<string, { x: number; y: number }>();
               graph.nodes.forEach(node => {
                 const typed = node as GraphNode;
@@ -2843,6 +3030,7 @@ const NetworkGraph: React.FC = () => {
               nodePositionsRef.current = nextPositions;
               drawSelfCompanyRing(ctx, globalScale);
               drawPrivateArea(ctx, globalScale);
+              drawCompanyMemberRings(ctx, globalScale);
             }}
             onRenderFramePost={(ctx, globalScale) => {
               if (gridConfig.enabled) {
@@ -2969,6 +3157,17 @@ const NetworkGraph: React.FC = () => {
               fixedNodeIdsRef.current.delete(typed.id);
               (node as any).fx = null;
               (node as any).fy = null;
+              const assignment = companyMemberAssignmentsRef.current.get(typed.id);
+              if (assignment) {
+                const companyNode = graphNodeById.get(assignment.companyId) as any;
+                if (companyNode && Number.isFinite(companyNode.x) && Number.isFinite(companyNode.y)) {
+                  (node as any).x = companyNode.x + Math.cos(assignment.angle) * assignment.radius;
+                  (node as any).y = companyNode.y + Math.sin(assignment.angle) * assignment.radius;
+                  (node as any).vx = 0;
+                  (node as any).vy = 0;
+                }
+                relaxedNodeIdsRef.current.delete(typed.id);
+              }
               if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) {
                 (node as any).ringAngle = Math.atan2((node as any).y, (node as any).x);
               }
