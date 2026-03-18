@@ -22,6 +22,7 @@ _ADDRESS_GEOCODE_INFLIGHT: set[tuple[str, str]] = set()
 _MAX_ADDRESS_GEOCODES_PER_REQUEST = 6
 _EVENT_TOP_LEVELS = ("Cards", "Expo", "Mixer", "OJT")
 _EVENT_TOP_LABELS = {key: f"#{key}" for key in _EVENT_TOP_LEVELS}
+_PREFECTURE_PATTERN = re.compile(r"(北海道|東京都|京都府|大阪府|(?:..|...)県)")
 
 
 def _parse_event_tag_name(raw_name: str | None) -> tuple[str, str] | None:
@@ -80,6 +81,17 @@ def _collect_tag_keys(*tag_lists: list[models.Tag] | None) -> set[str]:
             if key:
                 keys.add(key)
     return keys
+
+
+def _extract_prefecture(value: str | None) -> str | None:
+    if not value:
+        return None
+    text = re.sub(r"\s+", "", value)
+    text = re.sub(r"^〒?\d{3}-?\d{4}", "", text)
+    matched = _PREFECTURE_PATTERN.search(text)
+    if not matched:
+        return None
+    return matched.group(1)
 
 
 def get_db():
@@ -189,6 +201,23 @@ def get_summary(db: Session = Depends(get_db)):
     company_payload = [{"name": row.name, "count": row.contact_count} for row in companies]
     tag_payload = [{"name": row.name, "count": row.contact_count} for row in tags]
     meeting_payload = connection_items
+    prefecture_counts: dict[str, int] = {}
+    counted_company_prefectures: set[tuple[str, str]] = set()
+    for contact in connection_contacts:
+        if not contact.company or not contact.company.name:
+            continue
+        prefecture = _extract_prefecture(contact.address) or _extract_prefecture(contact.company.address)
+        if not prefecture:
+            continue
+        key = (contact.company.name.strip().lower(), prefecture)
+        if key in counted_company_prefectures:
+            continue
+        counted_company_prefectures.add(key)
+        prefecture_counts[prefecture] = prefecture_counts.get(prefecture, 0) + 1
+    prefecture_payload = [
+        {"name": name, "count": count}
+        for name, count in sorted(prefecture_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
     connectable_contacts = sum(1 for contact in contacts if not contact.is_self)
     connected_contacts = len(meeting_payload)
     connection_rate = (
@@ -201,6 +230,7 @@ def get_summary(db: Session = Depends(get_db)):
         "counts": {
             "contacts": len(contact_payload),
             "companies": len(company_payload),
+            "prefectures": len(prefecture_payload),
             "tags": len(tag_payload),
             "meetings": len(meeting_payload),
             "connectable_contacts": connectable_contacts,
@@ -210,6 +240,7 @@ def get_summary(db: Session = Depends(get_db)):
         "lists": {
             "contacts": contact_payload,
             "companies": company_payload,
+            "prefectures": prefecture_payload,
             "tags": tag_payload,
             "meetings": meeting_payload,
         },

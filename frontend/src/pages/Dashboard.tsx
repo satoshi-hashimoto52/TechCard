@@ -7,6 +7,7 @@ type Summary = {
   counts: {
     contacts: number;
     companies: number;
+    prefectures?: number;
     tags: number;
     meetings: number;
     connectable_contacts?: number;
@@ -16,6 +17,7 @@ type Summary = {
   lists: {
     contacts: { id: number; name: string }[];
     companies: { name: string; count: number }[];
+    prefectures?: { name: string; count: number }[];
     tags: { name: string; count: number }[];
     meetings: { id: number; contact_name: string | null; company_name?: string | null; overlap: number }[];
   };
@@ -33,6 +35,7 @@ const Dashboard: React.FC = () => {
     counts: {
       contacts: 0,
       companies: 0,
+      prefectures: 0,
       tags: 0,
       meetings: 0,
       connectable_contacts: 0,
@@ -42,6 +45,7 @@ const Dashboard: React.FC = () => {
     lists: {
       contacts: [],
       companies: [],
+      prefectures: [],
       tags: [],
       meetings: [],
     },
@@ -49,7 +53,8 @@ const Dashboard: React.FC = () => {
   const [companyMap, setCompanyMap] = useState<CompanyMapPoint[]>([]);
   const [companyMapLoading, setCompanyMapLoading] = useState(false);
   const [companyDiagnostics, setCompanyDiagnostics] = useState<CompanyDiagnostics | null>(null);
-  const totalContacts = summary.counts.contacts || 1;
+  const prefectureItems = summary.lists.prefectures || [];
+  const totalPrefectureCount = prefectureItems.reduce((sum, item) => sum + item.count, 0) || 1;
   const connectableContacts = Math.max(
     0,
     summary.counts.connectable_contacts ?? summary.counts.contacts - 1,
@@ -79,6 +84,7 @@ const Dashboard: React.FC = () => {
           counts: {
             contacts: 0,
             companies: 0,
+            prefectures: 0,
             tags: 0,
             meetings: 0,
             connectable_contacts: 0,
@@ -88,6 +94,7 @@ const Dashboard: React.FC = () => {
           lists: {
             contacts: [],
             companies: [],
+            prefectures: [],
             tags: [],
             meetings: [],
           },
@@ -147,31 +154,49 @@ const Dashboard: React.FC = () => {
             <div className="mt-2 text-sm text-gray-600">
               接続済み {connectedContacts} / 対象 {connectableContacts}
             </div>
+            <div className="mt-2 pt-2 border-t border-gray-100 text-sm text-gray-600 space-y-1">
+              {summary.lists.companies.slice(0, topLimit).map(company => (
+                <div key={company.name} className="flex items-center justify-between gap-2">
+                  <span className="truncate">{company.name}</span>
+                  <span className="text-xs text-gray-500 whitespace-nowrap">{company.count}件</span>
+                </div>
+              ))}
+              {summary.lists.companies.length === 0 && <div>データがありません。</div>}
+            </div>
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">
           <h2 className="text-lg font-semibold">会社数</h2>
           <p className="text-2xl">{summary.counts.companies}</p>
-          <div className="mt-2 space-y-2">
-            {summary.lists.companies.slice(0, topLimit).map(company => {
-              const ratio = Math.round((company.count / totalContacts) * 100);
-              return (
-                <div key={company.name}>
-                  <div className="flex items-center gap-2 text-sm text-gray-700">
-                    <span className="truncate flex-1">{company.name}</span>
+          <div className="mt-3 pt-3 border-t border-gray-100">
+            <div className="text-sm font-semibold text-gray-700">
+              都道府県数: {summary.counts.prefectures ?? 0}
+            </div>
+            <div className="mt-1 text-sm text-gray-600 space-y-1">
+              {prefectureItems.slice(0, topLimit).map(pref => {
+                const ratio = Math.round((pref.count / totalPrefectureCount) * 100);
+                return (
+                  <div key={pref.name} className="flex items-center gap-2 text-sm text-gray-700">
+                    <span className="truncate w-16 shrink-0">{pref.name}</span>
                     <div className="flex-1 h-2 rounded bg-gray-200">
                       <div
-                        className="h-2 rounded bg-emerald-500"
+                        className="h-2 rounded bg-sky-500"
                         style={{ width: `${Math.min(100, ratio)}%` }}
                       />
                     </div>
                     <span className="ml-1 text-xs text-gray-500 whitespace-nowrap">
-                      {company.count}件 ({ratio}%)
+                      {pref.count}件 ({ratio}%)
                     </span>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+              {prefectureItems.length === 0 && (
+                <div>データがありません。</div>
+              )}
+            </div>
+            <div className="mt-2 text-xs text-gray-500">
+              都道府県バーは都道府県合計を100%として表示
+            </div>
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">
