@@ -126,6 +126,12 @@ with engine.begin() as connection:
             )
         )
 
+    route_cache_columns = connection.execute(text("PRAGMA table_info(company_route_cache)")).fetchall()
+    if route_cache_columns and not any(column[1] == "effective_mode" for column in route_cache_columns):
+        connection.execute(
+            text("ALTER TABLE company_route_cache ADD COLUMN effective_mode TEXT DEFAULT 'inter_pref_mixed'")
+        )
+
 app = FastAPI(title="TechCard Backend")
 
 # Add CORS middleware

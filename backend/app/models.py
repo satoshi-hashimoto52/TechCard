@@ -1,5 +1,6 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date, Boolean, Float
+from sqlalchemy import Column, Integer, String, ForeignKey, Table, DateTime, Text, Date, Boolean, Float, UniqueConstraint
 from sqlalchemy.orm import relationship
+from datetime import datetime
 from .database import Base
 
 contact_tags = Table(
@@ -136,3 +137,22 @@ class BusinessCard(Base):
     contact_id = Column(Integer, ForeignKey("contacts.id"), nullable=True)
 
     contact = relationship("Contact", back_populates="business_cards")
+
+
+class CompanyRouteCache(Base):
+    __tablename__ = "company_route_cache"
+    __table_args__ = (
+        UniqueConstraint("from_company_id", "to_company_id", "policy", name="uq_company_route_cache_pair_policy"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    from_company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    to_company_id = Column(Integer, ForeignKey("companies.id"), nullable=False, index=True)
+    policy = Column(String, nullable=False, index=True)
+    effective_mode = Column(String, nullable=False, default="inter_pref_mixed")
+    coord_key = Column(String, nullable=False)
+    provider = Column(String, nullable=False, default="openrouteservice")
+    distance_m = Column(Float, nullable=False)
+    duration_s = Column(Float, nullable=True)
+    geometry_json = Column(Text, nullable=False)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)

@@ -1,15 +1,18 @@
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from datetime import datetime
 import asyncio
 import hashlib
 import json
+import math
+import os
 import re
 import socket
 import time
 import urllib.parse
 import urllib.request
+import urllib.error
 import logging
 from ..database import SessionLocal
 from .. import models
@@ -23,6 +26,8 @@ _MAX_ADDRESS_GEOCODES_PER_REQUEST = 6
 _EVENT_TOP_LEVELS = ("Cards", "Expo", "Mixer", "OJT")
 _EVENT_TOP_LABELS = {key: f"#{key}" for key in _EVENT_TOP_LEVELS}
 _PREFECTURE_PATTERN = re.compile(r"(北海道|東京都|京都府|大阪府|(?:..|...)県)")
+_ORS_DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
+_OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving"
 
 
 def _parse_event_tag_name(raw_name: str | None) -> tuple[str, str] | None:
@@ -92,6 +97,192 @@ def _extract_prefecture(value: str | None) -> str | None:
     if not matched:
         return None
     return matched.group(1)
+
+
+def _coord_key(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> str:
+    return f"{from_lat:.6f},{from_lon:.6f}|{to_lat:.6f},{to_lon:.6f}"
+
+
+def _request_openrouteservice_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    *,
+    avoid_highways: bool,
+) -> tuple[dict[str, object], float, float]:
+    api_key = os.getenv("ORS_API_KEY", "").strip()
+    if not api_key:
+        raise RuntimeError("ors_api_key_missing")
+    payload: dict[str, object] = {
+        "coordinates": [[from_lon, from_lat], [to_lon, to_lat]],
+        "instructions": False,
+    }
+    if avoid_highways:
+        payload["options"] = {"avoid_features": ["highways"]}
+    request_data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        _ORS_DIRECTIONS_URL,
+        data=request_data,
+        method="POST",
+        headers={
+            "Authorization": api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "User-Agent": "techcard-routing/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=16) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8")
+        except Exception:
+            body = ""
+        raise RuntimeError(f"ors_http_{exc.code}:{body[:160]}")
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(f"ors_network:{exc}")
+
+    data = json.loads(raw)
+    features = data.get("features") or []
+    if not features:
+        raise RuntimeError("ors_no_route")
+    feature = features[0] or {}
+    geometry = feature.get("geometry") or {}
+    coordinates = geometry.get("coordinates") or []
+    if geometry.get("type") != "LineString" or not coordinates:
+        raise RuntimeError("ors_geometry_invalid")
+    summary = (feature.get("properties") or {}).get("summary") or {}
+    distance_m = float(summary.get("distance") or 0.0)
+    duration_s = float(summary.get("duration") or 0.0)
+    if distance_m <= 0:
+        raise RuntimeError("ors_distance_invalid")
+    return (
+        {"type": "LineString", "coordinates": coordinates},
+        distance_m,
+        duration_s,
+    )
+
+
+def _request_osrm_public_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    *,
+    avoid_highways: bool,
+) -> tuple[dict[str, object], float, float]:
+    coord_path = f"{from_lon:.6f},{from_lat:.6f};{to_lon:.6f},{to_lat:.6f}"
+    params = {
+        "overview": "full",
+        "geometries": "geojson",
+        "steps": "false",
+    }
+    if avoid_highways:
+        params["exclude"] = "motorway"
+    query = urllib.parse.urlencode(params)
+    url = f"{_OSRM_ROUTE_URL}/{coord_path}?{query}"
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "techcard-routing/1.0",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=16) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8")
+        except Exception:
+            body = ""
+        raise RuntimeError(f"osrm_http_{exc.code}:{body[:160]}")
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(f"osrm_network:{exc}")
+
+    data = json.loads(raw)
+    routes = data.get("routes") or []
+    if not routes:
+        raise RuntimeError("osrm_no_route")
+    route = routes[0] or {}
+    geometry = route.get("geometry") or {}
+    coordinates = geometry.get("coordinates") or []
+    if geometry.get("type") != "LineString" or not coordinates:
+        raise RuntimeError("osrm_geometry_invalid")
+    distance_m = float(route.get("distance") or 0.0)
+    duration_s = float(route.get("duration") or 0.0)
+    if distance_m <= 0:
+        raise RuntimeError("osrm_distance_invalid")
+    return (
+        {"type": "LineString", "coordinates": coordinates},
+        distance_m,
+        duration_s,
+    )
+
+
+def _request_route_with_fallback_providers(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    *,
+    avoid_highways: bool,
+) -> tuple[dict[str, object], float, float, str]:
+    provider_errors: list[str] = []
+    try:
+        geometry, distance_m, duration_s = _request_openrouteservice_route(
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            avoid_highways=avoid_highways,
+        )
+        return geometry, distance_m, duration_s, "openrouteservice"
+    except RuntimeError as exc:
+        provider_errors.append(str(exc))
+
+    try:
+        geometry, distance_m, duration_s = _request_osrm_public_route(
+            from_lat,
+            from_lon,
+            to_lat,
+            to_lon,
+            avoid_highways=avoid_highways,
+        )
+        return geometry, distance_m, duration_s, "osrm_public"
+    except RuntimeError as exc:
+        provider_errors.append(str(exc))
+
+    raise RuntimeError(" / ".join(provider_errors) if provider_errors else "route_provider_failed")
+
+
+def _haversine_distance_m(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> float:
+    earth_radius_m = 6371000.0
+    lat1 = math.radians(from_lat)
+    lon1 = math.radians(from_lon)
+    lat2 = math.radians(to_lat)
+    lon2 = math.radians(to_lon)
+    d_lat = lat2 - lat1
+    d_lon = lon2 - lon1
+    a = (
+        math.sin(d_lat / 2) ** 2
+        + math.cos(lat1) * math.cos(lat2) * (math.sin(d_lon / 2) ** 2)
+    )
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(max(1e-12, 1 - a)))
+    return earth_radius_m * c
+
+
+def _fallback_straight_route(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> tuple[dict[str, object], float, float | None]:
+    distance_m = _haversine_distance_m(from_lat, from_lon, to_lat, to_lon)
+    geometry = {
+        "type": "LineString",
+        "coordinates": [[from_lon, from_lat], [to_lon, to_lat]],
+    }
+    return geometry, distance_m, None
 
 
 def get_db():
@@ -244,6 +435,186 @@ def get_summary(db: Session = Depends(get_db)):
             "tags": tag_payload,
             "meetings": meeting_payload,
         },
+    }
+
+
+@router.get("/company-route")
+def get_company_route(
+    to_company_id: int = Query(..., ge=1),
+    to_lat: float | None = Query(default=None),
+    to_lon: float | None = Query(default=None),
+    to_address: str | None = Query(default=None),
+    refresh: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    self_contact = (
+        db.query(models.Contact)
+        .options(joinedload(models.Contact.company))
+        .filter(models.Contact.is_self.is_(True))
+        .filter(models.Contact.company_id.isnot(None))
+        .first()
+    )
+    if self_contact is None or self_contact.company is None:
+        raise HTTPException(status_code=404, detail="自分の所属会社が見つかりません。")
+
+    from_company = self_contact.company
+    to_company = db.query(models.Company).filter(models.Company.id == to_company_id).first()
+    if to_company is None:
+        raise HTTPException(status_code=404, detail="対象会社が見つかりません。")
+    if from_company.id == to_company.id:
+        raise HTTPException(status_code=400, detail="自社へのルートは不要です。")
+
+    if from_company.latitude is None or from_company.longitude is None:
+        raise HTTPException(status_code=400, detail="自社の座標が未設定です。")
+    has_target_lat = to_lat is not None
+    has_target_lon = to_lon is not None
+    if has_target_lat != has_target_lon:
+        raise HTTPException(status_code=400, detail="to_lat と to_lon は両方指定してください。")
+    if has_target_lat and has_target_lon:
+        if not math.isfinite(float(to_lat)) or not math.isfinite(float(to_lon)):
+            raise HTTPException(status_code=400, detail="to_lat / to_lon が不正です。")
+        target_lat = float(to_lat)
+        target_lon = float(to_lon)
+    else:
+        if to_company.latitude is None or to_company.longitude is None:
+            raise HTTPException(status_code=400, detail="対象会社の座標が未設定です。")
+        target_lat = float(to_company.latitude)
+        target_lon = float(to_company.longitude)
+
+    from_lat = float(from_company.latitude)
+    from_lon = float(from_company.longitude)
+    coord_key = _coord_key(from_lat, from_lon, target_lat, target_lon)
+    target_address = (to_address or to_company.address or "").strip() or None
+
+    from_prefecture = _extract_prefecture(from_company.address)
+    to_prefecture = _extract_prefecture(target_address)
+    same_prefecture = bool(from_prefecture and to_prefecture and from_prefecture == to_prefecture)
+    policy = "intra_pref_local" if same_prefecture else "inter_pref_mixed"
+
+    cache = (
+        db.query(models.CompanyRouteCache)
+        .filter(models.CompanyRouteCache.from_company_id == from_company.id)
+        .filter(models.CompanyRouteCache.to_company_id == to_company.id)
+        .filter(models.CompanyRouteCache.policy == policy)
+        .first()
+    )
+    if (
+        cache is not None
+        and not refresh
+        and cache.coord_key == coord_key
+        and (cache.provider or "") != "fallback_straight"
+    ):
+        try:
+            geometry = json.loads(cache.geometry_json)
+        except json.JSONDecodeError:
+            geometry = None
+        if geometry:
+            return {
+                "from_company_id": from_company.id,
+                "from_company_name": from_company.name,
+                "to_company_id": to_company.id,
+                "to_company_name": to_company.name,
+                "to_company_address": target_address,
+                "from_prefecture": from_prefecture,
+                "to_prefecture": to_prefecture,
+                "policy": policy,
+                "effective_mode": cache.effective_mode or policy,
+                "distance_m": cache.distance_m,
+                "distance_km": round(cache.distance_m / 1000, 2),
+                "duration_s": cache.duration_s,
+                "duration_min": round((cache.duration_s or 0.0) / 60, 1) if cache.duration_s else None,
+                "geometry": geometry,
+                "cached": True,
+                "provider": cache.provider or "openrouteservice",
+                "updated_at": cache.updated_at.isoformat() if cache.updated_at else None,
+            }
+
+    effective_mode = policy
+    provider = "openrouteservice"
+    geometry: dict[str, object]
+    distance_m: float
+    duration_s: float | None
+    if same_prefecture:
+        try:
+            geometry, distance_m, duration_s, provider = _request_route_with_fallback_providers(
+                from_lat,
+                from_lon,
+                target_lat,
+                target_lon,
+                avoid_highways=True,
+            )
+        except RuntimeError:
+            try:
+                geometry, distance_m, duration_s, provider = _request_route_with_fallback_providers(
+                    from_lat,
+                    from_lon,
+                    target_lat,
+                    target_lon,
+                    avoid_highways=False,
+                )
+                effective_mode = "intra_pref_local_fallback"
+            except RuntimeError:
+                geometry, distance_m, duration_s = _fallback_straight_route(
+                    from_lat,
+                    from_lon,
+                    target_lat,
+                    target_lon,
+                )
+                effective_mode = "intra_pref_straight_fallback"
+                provider = "fallback_straight"
+    else:
+        try:
+            geometry, distance_m, duration_s, provider = _request_route_with_fallback_providers(
+                from_lat,
+                from_lon,
+                target_lat,
+                target_lon,
+                avoid_highways=False,
+            )
+        except RuntimeError:
+            geometry, distance_m, duration_s = _fallback_straight_route(
+                from_lat,
+                from_lon,
+                target_lat,
+                target_lon,
+            )
+            effective_mode = "inter_pref_straight_fallback"
+            provider = "fallback_straight"
+
+    if cache is None:
+        cache = models.CompanyRouteCache(
+            from_company_id=from_company.id,
+            to_company_id=to_company.id,
+            policy=policy,
+        )
+    cache.coord_key = coord_key
+    cache.provider = provider
+    cache.effective_mode = effective_mode
+    cache.distance_m = distance_m
+    cache.duration_s = duration_s
+    cache.geometry_json = json.dumps(geometry, ensure_ascii=False)
+    cache.updated_at = datetime.utcnow()
+    db.add(cache)
+    db.commit()
+
+    return {
+        "from_company_id": from_company.id,
+        "from_company_name": from_company.name,
+        "to_company_id": to_company.id,
+        "to_company_name": to_company.name,
+        "to_company_address": target_address,
+        "from_prefecture": from_prefecture,
+        "to_prefecture": to_prefecture,
+        "policy": policy,
+        "effective_mode": effective_mode,
+        "distance_m": distance_m,
+        "distance_km": round(distance_m / 1000, 2),
+        "duration_s": duration_s,
+        "duration_min": round(duration_s / 60, 1) if duration_s else None,
+        "geometry": geometry,
+        "cached": False,
+        "provider": provider,
+        "updated_at": cache.updated_at.isoformat() if cache.updated_at else None,
     }
 
 

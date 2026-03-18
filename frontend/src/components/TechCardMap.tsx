@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import axios from 'axios';
 import Map, { Marker, NavigationControl, Popup, MapRef, Source, Layer } from 'react-map-gl/maplibre';
 import maplibregl from 'maplibre-gl';
 import Supercluster from 'supercluster';
@@ -11,15 +11,55 @@ import { CompanyMapPoint } from './LedJapanMap';
 const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const isFiniteNumber = (value: unknown): value is number => Number.isFinite(value);
 
+type RouteLine = {
+  type: 'LineString';
+  coordinates: [number, number][];
+};
+
+type CompanyRouteResponse = {
+  from_company_id: number;
+  from_company_name: string;
+  to_company_id: number;
+  to_company_name: string;
+  to_company_address?: string | null;
+  from_prefecture?: string | null;
+  to_prefecture?: string | null;
+  policy: string;
+  effective_mode: string;
+  distance_m: number;
+  distance_km: number;
+  duration_s?: number | null;
+  duration_min?: number | null;
+  geometry: RouteLine;
+  cached: boolean;
+  provider: string;
+  updated_at?: string | null;
+};
+
+const formatDistanceLabel = (route: CompanyRouteResponse): string => {
+  const distanceKm = Number.isFinite(route.distance_km)
+    ? route.distance_km
+    : (Number.isFinite(route.distance_m) ? route.distance_m / 1000 : NaN);
+  if (!Number.isFinite(distanceKm)) return '-';
+  if (distanceKm < 1) {
+    const meters = Math.round(distanceKm * 1000);
+    return `${meters} m`;
+  }
+  return `${distanceKm.toFixed(2)} km`;
+};
+
 const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }> = ({ companies, loading }) => {
   const mapRef = useRef<MapRef | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const mapLoadedRef = useRef(false);
-  const navigate = useNavigate();
   const [hovered, setHovered] = useState<CompanyMapPoint | null>(null);
   const [viewState, setViewState] = useState({ longitude: 138, latitude: 37, zoom: 5 });
   const [bounds, setBounds] = useState<[number, number, number, number] | null>(null);
   const [labelOffsets, setLabelOffsets] = useState<Record<string, { x: number; y: number }>>({});
+  const [selectedRoute, setSelectedRoute] = useState<CompanyRouteResponse | null>(null);
+  const [routeError, setRouteError] = useState<string | null>(null);
+  const [routeLoading, setRouteLoading] = useState(false);
+  const [pendingTargetName, setPendingTargetName] = useState<string | null>(null);
 
   const points = useMemo(() => {
     if (!companies) return [];
@@ -80,6 +120,19 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     if (!bounds) return [];
     return cluster.getClusters(bounds as any, Math.round(viewState.zoom));
   }, [cluster, bounds, viewState.zoom]);
+  const routeGeoJson = useMemo(() => {
+    if (!selectedRoute?.geometry?.coordinates?.length) return null;
+    return {
+      type: 'FeatureCollection' as const,
+      features: [
+        {
+          type: 'Feature' as const,
+          geometry: selectedRoute.geometry,
+          properties: {},
+        },
+      ],
+    };
+  }, [selectedRoute]);
 
   const updateBounds = useCallback(() => {
     const map = mapRef.current?.getMap();
@@ -338,6 +391,82 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     console.log('points', points);
   }, [companies, points]);
 
+  const resolvePointFromFeature = useCallback((feature: any): CompanyMapPoint | null => {
+    const index = Number(feature?.properties?.index);
+    if (Number.isFinite(index) && points[index]) {
+      return points[index];
+    }
+    const companyId = Number(feature?.properties?.company_id);
+    if (!Number.isNaN(companyId)) {
+      return points.find(item => item.company_id === companyId) || null;
+    }
+    return null;
+  }, [points]);
+
+  const fitRouteToMap = useCallback((coordinates: [number, number][]) => {
+    if (!coordinates.length) return;
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    let minLon = Infinity;
+    let minLat = Infinity;
+    let maxLon = -Infinity;
+    let maxLat = -Infinity;
+    coordinates.forEach(([lon, lat]) => {
+      if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+      minLon = Math.min(minLon, lon);
+      minLat = Math.min(minLat, lat);
+      maxLon = Math.max(maxLon, lon);
+      maxLat = Math.max(maxLat, lat);
+    });
+    if (!Number.isFinite(minLon) || !Number.isFinite(minLat) || !Number.isFinite(maxLon) || !Number.isFinite(maxLat)) {
+      return;
+    }
+    map.fitBounds(
+      [
+        [minLon, minLat],
+        [maxLon, maxLat],
+      ],
+      { padding: 80, duration: 700, maxZoom: 11 },
+    );
+  }, []);
+
+  const requestCompanyRoute = useCallback((company: CompanyMapPoint) => {
+    if (company.is_self) {
+      setSelectedRoute(null);
+      setRouteError(null);
+      setRouteLoading(false);
+      setPendingTargetName(null);
+      return;
+    }
+    setRouteLoading(true);
+    setRouteError(null);
+    setPendingTargetName(company.name || null);
+    axios
+      .get<CompanyRouteResponse>('http://localhost:8000/stats/company-route', {
+        params: {
+          to_company_id: company.company_id,
+          to_lat: company.lat,
+          to_lon: company.lon,
+          to_address: company.address,
+        },
+      })
+      .then(response => {
+        const route = response.data;
+        setSelectedRoute(route);
+        if (route.geometry?.coordinates?.length) {
+          fitRouteToMap(route.geometry.coordinates);
+        }
+      })
+      .catch(error => {
+        const detail = error?.response?.data?.detail;
+        setRouteError(typeof detail === 'string' ? detail : 'ルート取得に失敗しました。');
+      })
+      .finally(() => {
+        setRouteLoading(false);
+        setPendingTargetName(null);
+      });
+  }, [fitRouteToMap]);
+
   const handleHover = useCallback((event: any) => {
     const features = event.features as any[] | undefined;
     if (!features || features.length === 0) {
@@ -345,21 +474,19 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       return;
     }
     const feature = features[0];
-    const companyId = Number(feature.properties?.company_id);
-    const company = companies.find(item => item.company_id === companyId);
-    setHovered(company || null);
-  }, [companies]);
+    const point = resolvePointFromFeature(feature);
+    setHovered(point || null);
+  }, [resolvePointFromFeature]);
 
   const handleClick = useCallback((event: any) => {
     const features = event.features as any[] | undefined;
     if (!features || features.length === 0) return;
     const feature = features[0];
-    const companyId = Number(feature.properties?.company_id);
-    const company = companies.find(item => item.company_id === companyId);
-    if (company) {
-      navigate('/contacts', { state: { openCompany: company.name } });
+    const point = resolvePointFromFeature(feature);
+    if (point) {
+      requestCompanyRoute(point);
     }
-  }, [companies, navigate]);
+  }, [requestCompanyRoute, resolvePointFromFeature]);
 
   const computeLabelOffsets = useCallback(() => {
     const map = mapRef.current?.getMap();
@@ -489,6 +616,28 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             }}
           />
         </Source>
+        {routeGeoJson && (
+          <Source id="selected-route" type="geojson" data={routeGeoJson}>
+            <Layer
+              id="selected-route-outline"
+              type="line"
+              paint={{
+                'line-color': 'rgba(3, 7, 18, 0.95)',
+                'line-width': 8,
+                'line-opacity': 0.75,
+              }}
+            />
+            <Layer
+              id="selected-route-line"
+              type="line"
+              paint={{
+                'line-color': '#22d3ee',
+                'line-width': 5,
+                'line-opacity': 0.95,
+              }}
+            />
+          </Source>
+        )}
 
         {viewState.zoom < 7 &&
           clusters.map((clusterItem: any) => {
@@ -509,15 +658,20 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               );
             }
             const singleId = Number(clusterItem.properties?.company_id);
+            const singleIndex = Number(clusterItem.properties?.index);
             return (
               <Marker key={`cluster-single-${singleId}`} longitude={longitude} latitude={latitude}>
                 <CompanyCluster
                   count={1}
                   onClick={() => {
+                    if (Number.isFinite(singleIndex) && points[singleIndex]) {
+                      requestCompanyRoute(points[singleIndex]);
+                      return;
+                    }
                     if (!Number.isNaN(singleId)) {
-                      const company = companies.find(item => item.company_id === singleId);
-                      if (company) {
-                        navigate('/contacts', { state: { openCompany: company.name } });
+                      const point = points.find(item => item.company_id === singleId);
+                      if (point) {
+                        requestCompanyRoute(point);
                       }
                     }
                   }}
@@ -539,7 +693,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
                 labelOffset={labelOffsets[`${company.company_id}-${index}`]}
                 onMouseEnter={() => setHovered(company)}
                 onMouseLeave={() => setHovered(prev => (prev?.company_id === company.company_id ? null : prev))}
-                onClick={() => navigate('/contacts', { state: { openCompany: company.name } })}
+                onClick={() => requestCompanyRoute(company)}
               />
             </Marker>
           ))}
@@ -563,9 +717,50 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         )}
       </Map>
       </div>
-      {!loading && points.length === 0 && (
-        <p className="mt-2 text-sm text-gray-400">会社の位置情報がまだありません。</p>
-      )}
+      <div className="absolute top-3 left-3 right-3 z-20 space-y-2 pointer-events-none">
+        {!loading && points.length === 0 && (
+          <div className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2 text-base text-slate-200">
+            会社の位置情報がまだありません。
+          </div>
+        )}
+        {routeLoading && (
+          <div className="rounded border border-sky-800 bg-sky-950/70 px-3 py-2 text-base text-sky-200">
+            ルート取得中: 自社 → {pendingTargetName || '選択先'}
+          </div>
+        )}
+        {routeError && (
+          <div className="rounded border border-rose-800 bg-rose-950/70 px-3 py-2 text-base text-rose-200">
+            {routeError}
+          </div>
+        )}
+        {selectedRoute && !routeLoading && !routeError && (
+          <div className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-100">
+            <div className="font-semibold text-base text-slate-100">
+              {selectedRoute.from_company_name} → {selectedRoute.to_company_name}
+            </div>
+            <div className="mt-1 text-sm text-slate-200">
+              行き先住所: {selectedRoute.to_company_address || '未登録'}
+            </div>
+            <div className="mt-1 text-sm text-slate-200">
+              距離: {formatDistanceLabel(selectedRoute)}
+              {selectedRoute.duration_min != null ? ` / 所要: ${selectedRoute.duration_min.toFixed(1)} 分` : ''}
+            </div>
+            <div className="mt-1 text-sm text-slate-300">
+              経路: {selectedRoute.effective_mode === 'intra_pref_local'
+                ? '県内（一般道優先）'
+                : selectedRoute.effective_mode === 'intra_pref_local_fallback'
+                  ? '県内（一般道優先→通常へフォールバック）'
+                  : selectedRoute.effective_mode === 'intra_pref_straight_fallback'
+                    ? '県内（直線フォールバック）'
+                    : selectedRoute.effective_mode === 'inter_pref_straight_fallback'
+                      ? '県外（直線フォールバック）'
+                      : '県外（一般道+高速）'}
+              {selectedRoute.cached ? ' / キャッシュ' : ' / API最新'}
+              {selectedRoute.provider ? ` / ${selectedRoute.provider}` : ''}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 };

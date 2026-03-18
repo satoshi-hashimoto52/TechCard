@@ -199,10 +199,10 @@ const splitCompanyLabelForDisplay = (label: string): { corporateType: string; co
     return null;
   };
   const patterns: RegExp[] = [
-    /^(株式会社|有限会社|㈱|㈲)\s*(.+)$/u,
-    /^(.+?)\s*(株式会社|有限会社|㈱|㈲)$/u,
-    /^[（(](株|有)[）)]\s*(.+)$/u,
-    /^(.+?)\s*[（(](株|有)[）)]$/u,
+    /^(株式会社|有限会社|㈱|㈲)\s*(.+)$/,
+    /^(.+?)\s*(株式会社|有限会社|㈱|㈲)$/,
+    /^[（(](株|有)[）)]\s*(.+)$/,
+    /^(.+?)\s*[（(](株|有)[）)]$/,
   ];
   for (const pattern of patterns) {
     const match = raw.match(pattern);
