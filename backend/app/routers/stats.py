@@ -47,6 +47,41 @@ def _event_key(top_name: str, sub_name: str) -> str:
     return f"{top_name.strip().lower()}::{sub_name.strip().lower()}"
 
 
+def _normalize_tag_type(value: str | None) -> str:
+    if not value:
+        return "relation"
+    if value in ("tech", "technology"):
+        return "tech"
+    if value == "event":
+        return "event"
+    return "relation"
+
+
+def _canonical_tag_key(tag: models.Tag) -> str | None:
+    if not tag.name:
+        return None
+    tag_type = _normalize_tag_type(tag.type)
+    if tag_type == "event":
+        parsed = _parse_event_tag_name(tag.name)
+        # イベントは「上位/下位」の2段構造のみ集計対象にする。
+        # 上位タグ単体や非正規フォーマットはカウントしない。
+        if parsed is None:
+            return None
+        top_name, sub_name = parsed
+        return f"event:{_event_key(top_name, sub_name)}"
+    return f"{tag_type}:{tag.name.strip().lower()}"
+
+
+def _collect_tag_keys(*tag_lists: list[models.Tag] | None) -> set[str]:
+    keys: set[str] = set()
+    for tags in tag_lists:
+        for tag in tags or []:
+            key = _canonical_tag_key(tag)
+            if key:
+                keys.add(key)
+    return keys
+
+
 def get_db():
     db = SessionLocal()
     try:
@@ -86,17 +121,34 @@ def get_summary(db: Session = Depends(get_db)):
     )
     self_contact = (
         db.query(models.Contact)
-        .options(joinedload(models.Contact.tags))
+        .options(
+            joinedload(models.Contact.tags),
+            joinedload(models.Contact.tech_tags),
+            joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
+            joinedload(models.Contact.company).joinedload(models.Company.group).joinedload(models.CompanyGroup.tags),
+        )
         .filter(models.Contact.is_self.is_(True))
         .first()
     )
-    self_tag_ids = {tag.id for tag in (self_contact.tags if self_contact else [])}
+    self_person_tag_keys = _collect_tag_keys(
+        self_contact.tags if self_contact else None,
+        self_contact.tech_tags if self_contact else None,
+    )
+    self_company_tag_keys = _collect_tag_keys(
+        self_contact.company.tech_tags if self_contact and self_contact.company else None,
+        self_contact.company.group.tags
+        if self_contact and self_contact.company and self_contact.company.group
+        else None,
+    )
 
     connection_contacts = (
         db.query(models.Contact)
         .options(
             joinedload(models.Contact.tags),
+            joinedload(models.Contact.tech_tags),
             joinedload(models.Contact.company),
+            joinedload(models.Contact.company).joinedload(models.Company.tech_tags),
+            joinedload(models.Contact.company).joinedload(models.Company.group).joinedload(models.CompanyGroup.tags),
         )
         .all()
     )
@@ -105,9 +157,18 @@ def get_summary(db: Session = Depends(get_db)):
     for contact in connection_contacts:
         if contact.is_self:
             continue
-        overlap = 0
-        if contact.tags and self_tag_ids:
-            overlap = sum(1 for tag in contact.tags if tag.id in self_tag_ids)
+        contact_person_tag_keys = _collect_tag_keys(contact.tags, contact.tech_tags)
+        contact_company_tag_keys = _collect_tag_keys(
+            contact.company.tech_tags if contact.company else None,
+            contact.company.group.tags if contact.company and contact.company.group else None,
+        )
+        overlap_keys = set()
+        if self_person_tag_keys:
+            overlap_keys |= self_person_tag_keys & contact_person_tag_keys
+        if self_company_tag_keys:
+            overlap_keys |= self_company_tag_keys & contact_person_tag_keys
+            overlap_keys |= self_company_tag_keys & contact_company_tag_keys
+        overlap = len(overlap_keys)
         if overlap <= 0:
             continue
         connection_items.append(
@@ -128,6 +189,13 @@ def get_summary(db: Session = Depends(get_db)):
     company_payload = [{"name": row.name, "count": row.contact_count} for row in companies]
     tag_payload = [{"name": row.name, "count": row.contact_count} for row in tags]
     meeting_payload = connection_items
+    connectable_contacts = sum(1 for contact in contacts if not contact.is_self)
+    connected_contacts = len(meeting_payload)
+    connection_rate = (
+        round((connected_contacts / connectable_contacts) * 100, 1)
+        if connectable_contacts > 0
+        else 0.0
+    )
 
     return {
         "counts": {
@@ -135,6 +203,9 @@ def get_summary(db: Session = Depends(get_db)):
             "companies": len(company_payload),
             "tags": len(tag_payload),
             "meetings": len(meeting_payload),
+            "connectable_contacts": connectable_contacts,
+            "connected_contacts": connected_contacts,
+            "connection_rate": connection_rate,
         },
         "lists": {
             "contacts": contact_payload,

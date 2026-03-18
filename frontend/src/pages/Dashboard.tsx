@@ -9,6 +9,9 @@ type Summary = {
     companies: number;
     tags: number;
     meetings: number;
+    connectable_contacts?: number;
+    connected_contacts?: number;
+    connection_rate?: number;
   };
   lists: {
     contacts: { id: number; name: string }[];
@@ -16,12 +19,6 @@ type Summary = {
     tags: { name: string; count: number }[];
     meetings: { id: number; contact_name: string | null; company_name?: string | null; overlap: number }[];
   };
-};
-
-type ContactRecentItem = {
-  id: number;
-  name: string;
-  first_met_at?: string | null;
 };
 
 type CompanyDiagnostics = {
@@ -38,6 +35,9 @@ const Dashboard: React.FC = () => {
       companies: 0,
       tags: 0,
       meetings: 0,
+      connectable_contacts: 0,
+      connected_contacts: 0,
+      connection_rate: 0,
     },
     lists: {
       contacts: [],
@@ -46,11 +46,25 @@ const Dashboard: React.FC = () => {
       meetings: [],
     },
   });
-  const [recentContacts, setRecentContacts] = useState<ContactRecentItem[]>([]);
   const [companyMap, setCompanyMap] = useState<CompanyMapPoint[]>([]);
   const [companyMapLoading, setCompanyMapLoading] = useState(false);
   const [companyDiagnostics, setCompanyDiagnostics] = useState<CompanyDiagnostics | null>(null);
   const totalContacts = summary.counts.contacts || 1;
+  const connectableContacts = Math.max(
+    0,
+    summary.counts.connectable_contacts ?? summary.counts.contacts - 1,
+  );
+  const connectedContacts = Math.max(
+    0,
+    summary.counts.connected_contacts ?? summary.counts.meetings,
+  );
+  const connectionRateRaw = connectableContacts > 0
+    ? (summary.counts.connection_rate ?? (connectedContacts / connectableContacts) * 100)
+    : 0;
+  const connectionRate = Math.max(0, Math.min(100, connectionRateRaw));
+  const connectionRateLabel = Number.isInteger(connectionRate)
+    ? `${connectionRate}%`
+    : `${connectionRate.toFixed(1)}%`;
   const topLimit = 3;
   const geocodeProgress = companyMap[0]?.geocode_progress;
   const geocodePercent = geocodeProgress
@@ -67,6 +81,9 @@ const Dashboard: React.FC = () => {
             companies: 0,
             tags: 0,
             meetings: 0,
+            connectable_contacts: 0,
+            connected_contacts: 0,
+            connection_rate: 0,
           },
           lists: {
             contacts: [],
@@ -76,21 +93,6 @@ const Dashboard: React.FC = () => {
           },
         });
       });
-  }, []);
-
-  useEffect(() => {
-    axios
-      .get<ContactRecentItem[]>('http://localhost:8000/contacts/')
-      .then(response => {
-        const sorted = [...(response.data || [])].sort((a, b) => {
-          const dateA = a.first_met_at || '';
-          const dateB = b.first_met_at || '';
-          if (dateA !== dateB) return dateB.localeCompare(dateA);
-          return (b.id || 0) - (a.id || 0);
-        });
-        setRecentContacts(sorted);
-      })
-      .catch(() => setRecentContacts([]));
   }, []);
 
   const fetchCompanyMap = (withRefresh = false) => {
@@ -133,18 +135,18 @@ const Dashboard: React.FC = () => {
       <h1 className="text-2xl font-bold mb-4">ダッシュボード</h1>
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white p-4 rounded-lg shadow">
-          <h2 className="text-lg font-semibold">連絡先数</h2>
-          <p className="text-2xl">{summary.counts.contacts}</p>
-          <div className="mt-2 text-sm text-gray-600 space-y-1">
-            {recentContacts.slice(0, topLimit).map(contact => (
-              <div key={contact.id} className="flex items-center justify-between gap-2">
-                <span className="truncate">{contact.name}</span>
-                <span className="text-xs text-gray-500 whitespace-nowrap">
-                  {contact.first_met_at || '-'}
-                </span>
-              </div>
-            ))}
-            {recentContacts.length === 0 && <div>データがありません。</div>}
+          <h2 className="text-lg font-semibold">接続率</h2>
+          <p className="text-2xl">{connectionRateLabel}</p>
+          <div className="mt-2">
+            <div className="h-2 rounded bg-gray-200">
+              <div
+                className="h-2 rounded bg-emerald-500"
+                style={{ width: `${connectionRate}%` }}
+              />
+            </div>
+            <div className="mt-2 text-sm text-gray-600">
+              接続済み {connectedContacts} / 対象 {connectableContacts}
+            </div>
           </div>
         </div>
         <div className="bg-white p-4 rounded-lg shadow">
