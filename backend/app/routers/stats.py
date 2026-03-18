@@ -26,6 +26,12 @@ _MAX_ADDRESS_GEOCODES_PER_REQUEST = 6
 _EVENT_TOP_LEVELS = ("Cards", "Expo", "Mixer", "OJT")
 _EVENT_TOP_LABELS = {key: f"#{key}" for key in _EVENT_TOP_LEVELS}
 _PREFECTURE_PATTERN = re.compile(r"(北海道|東京都|京都府|大阪府|(?:..|...)県)")
+_ROAD_ID_PATTERN = re.compile(r"\b[ER]?\d{1,3}\b", re.IGNORECASE)
+_JCT_PATTERN = re.compile(r"(?:\bJCT\b|ジャンクション|junction|interchange|分岐|乗換)", re.IGNORECASE)
+_IC_PATTERN = re.compile(r"(?:\bIC\b|インター|入口|出口|出入口|interchange|ramp|entry|exit)", re.IGNORECASE)
+_IC_JCT_NAME_PATTERN = re.compile(r"(?:\b(?:IC|JCT)\b|インター|ジャンクション)", re.IGNORECASE)
+_OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+_IC_JCT_LOOKUP_CACHE: dict[str, str | None] = {}
 _ORS_DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
 _OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving"
 
@@ -103,6 +109,311 @@ def _coord_key(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -
     return f"{from_lat:.6f},{from_lon:.6f}|{to_lat:.6f},{to_lon:.6f}"
 
 
+def _has_cached_route_steps(raw_steps: str | None) -> bool:
+    if not raw_steps:
+        return False
+    try:
+        parsed = json.loads(raw_steps)
+    except json.JSONDecodeError:
+        return False
+    return isinstance(parsed, list) and len(parsed) > 0
+
+
+def _classify_route_step_kind(
+    maneuver_text: str,
+    instruction: str,
+    road_name: str,
+    destinations: str,
+) -> str:
+    text = " ".join([maneuver_text, instruction, road_name, destinations]).lower()
+    if _JCT_PATTERN.search(text):
+        return "junction"
+    if (
+        any(token in text for token in ("on ramp", "merge", "流入", "乗り口", "entry"))
+        or ("入口" in text and "出口" not in text)
+    ):
+        return "enter"
+    if any(token in text for token in ("off ramp", "exit", "出口", "流出", "降り口", "下りる")):
+        return "exit"
+    if _IC_PATTERN.search(text):
+        return "road"
+    if (
+        any(token in text for token in ("高速", "自動車道", "motorway", "expressway", "国道", "県道"))
+        or _ROAD_ID_PATTERN.search(text) is not None
+    ):
+        return "road"
+    return "other"
+
+
+def _build_route_step_label(
+    kind: str,
+    road_name: str,
+    destinations: str,
+    instruction: str,
+) -> str:
+    core = (destinations or "").strip() or (road_name or "").strip() or (instruction or "").strip()
+    if kind == "enter":
+        return f"乗り口: {core}" if core else "乗り口"
+    if kind == "exit":
+        return f"降り口: {core}" if core else "降り口"
+    if kind == "junction":
+        return f"乗換: {core}" if core else "乗換"
+    if kind == "road":
+        return f"経由: {core}" if core else "経由道路"
+    return core or "経由点"
+
+
+def _normalize_route_steps(raw_steps: list[dict[str, object]]) -> list[dict[str, object]]:
+    deduped: list[dict[str, object]] = []
+    seen_keys: set[str] = set()
+    for step in raw_steps:
+        lon = step.get("lon")
+        lat = step.get("lat")
+        if not isinstance(lon, (int, float)) or not isinstance(lat, (int, float)):
+            continue
+        if not math.isfinite(float(lon)) or not math.isfinite(float(lat)):
+            continue
+        label = str(step.get("label") or "").strip()
+        kind = str(step.get("kind") or "other").strip().lower()
+        road = str(step.get("road") or "").strip()
+        key = f"{round(float(lon), 5)}:{round(float(lat), 5)}:{kind}:{label}:{road}"
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        deduped.append(
+            {
+                "lon": float(lon),
+                "lat": float(lat),
+                "kind": kind if kind in {"enter", "exit", "junction", "road"} else "other",
+                "label": label or "経由点",
+                "road": road or None,
+                "detail": str(step.get("detail") or "").strip() or None,
+            }
+        )
+
+    key_steps = [step for step in deduped if step["kind"] in {"enter", "exit", "junction"}]
+    road_steps: list[dict[str, object]] = []
+    seen_roads: set[str] = set()
+    for step in deduped:
+        if step["kind"] != "road":
+            continue
+        road_key = str(step.get("road") or step.get("label") or "").strip().lower()
+        if road_key and road_key in seen_roads:
+            continue
+        if road_key:
+            seen_roads.add(road_key)
+        road_steps.append(step)
+
+    if key_steps:
+        return (key_steps[:14] + road_steps[:6])[:18]
+    return road_steps[:10]
+
+
+def _extract_ic_jct_name_candidate(*values: str | None) -> str | None:
+    for value in values:
+        text = (value or "").strip()
+        if not text:
+            continue
+        if _IC_JCT_NAME_PATTERN.search(text):
+            pieces = re.split(r"[／/;>|]", text)
+            for piece in pieces:
+                candidate = piece.strip()
+                if not candidate:
+                    continue
+                if _IC_JCT_NAME_PATTERN.search(candidate):
+                    return candidate
+            return text
+    return None
+
+
+def _lookup_nearest_ic_jct_name(lon: float, lat: float) -> str | None:
+    cache_key = f"{lat:.5f},{lon:.5f}"
+    if cache_key in _IC_JCT_LOOKUP_CACHE:
+        return _IC_JCT_LOOKUP_CACHE[cache_key]
+
+    query = f"""
+    [out:json][timeout:8];
+    (
+      node(around:1800,{lat:.6f},{lon:.6f})["highway"="motorway_junction"];
+      node(around:1800,{lat:.6f},{lon:.6f})["name"~"(IC|JCT|インター|ジャンクション)",i];
+      way(around:1800,{lat:.6f},{lon:.6f})["name"~"(IC|JCT|インター|ジャンクション)",i];
+    );
+    out center tags;
+    """
+    request = urllib.request.Request(
+        _OVERPASS_URL,
+        data=query.encode("utf-8"),
+        method="POST",
+        headers={
+            "Content-Type": "text/plain; charset=utf-8",
+            "Accept": "application/json",
+            "User-Agent": "techcard-routing/1.0",
+        },
+    )
+    nearest_name: str | None = None
+    nearest_distance = float("inf")
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            raw = response.read().decode("utf-8")
+        payload = json.loads(raw)
+        elements = payload.get("elements") or []
+        for element in elements:
+            if not isinstance(element, dict):
+                continue
+            tags = element.get("tags") or {}
+            if not isinstance(tags, dict):
+                continue
+            name = str(tags.get("name") or "").strip()
+            if not name:
+                continue
+            if _IC_JCT_NAME_PATTERN.search(name) is None:
+                continue
+            point_lat = element.get("lat")
+            point_lon = element.get("lon")
+            if point_lat is None or point_lon is None:
+                center = element.get("center") or {}
+                if isinstance(center, dict):
+                    point_lat = center.get("lat")
+                    point_lon = center.get("lon")
+            if point_lat is None or point_lon is None:
+                continue
+            try:
+                distance = _haversine_distance_m(lat, lon, float(point_lat), float(point_lon))
+            except (TypeError, ValueError):
+                continue
+            if distance < nearest_distance:
+                nearest_distance = distance
+                nearest_name = name
+    except Exception:
+        nearest_name = None
+
+    _IC_JCT_LOOKUP_CACHE[cache_key] = nearest_name
+    return nearest_name
+
+
+def _enrich_route_steps_with_ic_jct_names(route_steps: list[dict[str, object]]) -> tuple[list[dict[str, object]], bool]:
+    changed = False
+    lookups = 0
+    result: list[dict[str, object]] = []
+    for step in route_steps:
+        if not isinstance(step, dict):
+            continue
+        copied = dict(step)
+        kind = str(copied.get("kind") or "").strip().lower()
+        if kind not in {"enter", "exit", "junction"}:
+            result.append(copied)
+            continue
+        label = str(copied.get("label") or "").strip()
+        road = str(copied.get("road") or "").strip()
+        detail = str(copied.get("detail") or "").strip()
+        current_name = _extract_ic_jct_name_candidate(label, road, detail)
+        if current_name is None and lookups < 8:
+            lon = copied.get("lon")
+            lat = copied.get("lat")
+            if isinstance(lon, (int, float)) and isinstance(lat, (int, float)):
+                if math.isfinite(float(lon)) and math.isfinite(float(lat)):
+                    lookups += 1
+                    current_name = _lookup_nearest_ic_jct_name(float(lon), float(lat))
+        if current_name:
+            next_label = _build_route_step_label(kind, current_name, "", "")
+            if copied.get("label") != next_label:
+                copied["label"] = next_label
+                changed = True
+            if not copied.get("road"):
+                copied["road"] = current_name
+                changed = True
+        result.append(copied)
+    return result, changed
+
+
+def _extract_ors_route_steps(feature: dict[str, object], coordinates: list[list[float]]) -> list[dict[str, object]]:
+    raw_steps: list[dict[str, object]] = []
+    properties = feature.get("properties") or {}
+    segments = properties.get("segments") or []
+    for segment in segments:
+        if not isinstance(segment, dict):
+            continue
+        steps = segment.get("steps") or []
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            way_points = step.get("way_points") or []
+            if not isinstance(way_points, list) or not way_points:
+                continue
+            try:
+                point_index = int(way_points[0])
+            except (TypeError, ValueError):
+                continue
+            if point_index < 0 or point_index >= len(coordinates):
+                continue
+            coord = coordinates[point_index]
+            if not isinstance(coord, list) or len(coord) < 2:
+                continue
+            try:
+                lon = float(coord[0])
+                lat = float(coord[1])
+            except (TypeError, ValueError):
+                continue
+            instruction = str(step.get("instruction") or "").strip()
+            road_name = str(step.get("name") or "").strip()
+            maneuver_text = str(step.get("type") or "").strip()
+            kind = _classify_route_step_kind(maneuver_text, instruction, road_name, "")
+            raw_steps.append(
+                {
+                    "lon": lon,
+                    "lat": lat,
+                    "kind": kind,
+                    "road": road_name or None,
+                    "label": _build_route_step_label(kind, road_name, "", instruction),
+                    "detail": instruction or None,
+                }
+            )
+    return _normalize_route_steps(raw_steps)
+
+
+def _extract_osrm_route_steps(route: dict[str, object]) -> list[dict[str, object]]:
+    raw_steps: list[dict[str, object]] = []
+    for leg in route.get("legs") or []:
+        if not isinstance(leg, dict):
+            continue
+        for step in leg.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            maneuver = step.get("maneuver") or {}
+            if not isinstance(maneuver, dict):
+                continue
+            location = maneuver.get("location") or []
+            if not isinstance(location, list) or len(location) < 2:
+                continue
+            try:
+                lon = float(location[0])
+                lat = float(location[1])
+            except (TypeError, ValueError):
+                continue
+            name = str(step.get("name") or "").strip()
+            ref = str(step.get("ref") or "").strip()
+            road_name = " / ".join(part for part in (name, ref) if part).strip()
+            destinations = str(step.get("destinations") or "").strip()
+            exit_number = maneuver.get("exit")
+            if isinstance(exit_number, int) and exit_number > 0:
+                destinations = f"{destinations} 出口{exit_number}".strip()
+            maneuver_type = str(maneuver.get("type") or "").strip().lower()
+            maneuver_modifier = str(maneuver.get("modifier") or "").strip().lower()
+            maneuver_text = " ".join(part for part in (maneuver_type, maneuver_modifier) if part)
+            kind = _classify_route_step_kind(maneuver_text, "", road_name, destinations)
+            raw_steps.append(
+                {
+                    "lon": lon,
+                    "lat": lat,
+                    "kind": kind,
+                    "road": road_name or None,
+                    "label": _build_route_step_label(kind, road_name, destinations, maneuver_text),
+                    "detail": maneuver_text or None,
+                }
+            )
+    return _normalize_route_steps(raw_steps)
+
+
 def _request_openrouteservice_route(
     from_lat: float,
     from_lon: float,
@@ -110,13 +421,13 @@ def _request_openrouteservice_route(
     to_lon: float,
     *,
     avoid_highways: bool,
-) -> tuple[dict[str, object], float, float]:
+) -> tuple[dict[str, object], float, float, list[dict[str, object]]]:
     api_key = os.getenv("ORS_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("ors_api_key_missing")
     payload: dict[str, object] = {
         "coordinates": [[from_lon, from_lat], [to_lon, to_lat]],
-        "instructions": False,
+        "instructions": True,
     }
     if avoid_highways:
         payload["options"] = {"avoid_features": ["highways"]}
@@ -159,10 +470,12 @@ def _request_openrouteservice_route(
     duration_s = float(summary.get("duration") or 0.0)
     if distance_m <= 0:
         raise RuntimeError("ors_distance_invalid")
+    route_steps = _extract_ors_route_steps(feature, coordinates)
     return (
         {"type": "LineString", "coordinates": coordinates},
         distance_m,
         duration_s,
+        route_steps,
     )
 
 
@@ -173,12 +486,12 @@ def _request_osrm_public_route(
     to_lon: float,
     *,
     avoid_highways: bool,
-) -> tuple[dict[str, object], float, float]:
+) -> tuple[dict[str, object], float, float, list[dict[str, object]]]:
     coord_path = f"{from_lon:.6f},{from_lat:.6f};{to_lon:.6f},{to_lat:.6f}"
     params = {
         "overview": "full",
         "geometries": "geojson",
-        "steps": "false",
+        "steps": "true",
     }
     if avoid_highways:
         params["exclude"] = "motorway"
@@ -217,10 +530,12 @@ def _request_osrm_public_route(
     duration_s = float(route.get("duration") or 0.0)
     if distance_m <= 0:
         raise RuntimeError("osrm_distance_invalid")
+    route_steps = _extract_osrm_route_steps(route)
     return (
         {"type": "LineString", "coordinates": coordinates},
         distance_m,
         duration_s,
+        route_steps,
     )
 
 
@@ -231,29 +546,29 @@ def _request_route_with_fallback_providers(
     to_lon: float,
     *,
     avoid_highways: bool,
-) -> tuple[dict[str, object], float, float, str]:
+) -> tuple[dict[str, object], float, float, list[dict[str, object]], str]:
     provider_errors: list[str] = []
     try:
-        geometry, distance_m, duration_s = _request_openrouteservice_route(
+        geometry, distance_m, duration_s, route_steps = _request_openrouteservice_route(
             from_lat,
             from_lon,
             to_lat,
             to_lon,
             avoid_highways=avoid_highways,
         )
-        return geometry, distance_m, duration_s, "openrouteservice"
+        return geometry, distance_m, duration_s, route_steps, "openrouteservice"
     except RuntimeError as exc:
         provider_errors.append(str(exc))
 
     try:
-        geometry, distance_m, duration_s = _request_osrm_public_route(
+        geometry, distance_m, duration_s, route_steps = _request_osrm_public_route(
             from_lat,
             from_lon,
             to_lat,
             to_lon,
             avoid_highways=avoid_highways,
         )
-        return geometry, distance_m, duration_s, "osrm_public"
+        return geometry, distance_m, duration_s, route_steps, "osrm_public"
     except RuntimeError as exc:
         provider_errors.append(str(exc))
 
@@ -276,13 +591,18 @@ def _haversine_distance_m(from_lat: float, from_lon: float, to_lat: float, to_lo
     return earth_radius_m * c
 
 
-def _fallback_straight_route(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> tuple[dict[str, object], float, float | None]:
+def _fallback_straight_route(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+) -> tuple[dict[str, object], float, float | None, list[dict[str, object]]]:
     distance_m = _haversine_distance_m(from_lat, from_lon, to_lat, to_lon)
     geometry = {
         "type": "LineString",
         "coordinates": [[from_lon, from_lat], [to_lon, to_lat]],
     }
-    return geometry, distance_m, None
+    return geometry, distance_m, None, []
 
 
 def get_db():
@@ -498,16 +818,31 @@ def get_company_route(
         .filter(models.CompanyRouteCache.policy == policy)
         .first()
     )
+    cached_steps_available = _has_cached_route_steps(cache.steps_json) if cache is not None else False
     if (
         cache is not None
         and not refresh
         and cache.coord_key == coord_key
+        and cached_steps_available
         and (cache.provider or "") != "fallback_straight"
     ):
         try:
             geometry = json.loads(cache.geometry_json)
         except json.JSONDecodeError:
             geometry = None
+        route_steps: list[dict[str, object]] = []
+        try:
+            cached_steps = json.loads(cache.steps_json) if cache.steps_json else []
+            if isinstance(cached_steps, list):
+                route_steps = cached_steps
+        except json.JSONDecodeError:
+            route_steps = []
+        route_steps, enriched = _enrich_route_steps_with_ic_jct_names(route_steps)
+        if enriched:
+            cache.steps_json = json.dumps(route_steps, ensure_ascii=False)
+            cache.updated_at = datetime.utcnow()
+            db.add(cache)
+            db.commit()
         if geometry:
             return {
                 "from_company_id": from_company.id,
@@ -524,6 +859,7 @@ def get_company_route(
                 "duration_s": cache.duration_s,
                 "duration_min": round((cache.duration_s or 0.0) / 60, 1) if cache.duration_s else None,
                 "geometry": geometry,
+                "route_steps": route_steps,
                 "cached": True,
                 "provider": cache.provider or "openrouteservice",
                 "updated_at": cache.updated_at.isoformat() if cache.updated_at else None,
@@ -534,9 +870,10 @@ def get_company_route(
     geometry: dict[str, object]
     distance_m: float
     duration_s: float | None
+    route_steps: list[dict[str, object]]
     if same_prefecture:
         try:
-            geometry, distance_m, duration_s, provider = _request_route_with_fallback_providers(
+            geometry, distance_m, duration_s, route_steps, provider = _request_route_with_fallback_providers(
                 from_lat,
                 from_lon,
                 target_lat,
@@ -545,7 +882,7 @@ def get_company_route(
             )
         except RuntimeError:
             try:
-                geometry, distance_m, duration_s, provider = _request_route_with_fallback_providers(
+                geometry, distance_m, duration_s, route_steps, provider = _request_route_with_fallback_providers(
                     from_lat,
                     from_lon,
                     target_lat,
@@ -554,7 +891,7 @@ def get_company_route(
                 )
                 effective_mode = "intra_pref_local_fallback"
             except RuntimeError:
-                geometry, distance_m, duration_s = _fallback_straight_route(
+                geometry, distance_m, duration_s, route_steps = _fallback_straight_route(
                     from_lat,
                     from_lon,
                     target_lat,
@@ -564,7 +901,7 @@ def get_company_route(
                 provider = "fallback_straight"
     else:
         try:
-            geometry, distance_m, duration_s, provider = _request_route_with_fallback_providers(
+            geometry, distance_m, duration_s, route_steps, provider = _request_route_with_fallback_providers(
                 from_lat,
                 from_lon,
                 target_lat,
@@ -572,7 +909,7 @@ def get_company_route(
                 avoid_highways=False,
             )
         except RuntimeError:
-            geometry, distance_m, duration_s = _fallback_straight_route(
+            geometry, distance_m, duration_s, route_steps = _fallback_straight_route(
                 from_lat,
                 from_lon,
                 target_lat,
@@ -580,6 +917,8 @@ def get_company_route(
             )
             effective_mode = "inter_pref_straight_fallback"
             provider = "fallback_straight"
+
+    route_steps, _ = _enrich_route_steps_with_ic_jct_names(route_steps)
 
     if cache is None:
         cache = models.CompanyRouteCache(
@@ -593,6 +932,7 @@ def get_company_route(
     cache.distance_m = distance_m
     cache.duration_s = duration_s
     cache.geometry_json = json.dumps(geometry, ensure_ascii=False)
+    cache.steps_json = json.dumps(route_steps, ensure_ascii=False)
     cache.updated_at = datetime.utcnow()
     db.add(cache)
     db.commit()
@@ -612,6 +952,7 @@ def get_company_route(
         "duration_s": duration_s,
         "duration_min": round(duration_s / 60, 1) if duration_s else None,
         "geometry": geometry,
+        "route_steps": route_steps,
         "cached": False,
         "provider": provider,
         "updated_at": cache.updated_at.isoformat() if cache.updated_at else None,

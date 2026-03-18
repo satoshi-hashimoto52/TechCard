@@ -131,6 +131,10 @@ with engine.begin() as connection:
         connection.execute(
             text("ALTER TABLE company_route_cache ADD COLUMN effective_mode TEXT DEFAULT 'inter_pref_mixed'")
         )
+    if route_cache_columns and not any(column[1] == "steps_json" for column in route_cache_columns):
+        connection.execute(
+            text("ALTER TABLE company_route_cache ADD COLUMN steps_json TEXT")
+        )
 
 app = FastAPI(title="TechCard Backend")
 

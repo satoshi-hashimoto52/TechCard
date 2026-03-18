@@ -16,6 +16,15 @@ type RouteLine = {
   coordinates: [number, number][];
 };
 
+type RouteStep = {
+  lon: number;
+  lat: number;
+  kind: 'enter' | 'exit' | 'junction' | 'road' | 'other';
+  label: string;
+  road?: string | null;
+  detail?: string | null;
+};
+
 type CompanyRouteResponse = {
   from_company_id: number;
   from_company_name: string;
@@ -31,6 +40,7 @@ type CompanyRouteResponse = {
   duration_s?: number | null;
   duration_min?: number | null;
   geometry: RouteLine;
+  route_steps?: RouteStep[];
   cached: boolean;
   provider: string;
   updated_at?: string | null;
@@ -133,9 +143,31 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       ],
     };
   }, [selectedRoute]);
+  const routeDisplaySteps = useMemo(() => {
+    const steps = selectedRoute?.route_steps;
+    if (!steps || !Array.isArray(steps)) return [];
+    const normalized = steps
+      .filter(step => isFiniteNumber(step?.lon) && isFiniteNumber(step?.lat) && Boolean(step?.label))
+      .slice(0, 40);
+    const keySteps = normalized.filter(step => step.kind === 'enter' || step.kind === 'exit' || step.kind === 'junction');
+    if (keySteps.length > 0) {
+      return keySteps.slice(0, 20);
+    }
+    return normalized.filter(step => step.kind === 'road').slice(0, 10);
+  }, [selectedRoute]);
   const isStraightFallback = selectedRoute?.provider === 'fallback_straight';
   const routeOutlineColor = isStraightFallback ? 'rgba(124, 45, 18, 0.95)' : 'rgba(3, 7, 18, 0.95)';
   const routeLineColor = isStraightFallback ? '#fb923c' : '#22d3ee';
+  const routeStepKindLabel = useMemo<Record<RouteStep['kind'], string>>(
+    () => ({
+      enter: '入口',
+      exit: '出口',
+      junction: '乗換',
+      road: '道路',
+      other: '経由',
+    }),
+    [],
+  );
 
   const updateBounds = useCallback(() => {
     const map = mapRef.current?.getMap();
@@ -643,6 +675,19 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             />
           </Source>
         )}
+        {viewState.zoom >= 4 && routeDisplaySteps.map((step, index) => (
+          <Marker
+            key={`route-step-${index}-${step.lon.toFixed(5)}-${step.lat.toFixed(5)}-${step.kind}`}
+            longitude={step.lon}
+            latitude={step.lat}
+            anchor="left"
+          >
+            <div className={`techcard-route-step techcard-route-step--${step.kind}`}>
+              <span className="techcard-route-step__kind">{routeStepKindLabel[step.kind] || '経由'}</span>
+              <span className="techcard-route-step__text">{step.label}</span>
+            </div>
+          </Marker>
+        ))}
 
         {viewState.zoom < 7 &&
           clusters.map((clusterItem: any) => {
@@ -722,7 +767,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         )}
       </Map>
       </div>
-      <div className="absolute top-3 left-3 right-3 z-20 space-y-2 pointer-events-none">
+      <div className="absolute top-3 left-3 z-20 w-[380px] max-w-[92vw] max-h-[calc(100%-1.5rem)] overflow-y-auto pr-1 space-y-2 pointer-events-none">
         {!loading && points.length === 0 && (
           <div className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2 text-base text-slate-200">
             会社の位置情報がまだありません。
@@ -763,6 +808,11 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               {selectedRoute.cached ? ' / キャッシュ' : ' / API最新'}
               {selectedRoute.provider ? ` / ${selectedRoute.provider}` : ''}
             </div>
+            {routeDisplaySteps.length > 0 && (
+              <div className="mt-1 text-xs text-slate-300">
+                乗降・乗換・道路表示: {routeDisplaySteps.length} 箇所
+              </div>
+            )}
             <div className="mt-2 flex items-center gap-3 text-xs text-slate-300">
               <span className="inline-flex items-center gap-1">
                 <span className="inline-block h-0 w-6 border-t-2 border-cyan-300" />

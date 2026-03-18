@@ -514,6 +514,56 @@ body {
   color: #cbd5f5;
 }
 
+.techcard-route-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  border: 1px solid rgba(148, 163, 184, 0.45);
+  background: rgba(2, 6, 23, 0.84);
+  color: #e2e8f0;
+  font-size: 11px;
+  line-height: 1.2;
+  pointer-events: none;
+  box-shadow: 0 2px 8px rgba(2, 6, 23, 0.35);
+  white-space: nowrap;
+}
+
+.techcard-route-step__kind {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 30px;
+  padding: 1px 6px;
+  border-radius: 9999px;
+  background: rgba(148, 163, 184, 0.2);
+  color: #f8fafc;
+  font-weight: 700;
+}
+
+.techcard-route-step__text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.techcard-route-step--enter {
+  border-color: rgba(56, 189, 248, 0.55);
+}
+
+.techcard-route-step--exit {
+  border-color: rgba(251, 146, 60, 0.65);
+}
+
+.techcard-route-step--junction {
+  border-color: rgba(250, 204, 21, 0.6);
+}
+
+.techcard-route-step--road {
+  border-color: rgba(16, 185, 129, 0.55);
+}
+
 .geocode-progress__bar {
   width: 100%;
   background: #1e293b;

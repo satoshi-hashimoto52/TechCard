@@ -155,4 +155,5 @@ class CompanyRouteCache(Base):
     distance_m = Column(Float, nullable=False)
     duration_s = Column(Float, nullable=True)
     geometry_json = Column(Text, nullable=False)
+    steps_json = Column(Text, nullable=True)
     updated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
