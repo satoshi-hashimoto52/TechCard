@@ -20,6 +20,9 @@ const NETWORK_GRAPH_COLORS = {
 
 const NODE_REL_SIZE = 5;
 const LINK_COLOR = 'rgba(148, 163, 184, 0.4)';
+const PERSON_LINK_COLOR = 'rgba(251, 146, 60, 0.8)';
+const PERSON_LINK_DIM_COLOR = 'rgba(251, 146, 60, 0.3)';
+const PERSON_LINK_ACTIVE_COLOR = 'rgba(251, 146, 60, 0.95)';
 const LAYOUT_STORAGE_KEY = 'techcard_network_layout_v1';
 const COMPANY_RING_RADII_LAYOUT_VERSION = 2;
 const DISPLAY_STORAGE_KEY = 'techcard_display_config';
@@ -371,6 +374,10 @@ const NetworkGraph: React.FC = () => {
   const relaxedNodeIdsRef = useRef(new Set<string>());
   const relaxedAnchorPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const dragLastPositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const dragSelectedClusterRef = useRef<{
+    anchorId: string;
+    offsets: Map<string, { dx: number; dy: number }>;
+  } | null>(null);
   const gridHiddenLockPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
   const gridNodeKeyRef = useRef<Map<string, string>>(new Map());
@@ -1170,19 +1177,47 @@ const NetworkGraph: React.FC = () => {
     return map;
   }, [rawGraph.edges]);
 
-  const highlightedNodeIds = useMemo(() => {
-    if (!selectedNodeId) return new Set<string>();
-    const ids = new Set<string>([selectedNodeId]);
+  const highlightNodeById = useMemo(() => {
+    return new Map(graph.nodes.map(node => [String(node.id), node]));
+  }, [graph.nodes]);
+
+  const directNeighborIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (!selectedNodeId) return ids;
     graph.links.forEach(link => {
       const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
       const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-      if (sourceId === selectedNodeId || targetId === selectedNodeId) {
-        ids.add(sourceId);
-        ids.add(targetId);
+      if (sourceId === selectedNodeId) {
+        ids.add(String(targetId));
+      } else if (targetId === selectedNodeId) {
+        ids.add(String(sourceId));
       }
     });
     return ids;
   }, [graph.links, selectedNodeId]);
+
+  const connectedContactIds = useMemo(() => {
+    const ids = new Set<string>();
+    directNeighborIds.forEach(nodeId => {
+      const node = highlightNodeById.get(nodeId) || rawNodeById.get(nodeId);
+      if (node?.type === 'contact') {
+        ids.add(nodeId);
+      }
+    });
+    return ids;
+  }, [directNeighborIds, highlightNodeById, rawNodeById]);
+
+  const highlightedNodeIds = useMemo(() => {
+    if (!selectedNodeId) return new Set<string>();
+    const ids = new Set<string>([selectedNodeId]);
+    directNeighborIds.forEach(nodeId => ids.add(nodeId));
+    connectedContactIds.forEach(contactId => {
+      const node = (highlightNodeById.get(contactId) || rawNodeById.get(contactId)) as GraphNode | undefined;
+      if (!node?.company_node_id) return;
+      ids.add(String(node.company_node_id));
+    });
+    return ids;
+  }, [connectedContactIds, directNeighborIds, highlightNodeById, rawNodeById, selectedNodeId]);
 
   const highlightedLinkKeys = useMemo(() => {
     if (!selectedNodeId) return new Set<string>();
@@ -1192,10 +1227,20 @@ const NetworkGraph: React.FC = () => {
       const targetId = typeof link.target === 'string' ? link.target : link.target.id;
       if (sourceId === selectedNodeId || targetId === selectedNodeId) {
         keys.add(`${sourceId}->${targetId}`);
+        return;
+      }
+      if (link.type !== 'employment') return;
+      const sourceIsConnectedContact = connectedContactIds.has(String(sourceId));
+      const targetIsConnectedContact = connectedContactIds.has(String(targetId));
+      if (
+        (sourceIsConnectedContact && highlightedNodeIds.has(String(targetId)))
+        || (targetIsConnectedContact && highlightedNodeIds.has(String(sourceId)))
+      ) {
+        keys.add(`${sourceId}->${targetId}`);
       }
     });
     return keys;
-  }, [graph.links, selectedNodeId]);
+  }, [connectedContactIds, graph.links, highlightedNodeIds, selectedNodeId]);
 
   const selectedNode = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -2236,6 +2281,40 @@ const NetworkGraph: React.FC = () => {
     return new Map(graph.nodes.map(node => [node.id, node as GraphNode]));
   }, [graph.nodes, layoutEpoch]);
 
+  const isPersonConnectedNonEmploymentLink = useCallback((link: any) => {
+    if (link.type === 'employment') return false;
+    const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+    const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+    const sourceNode = graphNodeById.get(String(sourceId));
+    const targetNode = graphNodeById.get(String(targetId));
+    return sourceNode?.type === 'contact' || targetNode?.type === 'contact';
+  }, [graphNodeById]);
+
+  const orangeBridgeRelationEventLinkKeys = useMemo(() => {
+    const orangeIncidentNodeIds = new Set<string>();
+    graph.links.forEach(link => {
+      if (!isPersonConnectedNonEmploymentLink(link)) return;
+      const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+      const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+      orangeIncidentNodeIds.add(String(sourceId));
+      orangeIncidentNodeIds.add(String(targetId));
+    });
+    const keys = new Set<string>();
+    graph.links.forEach(link => {
+      if (link.type !== 'relation_event') return;
+      const sourceId = String(typeof link.source === 'string' ? link.source : link.source.id);
+      const targetId = String(typeof link.target === 'string' ? link.target : link.target.id);
+      const isTopSubPair = (
+        (sourceId.startsWith('event_top_') && targetId.startsWith('event_sub_'))
+        || (sourceId.startsWith('event_sub_') && targetId.startsWith('event_top_'))
+      );
+      if (!isTopSubPair) return;
+      if (!orangeIncidentNodeIds.has(sourceId) || !orangeIncidentNodeIds.has(targetId)) return;
+      keys.add(`${sourceId}->${targetId}`);
+    });
+    return keys;
+  }, [graph.links, isPersonConnectedNonEmploymentLink]);
+
   const graphAdjacency = useMemo(() => {
     const map = new Map<string, Set<string>>();
     graph.links.forEach(link => {
@@ -2498,6 +2577,14 @@ const NetworkGraph: React.FC = () => {
     nodePositionsRef.current.set(companyId, { x: companyX, y: companyY });
     graphRef.current?.d3ReheatSimulation?.();
   }, [graphNodeById]);
+
+  const snapCompanyRingRadiusToGrid = useCallback((inputRadius: number, minRadius: number) => {
+    const raw = Number(inputRadius);
+    if (!Number.isFinite(raw)) return minRadius;
+    const step = Math.max(24, Number(gridConfig.cellSize) || 120);
+    const snapped = Math.round(raw / step) * step;
+    return Math.max(minRadius, snapped > 0 ? snapped : step);
+  }, [gridConfig.cellSize]);
 
   const toGraphPoint = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const rect = containerRef.current?.getBoundingClientRect();
@@ -3662,10 +3749,13 @@ const NetworkGraph: React.FC = () => {
             if (!point) return;
             if (ringResizeStateRef.current) {
               const active = ringResizeStateRef.current;
-              const nextRadius = Math.max(
+              let nextRadius = Math.max(
                 active.minRadius,
                 Math.hypot(point.gx - active.centerX, point.gy - active.centerY),
               );
+              if (event.ctrlKey) {
+                nextRadius = snapCompanyRingRadiusToGrid(nextRadius, active.minRadius);
+              }
               applyCompanyRingRadius(active.companyId, nextRadius);
               setRingResizeHoverCompanyId(active.companyId);
               setRingResizeCursor(prev => {
@@ -3720,17 +3810,23 @@ const NetworkGraph: React.FC = () => {
               updateRingResizePopup(selectedCompanyForRingResize || null);
             }
           }}
-          onClickCapture={() => {
+          onClickCapture={event => {
+            const target = event.target as HTMLElement | null;
+            if (target?.closest('[data-node-click-ignore="true"]')) return;
             if (didDragNodeRef.current) return;
             const hovered = hoveredNodeRef.current;
-            if (!hovered) return;
-            handleNodeClick(hovered as unknown as NodeObject);
+            if (hovered) {
+              handleNodeClick(hovered as unknown as NodeObject);
+              return;
+            }
+            setSelectedNodeId(null);
           }}
         >
           {ringResizePopup && (
             <div
               className="absolute z-20"
               style={{ left: ringResizePopup.left, top: ringResizePopup.top }}
+              data-node-click-ignore="true"
               onMouseDown={event => {
                 event.stopPropagation();
               }}
@@ -3862,13 +3958,18 @@ const NetworkGraph: React.FC = () => {
               enableZoomInteraction
               enablePanInteraction
               linkColor={(link: any) => {
+                const sourceId = String(typeof link.source === 'string' ? link.source : link.source.id);
+                const targetId = String(typeof link.target === 'string' ? link.target : link.target.id);
+                const isPersonLink = isPersonConnectedNonEmploymentLink(link)
+                  || orangeBridgeRelationEventLinkKeys.has(`${sourceId}->${targetId}`);
                 const highlightActive = highlightMode || Boolean(searchFocus);
-                if (!highlightActive || !selectedNodeId) return LINK_COLOR;
-                const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
-                const targetId = typeof link.target === 'string' ? link.target : link.target.id;
-                return highlightedLinkKeys.has(`${sourceId}->${targetId}`)
-                  ? 'rgba(156, 163, 175, 0.9)'
-                  : 'rgba(156, 163, 175, 0.25)';
+                if (!highlightActive || !selectedNodeId) {
+                  return isPersonLink ? PERSON_LINK_COLOR : LINK_COLOR;
+                }
+                if (highlightedLinkKeys.has(`${sourceId}->${targetId}`)) {
+                  return isPersonLink ? PERSON_LINK_ACTIVE_COLOR : 'rgba(156, 163, 175, 0.9)';
+                }
+                return isPersonLink ? PERSON_LINK_DIM_COLOR : 'rgba(156, 163, 175, 0.25)';
               }}
               linkWidth={(link: any) => {
                 if (!visibleTypes.contact && link.type === 'company_relation') {
@@ -4021,36 +4122,75 @@ const NetworkGraph: React.FC = () => {
                 }
               } else {
                 companyRingRotateSnapRef.current = null;
-                const prev = dragLastPositionRef.current.get(typed.id);
-                if (
-                  !gridConfig.enabled
-                  && prev
-                  && Number.isFinite(rawCurrentX)
-                  && Number.isFinite(rawCurrentY)
-                ) {
-                  const dx = rawCurrentX - prev.x;
-                  const dy = rawCurrentY - prev.y;
-                  if (Math.abs(dx) + Math.abs(dy) > 0.01) {
-                    const followers = getDragFollowers(typed.id, 3);
-                    followers.forEach(({ id, depth }) => {
-                      const follower = graphNodeById.get(id) as any;
+                const isSelectedAnchorDrag = selectedNodeId === typed.id;
+                if (isSelectedAnchorDrag && Number.isFinite(rawCurrentX) && Number.isFinite(rawCurrentY)) {
+                  let cluster = dragSelectedClusterRef.current;
+                  if (!cluster || cluster.anchorId !== typed.id) {
+                    const offsets = new Map<string, { dx: number; dy: number }>();
+                    const neighbors = graphAdjacency.get(typed.id) || new Set<string>();
+                    neighbors.forEach(neighborId => {
+                      const follower = graphNodeById.get(neighborId) as any;
                       if (!follower) return;
-                      if (follower.is_self) return;
-                      if (fixedNodeIdsRef.current.has(id)) return;
-                      const factor = depth === 1 ? 0.58 : depth === 2 ? 0.34 : 0.2;
-                      const mx = dx * factor;
-                      const my = dy * factor;
                       if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
-                      follower.x += mx;
-                      follower.y += my;
-                      follower.vx = 0;
-                      follower.vy = 0;
-                      follower.ringAngle = Math.atan2(follower.y, follower.x);
-                      if (follower.fx != null && follower.fy != null) {
-                        follower.fx += mx;
-                        follower.fy += my;
-                      }
+                      offsets.set(String(neighborId), {
+                        dx: Number(follower.x) - rawCurrentX,
+                        dy: Number(follower.y) - rawCurrentY,
+                      });
                     });
+                    cluster = { anchorId: typed.id, offsets };
+                    dragSelectedClusterRef.current = cluster;
+                  }
+                  cluster.offsets.forEach((offset, id) => {
+                    const follower = graphNodeById.get(id) as any;
+                    if (!follower) return;
+                    if (id === typed.id) return;
+                    const nx = rawCurrentX + offset.dx;
+                    const ny = rawCurrentY + offset.dy;
+                    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+                    follower.x = nx;
+                    follower.y = ny;
+                    follower.vx = 0;
+                    follower.vy = 0;
+                    if (follower.fx != null && follower.fy != null) {
+                      follower.fx = nx;
+                      follower.fy = ny;
+                    }
+                    follower.ringAngle = Math.atan2(ny, nx);
+                    relaxedAnchorPositionsRef.current.set(id, { x: nx, y: ny });
+                  });
+                } else {
+                  dragSelectedClusterRef.current = null;
+                  const prev = dragLastPositionRef.current.get(typed.id);
+                  if (
+                    !gridConfig.enabled
+                    && prev
+                    && Number.isFinite(rawCurrentX)
+                    && Number.isFinite(rawCurrentY)
+                  ) {
+                    const dx = rawCurrentX - prev.x;
+                    const dy = rawCurrentY - prev.y;
+                    if (Math.abs(dx) + Math.abs(dy) > 0.01) {
+                      const followers = getDragFollowers(typed.id, 3);
+                      followers.forEach(({ id, depth }) => {
+                        const follower = graphNodeById.get(id) as any;
+                        if (!follower) return;
+                        if (follower.is_self) return;
+                        if (fixedNodeIdsRef.current.has(id)) return;
+                        const factor = depth === 1 ? 0.58 : depth === 2 ? 0.34 : 0.2;
+                        const mx = dx * factor;
+                        const my = dy * factor;
+                        if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
+                        follower.x += mx;
+                        follower.y += my;
+                        follower.vx = 0;
+                        follower.vy = 0;
+                        follower.ringAngle = Math.atan2(follower.y, follower.x);
+                        if (follower.fx != null && follower.fy != null) {
+                          follower.fx += mx;
+                          follower.fy += my;
+                        }
+                      });
+                    }
                   }
                 }
               }
@@ -4083,6 +4223,7 @@ const NetworkGraph: React.FC = () => {
                 }
                 draggingNodeIdRef.current = null;
                 dragLastPositionRef.current.delete(typed.id);
+                dragSelectedClusterRef.current = null;
                 companyRingRotateSnapRef.current = null;
                 window.setTimeout(() => {
                   didDragNodeRef.current = false;
@@ -4090,6 +4231,7 @@ const NetworkGraph: React.FC = () => {
                 return;
               }
               draggingNodeIdRef.current = null;
+              dragSelectedClusterRef.current = null;
               companyRingRotateSnapRef.current = null;
               window.setTimeout(() => {
                 didDragNodeRef.current = false;

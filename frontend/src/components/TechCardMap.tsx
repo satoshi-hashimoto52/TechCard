@@ -133,6 +133,9 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       ],
     };
   }, [selectedRoute]);
+  const isStraightFallback = selectedRoute?.provider === 'fallback_straight';
+  const routeOutlineColor = isStraightFallback ? 'rgba(124, 45, 18, 0.95)' : 'rgba(3, 7, 18, 0.95)';
+  const routeLineColor = isStraightFallback ? '#fb923c' : '#22d3ee';
 
   const updateBounds = useCallback(() => {
     const map = mapRef.current?.getMap();
@@ -622,18 +625,20 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               id="selected-route-outline"
               type="line"
               paint={{
-                'line-color': 'rgba(3, 7, 18, 0.95)',
+                'line-color': routeOutlineColor,
                 'line-width': 8,
                 'line-opacity': 0.75,
+                ...(isStraightFallback ? { 'line-dasharray': [2, 1.5] } : {}),
               }}
             />
             <Layer
               id="selected-route-line"
               type="line"
               paint={{
-                'line-color': '#22d3ee',
+                'line-color': routeLineColor,
                 'line-width': 5,
                 'line-opacity': 0.95,
+                ...(isStraightFallback ? { 'line-dasharray': [2, 1.5] } : {}),
               }}
             />
           </Source>
@@ -757,6 +762,16 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
                       : '県外（一般道+高速）'}
               {selectedRoute.cached ? ' / キャッシュ' : ' / API最新'}
               {selectedRoute.provider ? ` / ${selectedRoute.provider}` : ''}
+            </div>
+            <div className="mt-2 flex items-center gap-3 text-xs text-slate-300">
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-0 w-6 border-t-2 border-cyan-300" />
+                実ルート
+              </span>
+              <span className="inline-flex items-center gap-1">
+                <span className="inline-block h-0 w-6 border-t-2 border-dashed border-orange-400" />
+                直線フォールバック
+              </span>
             </div>
           </div>
         )}
