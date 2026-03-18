@@ -21,6 +21,7 @@ const NETWORK_GRAPH_COLORS = {
 const NODE_REL_SIZE = 5;
 const LINK_COLOR = 'rgba(148, 163, 184, 0.4)';
 const LAYOUT_STORAGE_KEY = 'techcard_network_layout_v1';
+const COMPANY_RING_RADII_LAYOUT_VERSION = 2;
 const DISPLAY_STORAGE_KEY = 'techcard_display_config';
 const DEPTH_LAYOUT_RADIUS_STEP = 260;
 const PRIVATE_AREA_RING_COUNT = 4;
@@ -30,8 +31,14 @@ const GRID_RING_BASE_STROKE = 'rgba(70, 150, 170, 0.32)';
 const GRID_RING_ALT_STROKE = 'rgba(28, 120, 168, 0.52)';
 const SELF_COMPANY_RING_STROKE = 'rgba(239, 68, 68, 0.32)';
 const COMPANY_MEMBER_RING_STROKE = 'rgba(96, 165, 250, 0.28)';
-const COMPANY_MEMBER_RING_MIN_RADIUS = 92;
+const COMPANY_MEMBER_RING_BASE_RADIUS = 56;
 const COMPANY_MEMBER_RING_MEMBER_GAP = 68;
+const COMPANY_MEMBER_RING_AUTO_STEP = 14;
+const COMPANY_MEMBER_ROTATE_STEP_DEG = 5;
+const COMPANY_MEMBER_ROTATE_STEP_RAD = (COMPANY_MEMBER_ROTATE_STEP_DEG * Math.PI) / 180;
+const RELATION_COMPANY_REPAIR_DISTANCE = 520;
+const RELATION_COMPANY_REPAIR_OFFSET = 150;
+const COMPANY_MEMBER_RING_RESIZE_HIT_PX = 12;
 const LAYOUT_CHARGE_STRENGTH = -820;
 const LAYOUT_COLLIDE_RADIUS = 52;
 const CONNECTED_ANCHOR_RADIUS_RATIO = 0.82;
@@ -117,6 +124,20 @@ type CompanyMemberAssignment = {
   total: number;
 };
 
+type CompanyMemberRing = {
+  radius: number;
+  count: number;
+};
+
+type CompanyRingHit = {
+  companyId: string;
+  centerX: number;
+  centerY: number;
+  radius: number;
+  count: number;
+  diff: number;
+};
+
 type SearchType = 'tech' | 'company' | 'contact' | 'event';
 
 type VisibleTypes = {
@@ -144,7 +165,6 @@ type DisplayConfig = {
   highlightMode: boolean;
   groupCollapsed: boolean;
   searchType: SearchType;
-  relationEventEnabled: boolean;
 };
 
 const defaultDisplayConfig: DisplayConfig = {
@@ -152,7 +172,22 @@ const defaultDisplayConfig: DisplayConfig = {
   highlightMode: true,
   groupCollapsed: false,
   searchType: 'tech',
-  relationEventEnabled: true,
+};
+
+const getAutoCompanyMemberRingRadius = (count: number): number => {
+  const safeCount = Math.max(1, count);
+  const target = Math.max(
+    COMPANY_MEMBER_RING_BASE_RADIUS,
+    (Math.max(3, safeCount) * COMPANY_MEMBER_RING_MEMBER_GAP) / (Math.PI * 2),
+  );
+  const steps = Math.ceil((target - COMPANY_MEMBER_RING_BASE_RADIUS) / COMPANY_MEMBER_RING_AUTO_STEP);
+  return COMPANY_MEMBER_RING_BASE_RADIUS + Math.max(0, steps) * COMPANY_MEMBER_RING_AUTO_STEP;
+};
+
+const getMinCompanyMemberRingRadius = (count: number): number => {
+  const compactGap = COMPANY_MEMBER_RING_MEMBER_GAP * 0.58;
+  const compactCircumference = Math.max(3, count) * compactGap;
+  return Math.max(COMPANY_MEMBER_RING_BASE_RADIUS, compactCircumference / (Math.PI * 2));
 };
 
 const splitCompanyLabelForDisplay = (label: string): { corporateType: string; companyName: string } | null => {
@@ -213,7 +248,6 @@ const loadDisplayConfig = (): DisplayConfig => {
       highlightMode: normalizeBoolean(parsed.highlightMode, defaultDisplayConfig.highlightMode),
       groupCollapsed: normalizeBoolean(parsed.groupCollapsed, defaultDisplayConfig.groupCollapsed),
       searchType: normalizeSearchType(parsed.searchType),
-      relationEventEnabled: normalizeBoolean((parsed as Partial<DisplayConfig>).relationEventEnabled, defaultDisplayConfig.relationEventEnabled),
     };
   } catch (error) {
     console.warn('display config load failed', error);
@@ -239,7 +273,6 @@ const NetworkGraph: React.FC = () => {
   const [highlightMode, setHighlightMode] = useState(displayConfigSeed.highlightMode);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [groupCollapsed, setGroupCollapsed] = useState(displayConfigSeed.groupCollapsed);
-  const [relationEventEnabled, setRelationEventEnabled] = useState(displayConfigSeed.relationEventEnabled);
   const [searchFocus, setSearchFocus] = useState<{ type: SearchType; value: string } | null>(null);
   const [quickOpen, setQuickOpen] = useState(false);
   const [quickQuery, setQuickQuery] = useState('');
@@ -294,6 +327,34 @@ const NetworkGraph: React.FC = () => {
     }
     return defaultGuideConfig;
   });
+  const [companyRingRadiusOverrides, setCompanyRingRadiusOverrides] = useState<Record<string, number>>(() => {
+    try {
+      const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
+      if (!raw) return {};
+      const parsed = JSON.parse(raw) as {
+        companyRingRadiiVersion?: number;
+        companyRingRadii?: Record<string, number>;
+      };
+      if (Number(parsed.companyRingRadiiVersion) !== COMPANY_RING_RADII_LAYOUT_VERSION) {
+        return {};
+      }
+      const next: Record<string, number> = {};
+      Object.entries(parsed.companyRingRadii || {}).forEach(([companyId, radius]) => {
+        if (!Number.isFinite(radius)) return;
+        const value = Number(radius);
+        if (value <= 8) return;
+        next[companyId] = value;
+      });
+      return next;
+    } catch {
+      return {};
+    }
+  });
+  const [ringResizeHoverCompanyId, setRingResizeHoverCompanyId] = useState<string | null>(null);
+  const [ringResizeActiveCompanyId, setRingResizeActiveCompanyId] = useState<string | null>(null);
+  const [ringResizePopup, setRingResizePopup] = useState<{ companyId: string; left: number; top: number } | null>(null);
+  const [ringResizeCursor, setRingResizeCursor] = useState<string | undefined>(undefined);
+  const companyRingRadiusOverridesRef = useRef<Record<string, number>>(companyRingRadiusOverrides);
   const labelBoxesRef = useRef<{ x: number; y: number; w: number; h: number; groupId?: string | null }[]>([]);
   const labelOffsetsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const labelDragStartRef = useRef<Map<string, { ox: number; oy: number; nx: number; ny: number }>>(new Map());
@@ -318,10 +379,17 @@ const NetworkGraph: React.FC = () => {
   const hoverTimerRef = useRef<number | null>(null);
   const draggingNodeIdRef = useRef<string | null>(null);
   const rotatingCompanyIdRef = useRef<string | null>(null);
+  const companyRingRotateSnapRef = useRef<{
+    contactId: string;
+    companyId: string;
+    startPointerAngle: number;
+    appliedSteps: number;
+  } | null>(null);
+  const ringResizeStateRef = useRef<{ companyId: string; centerX: number; centerY: number; minRadius: number } | null>(null);
   const hoveredNodeRef = useRef<GraphNode | null>(null);
   const didDragNodeRef = useRef(false);
   const companyMemberAssignmentsRef = useRef<Map<string, CompanyMemberAssignment>>(new Map());
-  const companyMemberRingsRef = useRef<Map<string, { radius: number; count: number }>>(new Map());
+  const companyMemberRingsRef = useRef<Map<string, CompanyMemberRing>>(new Map());
   const companyMemberContactIdsRef = useRef<Set<string>>(new Set());
 
   const searchTypeLabel = useMemo(() => {
@@ -385,13 +453,16 @@ const NetworkGraph: React.FC = () => {
           highlightMode,
           groupCollapsed,
           searchType,
-          relationEventEnabled,
         }),
       );
     } catch (error) {
       console.warn('display config save failed', error);
     }
-  }, [visibleTypes, highlightMode, groupCollapsed, searchType, relationEventEnabled]);
+  }, [visibleTypes, highlightMode, groupCollapsed, searchType]);
+
+  useEffect(() => {
+    companyRingRadiusOverridesRef.current = companyRingRadiusOverrides;
+  }, [companyRingRadiusOverrides]);
 
   useEffect(() => {
     return () => {
@@ -517,7 +588,7 @@ const NetworkGraph: React.FC = () => {
         links.push(edge);
       });
       rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'contact_tech' && edge.type !== 'tech_bridge') return;
+        if (edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'contact_tech' && edge.type !== 'tech_bridge' && edge.type !== 'company_relation') return;
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
         const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
         if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
@@ -611,7 +682,7 @@ const NetworkGraph: React.FC = () => {
 
       const links: GraphLink[] = [];
       rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'company_group' && edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'tech_bridge') return;
+        if (edge.type !== 'company_group' && edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'tech_bridge' && edge.type !== 'company_relation') return;
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
         const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
         if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
@@ -741,38 +812,36 @@ const NetworkGraph: React.FC = () => {
         contactRelationIds.set(contactId, list);
       });
 
-      if (relationEventEnabled) {
-        const eventRelationContacts = new Map<string, Set<string>>();
-        rawGraph.edges.forEach(edge => {
-          if (edge.type !== 'event_attendance') return;
-          const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-          const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-          const contactId = sourceId.startsWith('contact_')
-            ? sourceId
-            : targetId.startsWith('contact_')
-            ? targetId
-            : null;
-          if (!contactId || selfContactIds.has(contactId)) return;
-          const eventId = sourceId.startsWith('event_')
-            ? sourceId
-            : targetId.startsWith('event_')
-            ? targetId
-            : null;
-          if (!eventId || !selfEventIds.has(eventId)) return;
-          const relations = contactRelationIds.get(contactId);
-          if (!relations || relations.size === 0) return;
-          relations.forEach(relationId => {
-            if (!selfRelationIds.has(relationId)) return;
-            const key = `${eventId}::${relationId}`;
-            const contacts = eventRelationContacts.get(key) || new Set<string>();
-            contacts.add(contactId);
-            eventRelationContacts.set(key, contacts);
-          });
+      const eventRelationContacts = new Map<string, Set<string>>();
+      rawGraph.edges.forEach(edge => {
+        if (edge.type !== 'event_attendance') return;
+        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
+        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
+        const contactId = sourceId.startsWith('contact_')
+          ? sourceId
+          : targetId.startsWith('contact_')
+          ? targetId
+          : null;
+        if (!contactId || selfContactIds.has(contactId)) return;
+        const eventId = sourceId.startsWith('event_')
+          ? sourceId
+          : targetId.startsWith('event_')
+          ? targetId
+          : null;
+        if (!eventId || !selfEventIds.has(eventId)) return;
+        const relations = contactRelationIds.get(contactId);
+        if (!relations || relations.size === 0) return;
+        relations.forEach(relationId => {
+          if (!selfRelationIds.has(relationId)) return;
+          const key = `${eventId}::${relationId}`;
+          const contacts = eventRelationContacts.get(key) || new Set<string>();
+          contacts.add(contactId);
+          eventRelationContacts.set(key, contacts);
         });
-        eventRelationContacts.forEach((contacts, key) => {
-          if (contacts.size >= 1) relationEventKeys.add(key);
-        });
-      }
+      });
+      eventRelationContacts.forEach((contacts, key) => {
+        if (contacts.size >= 1) relationEventKeys.add(key);
+      });
     }
 
     const links = rawGraph.edges.filter(edge => {
@@ -822,20 +891,18 @@ const NetworkGraph: React.FC = () => {
         const targetId = typeof link.target === 'string' ? link.target : link.target.id;
         existingKeys.add(`${sourceId}->${targetId}->${link.type}`);
       });
-      if (relationEventEnabled) {
-        relationEventKeys.forEach(key => {
-          const [eventId, relationId] = key.split('::');
-          if (!eventId || !relationId) return;
-          if (!nodeIds.has(eventId) || !nodeIds.has(relationId)) return;
-          const linkKey = `${relationId}->${eventId}->relation_event`;
-          if (existingKeys.has(linkKey)) return;
-          links.push({ source: relationId, target: eventId, type: 'relation_event' });
-          existingKeys.add(linkKey);
-        });
-      }
+      relationEventKeys.forEach(key => {
+        const [eventId, relationId] = key.split('::');
+        if (!eventId || !relationId) return;
+        if (!nodeIds.has(eventId) || !nodeIds.has(relationId)) return;
+        const linkKey = `${relationId}->${eventId}->relation_event`;
+        if (existingKeys.has(linkKey)) return;
+        links.push({ source: relationId, target: eventId, type: 'relation_event' });
+        existingKeys.add(linkKey);
+      });
     }
     return { nodes: filteredNodes, links };
-  }, [rawGraph, visibleTypes, groupCollapsed, relationEventEnabled]);
+  }, [rawGraph, visibleTypes, groupCollapsed]);
 
   const tagCompanyIds = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -915,13 +982,15 @@ const NetworkGraph: React.FC = () => {
     });
 
     const contactAssignments = new Map<string, CompanyMemberAssignment>();
-    const companyRings = new Map<string, { radius: number; count: number }>();
+    const companyRings = new Map<string, CompanyMemberRing>();
     membersByCompany.forEach((members, companyId) => {
       const ordered = [...members].sort((a, b) => (a.label || a.id).localeCompare(b.label || b.id));
       const total = ordered.length;
       if (total === 0) return;
-      const circumference = Math.max(3, total) * COMPANY_MEMBER_RING_MEMBER_GAP;
-      const radius = Math.max(COMPANY_MEMBER_RING_MIN_RADIUS, circumference / (Math.PI * 2));
+      const overrideRadius = Number(companyRingRadiusOverrides[companyId]);
+      const radius = Number.isFinite(overrideRadius) && overrideRadius > 8
+        ? Math.max(getMinCompanyMemberRingRadius(total), overrideRadius)
+        : getAutoCompanyMemberRingRadius(total);
       companyRings.set(companyId, { radius, count: total });
       ordered.forEach((member, index) => {
         const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
@@ -939,7 +1008,7 @@ const NetworkGraph: React.FC = () => {
       companyRings,
       contactIds: new Set(contactAssignments.keys()),
     };
-  }, [graph.nodes, rawGraph.edges]);
+  }, [companyRingRadiusOverrides, graph.nodes, rawGraph.edges]);
 
   const contactRelations = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -1228,6 +1297,14 @@ const NetworkGraph: React.FC = () => {
     rawNodeById,
   ]);
 
+  const selectedCompanyForRingResize = useMemo(() => {
+    if (!selectedNode || selectedNode.type !== 'company') return null;
+    if (!contextData) return null;
+    return String(selectedNode.id);
+  }, [contextData, selectedNode]);
+
+  const isCompanyRingResizeEnabled = Boolean(selectedCompanyForRingResize);
+
   useEffect(() => {
     const fg = graphRef.current;
     if (!fg) return;
@@ -1262,6 +1339,29 @@ const NetworkGraph: React.FC = () => {
       if (!adjacency.has(targetId)) adjacency.set(targetId, new Set());
       adjacency.get(sourceId)!.add(targetId);
       adjacency.get(targetId)!.add(sourceId);
+    });
+    const relationCompanyNeighbors = new Map<string, string[]>();
+    adjacency.forEach((neighbors, nodeId) => {
+      if (nodeTypeById.get(nodeId) !== 'relation') return;
+      const companyIds: string[] = [];
+      neighbors.forEach(neighborId => {
+        if (nodeTypeById.get(neighborId) === 'company') {
+          companyIds.push(neighborId);
+        }
+      });
+      if (companyIds.length > 0) {
+        relationCompanyNeighbors.set(nodeId, companyIds);
+      }
+    });
+    const relationCompanyLinkedNodeIds = new Set<string>();
+    adjacency.forEach((neighbors, nodeId) => {
+      if (nodeTypeById.get(nodeId) !== 'relation') return;
+      neighbors.forEach(neighborId => {
+        if (relationCompanyLinkedNodeIds.has(nodeId)) return;
+        if (nodeTypeById.get(neighborId) === 'company') {
+          relationCompanyLinkedNodeIds.add(nodeId);
+        }
+      });
     });
 
     const hopMap = new Map<string, number>();
@@ -1607,11 +1707,73 @@ const NetworkGraph: React.FC = () => {
     // 初期座標を放射状にばらまく（保存済みがある場合は維持）
     graph.nodes.forEach(node => {
       if (Number.isFinite((node as any).x) && Number.isFinite((node as any).y)) return;
+      const neighborIds = adjacency.get(node.id) || new Set<string>();
+      let sumX = 0;
+      let sumY = 0;
+      let count = 0;
+      neighborIds.forEach(neighborId => {
+        const neighbor = nodesById.get(neighborId) as any;
+        if (!neighbor) return;
+        if (!Number.isFinite(neighbor.x) || !Number.isFinite(neighbor.y)) return;
+        sumX += Number(neighbor.x);
+        sumY += Number(neighbor.y);
+        count += 1;
+      });
+      if (count > 0) {
+        const baseX = sumX / count;
+        const baseY = sumY / count;
+        const angle = hashToAngle(String(node.id));
+        const offset = 24;
+        (node as any).x = baseX + Math.cos(angle) * offset;
+        (node as any).y = baseY + Math.sin(angle) * offset;
+        return;
+      }
       const depth = Number.isFinite((node as any).depth) ? (node as any).depth : defaultHop;
       const angle = Number.isFinite((node as any).ringAngle) ? (node as any).ringAngle : Math.random() * Math.PI * 2;
       const radius = Math.max(1, depth) * DEPTH_LAYOUT_RADIUS_STEP * seedFactor;
       (node as any).x = Math.cos(angle) * radius;
       (node as any).y = Math.sin(angle) * radius;
+    });
+
+    relationCompanyNeighbors.forEach((companyIds, relationId) => {
+      const relationNode = nodesById.get(relationId) as any;
+      if (!relationNode) return;
+      let sumX = 0;
+      let sumY = 0;
+      let count = 0;
+      companyIds.forEach(companyId => {
+        const companyNode = nodesById.get(companyId) as any;
+        if (!companyNode) return;
+        if (!Number.isFinite(companyNode.x) || !Number.isFinite(companyNode.y)) return;
+        sumX += Number(companyNode.x);
+        sumY += Number(companyNode.y);
+        count += 1;
+      });
+      if (count <= 0) return;
+      const centerX = sumX / count;
+      const centerY = sumY / count;
+      const currentX = Number(relationNode.x);
+      const currentY = Number(relationNode.y);
+      if (!Number.isFinite(currentX) || !Number.isFinite(currentY)) {
+        const angle = hashToAngle(relationId);
+        relationNode.x = centerX + Math.cos(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+        relationNode.y = centerY + Math.sin(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+        relationNode.vx = 0;
+        relationNode.vy = 0;
+      } else {
+        const distance = Math.hypot(currentX - centerX, currentY - centerY);
+        if (Number.isFinite(distance) && distance > RELATION_COMPANY_REPAIR_DISTANCE) {
+          const angle = Math.atan2(currentY - centerY, currentX - centerX);
+          relationNode.x = centerX + Math.cos(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+          relationNode.y = centerY + Math.sin(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+          relationNode.vx = 0;
+          relationNode.vy = 0;
+        }
+      }
+      if (Number.isFinite(relationNode.x) && Number.isFinite(relationNode.y)) {
+        relaxedNodeIdsRef.current.add(relationId);
+        relaxedAnchorPositionsRef.current.set(relationId, { x: Number(relationNode.x), y: Number(relationNode.y) });
+      }
     });
 
     const collideForce = (radius = 80) => {
@@ -1660,10 +1822,12 @@ const NetworkGraph: React.FC = () => {
           if (!node || node.id === selfNode.id) return;
           if (node.fx != null && node.fy != null) return;
           if (relaxedNodeIdsRef.current.has(String(node.id))) return;
+          if (node.type === 'contact') return;
           const currentX = Number.isFinite(node.x) ? node.x : 0;
           const currentY = Number.isFinite(node.y) ? node.y : 0;
           const depth = Number.isFinite(node.depth) ? node.depth : defaultHop;
           const nodeId = String(node.id);
+          if (node.type === 'relation' && relationCompanyLinkedNodeIds.has(nodeId)) return;
           const isConnectedToSelf = connectedNodeIds.has(nodeId);
           const isCompanyBranch = isConnectedToSelf && companyBranchNodeIds.has(nodeId);
           let baseAngle = Number.isFinite(node.ringAngle) ? node.ringAngle : Math.atan2(currentY, currentX);
@@ -1710,10 +1874,6 @@ const NetworkGraph: React.FC = () => {
             targetY = Math.sin(baseAngle) * targetRadius;
           }
           let nodePull = isConnectedToSelf ? pull : pull * 0.85;
-          if (node.type === 'contact') {
-            if (companyMemberContactIdsRef.current.has(String(node.id))) return;
-            nodePull *= isConnectedToSelf ? 0.52 : 0.34;
-          }
           node.vx = (node.vx || 0) + (targetX - currentX) * nodePull;
           node.vy = (node.vy || 0) + (targetY - currentY) * nodePull;
         });
@@ -1751,6 +1911,47 @@ const NetworkGraph: React.FC = () => {
       return force;
     };
 
+    const relationCompanyAnchorForce = (strength = 0.4) => {
+      let nodeMap = new Map<string, any>();
+      const force = (alpha: number) => {
+        const pull = Math.max(0.08, Math.max(0, alpha) * strength);
+        relationCompanyNeighbors.forEach((companyIds, relationId) => {
+          const relationNode = nodeMap.get(relationId);
+          if (!relationNode) return;
+          if (relationNode.fx != null && relationNode.fy != null) return;
+          if (draggingNodeIdRef.current === relationId) return;
+          let sumX = 0;
+          let sumY = 0;
+          let count = 0;
+          companyIds.forEach(companyId => {
+            const companyNode = nodeMap.get(companyId);
+            if (!companyNode) return;
+            if (!Number.isFinite(companyNode.x) || !Number.isFinite(companyNode.y)) return;
+            sumX += Number(companyNode.x);
+            sumY += Number(companyNode.y);
+            count += 1;
+          });
+          if (count <= 0) return;
+          const targetX = sumX / count;
+          const targetY = sumY / count;
+          const currentX = Number.isFinite(relationNode.x) ? Number(relationNode.x) : targetX;
+          const currentY = Number.isFinite(relationNode.y) ? Number(relationNode.y) : targetY;
+          relationNode.vx = (relationNode.vx || 0) + (targetX - currentX) * pull;
+          relationNode.vy = (relationNode.vy || 0) + (targetY - currentY) * pull;
+          const speed = Math.hypot(relationNode.vx || 0, relationNode.vy || 0);
+          if (speed > 2.2) {
+            const ratio = 2.2 / speed;
+            relationNode.vx *= ratio;
+            relationNode.vy *= ratio;
+          }
+        });
+      };
+      (force as any).initialize = (nextNodes: any[]) => {
+        nodeMap = new Map(nextNodes.map(node => [String(node.id), node]));
+      };
+      return force;
+    };
+
     const relaxedAnchorForce = (strength = RELAXED_ANCHOR_HOLD_STRENGTH) => {
       let nodeMap = new Map<string, any>();
       const force = (alpha: number) => {
@@ -1758,6 +1959,7 @@ const NetworkGraph: React.FC = () => {
         relaxedAnchorPositionsRef.current.forEach((anchor, id) => {
           const node = nodeMap.get(id);
           if (!node) return;
+          if (node.type === 'contact') return;
           if (draggingNodeIdRef.current === id) return;
           if (!relaxedNodeIdsRef.current.has(id)) return;
           if (node.fx != null && node.fy != null) return;
@@ -1790,6 +1992,7 @@ const NetworkGraph: React.FC = () => {
       if (linkForce && typeof linkForce.distance === 'function') {
         linkForce.distance((link: any) => {
           if (link.type === 'employment') return 96;
+          if (link.type === 'company_relation') return 120;
           const sourceType = (link.source as any)?.type;
           const targetType = (link.target as any)?.type;
           if (sourceType === 'contact' || targetType === 'contact') return 128;
@@ -1823,6 +2026,7 @@ const NetworkGraph: React.FC = () => {
     fg.d3Force('align', null);
     fg.d3Force('company-cluster', null);
     fg.d3Force('company-member-ring', companyMemberRingForce(0.46));
+    fg.d3Force('relation-company-anchor', relationCompanyAnchorForce(0.4));
     fg.d3Force('relaxed-anchor', relaxedAnchorForce(RELAXED_ANCHOR_HOLD_STRENGTH));
     fg.d3Force('collide', collideForce(LAYOUT_COLLIDE_RADIUS));
 
@@ -1890,6 +2094,7 @@ const NetworkGraph: React.FC = () => {
     }
     labelOffsetsRef.current.clear();
     labelAngleOverridesRef.current.clear();
+    ringResizeStateRef.current = null;
     gridOccupancyRef.current.clear();
     gridNodeKeyRef.current.clear();
     nodePositionsRef.current.clear();
@@ -1907,6 +2112,12 @@ const NetworkGraph: React.FC = () => {
     relaxedNodeIdsRef.current.clear();
     relaxedAnchorPositionsRef.current.clear();
     dragLastPositionRef.current.clear();
+    companyRingRotateSnapRef.current = null;
+    companyRingRadiusOverridesRef.current = {};
+    setCompanyRingRadiusOverrides({});
+    setRingResizeHoverCompanyId(null);
+    setRingResizeActiveCompanyId(null);
+    setRingResizePopup(null);
     const fg = graphRef.current;
     if (fg) {
       fg.d3ReheatSimulation();
@@ -2146,6 +2357,143 @@ const NetworkGraph: React.FC = () => {
     // capture center once whenグリッド有効化
     getGridCenter();
   }, [gridConfig.enabled, getGridCenter]);
+
+  const updateRingResizePopup = useCallback((companyId: string | null) => {
+    if (!companyId) {
+      setRingResizePopup(prev => (prev ? null : prev));
+      return;
+    }
+    const ring = companyMemberRingsRef.current.get(companyId);
+    const center = nodePositionsRef.current.get(companyId);
+    if (!ring || !center) {
+      setRingResizePopup(null);
+      return;
+    }
+    const fg = graphRef.current;
+    if (!fg || typeof fg.graph2ScreenCoords !== 'function') {
+      setRingResizePopup(null);
+      return;
+    }
+    const edge = fg.graph2ScreenCoords(center.x + ring.radius, center.y) as { x?: number; y?: number };
+    const sx = Number(edge?.x);
+    const sy = Number(edge?.y);
+    if (!Number.isFinite(sx) || !Number.isFinite(sy)) {
+      setRingResizePopup(prev => (prev ? null : prev));
+      return;
+    }
+    const left = Math.min(Math.max(8, sx + 12), Math.max(8, graphSize.width - 156));
+    const top = Math.min(Math.max(8, sy - 16), Math.max(8, graphSize.height - 34));
+    setRingResizePopup(prev => {
+      if (
+        prev
+        && prev.companyId === companyId
+        && Math.abs(prev.left - left) < 0.5
+        && Math.abs(prev.top - top) < 0.5
+      ) {
+        return prev;
+      }
+      return { companyId, left, top };
+    });
+  }, [graphSize.height, graphSize.width]);
+
+  const findCompanyRingHit = useCallback((x: number, y: number, onlyCompanyId?: string | null): CompanyRingHit | null => {
+    const zoom = Math.max(0.2, zoomScaleRef.current || 1);
+    const tolerance = COMPANY_MEMBER_RING_RESIZE_HIT_PX / zoom;
+    let best: CompanyRingHit | null = null;
+    companyMemberRingsRef.current.forEach((ring, companyId) => {
+      if (onlyCompanyId && companyId !== onlyCompanyId) return;
+      if (!Number.isFinite(ring.radius) || ring.radius <= 8) return;
+      const pos = nodePositionsRef.current.get(companyId);
+      if (!pos) return;
+      const distance = Math.hypot(x - pos.x, y - pos.y);
+      const diff = Math.abs(distance - ring.radius);
+      if (diff > tolerance) return;
+      if (!best || diff < best.diff) {
+        best = {
+          companyId,
+          centerX: pos.x,
+          centerY: pos.y,
+          radius: ring.radius,
+          count: ring.count,
+          diff,
+        };
+      }
+    });
+    return best;
+  }, []);
+
+  const getRingResizeCursorByAngle = useCallback((gx: number, gy: number, centerX: number, centerY: number): string => {
+    const dx = gx - centerX;
+    const dy = gy - centerY;
+    if (Math.abs(dx) + Math.abs(dy) < 1e-6) {
+      return 'ew-resize';
+    }
+    const deg = (Math.atan2(dy, dx) * 180 / Math.PI + 360) % 360;
+    const index = Math.floor((deg + 22.5) / 45) % 8;
+    switch (index) {
+      case 0:
+        return 'ew-resize';
+      case 1:
+        return 'nwse-resize';
+      case 2:
+        return 'ns-resize';
+      case 3:
+        return 'nesw-resize';
+      case 4:
+        return 'ew-resize';
+      case 5:
+        return 'nwse-resize';
+      case 6:
+        return 'ns-resize';
+      default:
+        return 'nesw-resize';
+    }
+  }, []);
+
+  const applyCompanyRingRadius = useCallback((companyId: string, inputRadius: number) => {
+    const ring = companyMemberRingsRef.current.get(companyId);
+    if (!ring) return;
+    const minRadius = getMinCompanyMemberRingRadius(ring.count);
+    const nextRadius = Math.max(minRadius, Math.min(2200, Number(inputRadius) || minRadius));
+    ring.radius = nextRadius;
+    const companyNode = graphNodeById.get(companyId) as any;
+    const center = nodePositionsRef.current.get(companyId);
+    const companyX = Number.isFinite(companyNode?.x) ? Number(companyNode.x) : (Number.isFinite(center?.x) ? Number(center?.x) : 0);
+    const companyY = Number.isFinite(companyNode?.y) ? Number(companyNode.y) : (Number.isFinite(center?.y) ? Number(center?.y) : 0);
+    companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
+      if (assignment.companyId !== companyId) return;
+      assignment.radius = nextRadius;
+      const contactNode = graphNodeById.get(contactId) as any;
+      if (!contactNode) return;
+      const x = companyX + Math.cos(assignment.angle) * nextRadius;
+      const y = companyY + Math.sin(assignment.angle) * nextRadius;
+      contactNode.x = x;
+      contactNode.y = y;
+      contactNode.vx = 0;
+      contactNode.vy = 0;
+      if (rotatingCompanyIdRef.current === companyId) {
+        contactNode.fx = x;
+        contactNode.fy = y;
+      }
+      nodePositionsRef.current.set(contactId, { x, y });
+    });
+    nodePositionsRef.current.set(companyId, { x: companyX, y: companyY });
+    graphRef.current?.d3ReheatSimulation?.();
+  }, [graphNodeById]);
+
+  const toGraphPoint = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return null;
+    const sx = event.clientX - rect.left;
+    const sy = event.clientY - rect.top;
+    const fg = graphRef.current;
+    if (!fg || typeof fg.screen2GraphCoords !== 'function') return null;
+    const point = fg.screen2GraphCoords(sx, sy) as { x?: number; y?: number };
+    const gx = Number(point?.x);
+    const gy = Number(point?.y);
+    if (!Number.isFinite(gx) || !Number.isFinite(gy)) return null;
+    return { gx, gy };
+  }, []);
 
   const getSelfCompanyGuide = useCallback(() => {
     const selfCompanyId = selfCompanyNodeIdRef.current;
@@ -2412,7 +2760,22 @@ const NetworkGraph: React.FC = () => {
           companyMemberAngles[contactId] = assignment.angle;
         }
       });
-      const payload = { positions, labels, angles, fixed, companyMemberAngles };
+      const companyRingRadii: Record<string, number> = {};
+      Object.entries(companyRingRadiusOverridesRef.current).forEach(([companyId, radius]) => {
+        if (!Number.isFinite(radius)) return;
+        const value = Number(radius);
+        if (value <= 8) return;
+        companyRingRadii[companyId] = value;
+      });
+      const payload = {
+        positions,
+        labels,
+        angles,
+        fixed,
+        companyMemberAngles,
+        companyRingRadiiVersion: COMPANY_RING_RADII_LAYOUT_VERSION,
+        companyRingRadii,
+      };
       try {
         localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(payload));
       } catch (error) {
@@ -2420,6 +2783,46 @@ const NetworkGraph: React.FC = () => {
       }
     }, 300);
   }, [graph.nodes, layoutEpoch]);
+
+  const finishRingResize = useCallback(() => {
+    const active = ringResizeStateRef.current;
+    ringResizeStateRef.current = null;
+    if (!active) return;
+    const ring = companyMemberRingsRef.current.get(active.companyId);
+    if (ring && Number.isFinite(ring.radius)) {
+      const finalRadius = Math.max(active.minRadius, Number(ring.radius));
+      setCompanyRingRadiusOverrides(prev => {
+        const next = { ...prev, [active.companyId]: finalRadius };
+        companyRingRadiusOverridesRef.current = next;
+        return next;
+      });
+      scheduleLayoutSave();
+    }
+    setRingResizeActiveCompanyId(null);
+  }, [scheduleLayoutSave]);
+
+  useEffect(() => {
+    if (!ringResizeActiveCompanyId) return;
+    const onMouseUp = () => {
+      finishRingResize();
+    };
+    window.addEventListener('mouseup', onMouseUp);
+    return () => window.removeEventListener('mouseup', onMouseUp);
+  }, [finishRingResize, ringResizeActiveCompanyId]);
+
+  useEffect(() => {
+    if (!isCompanyRingResizeEnabled || !selectedCompanyForRingResize) {
+      ringResizeStateRef.current = null;
+      setRingResizeHoverCompanyId(null);
+      setRingResizeActiveCompanyId(null);
+      setRingResizePopup(null);
+      setRingResizeCursor(undefined);
+      return;
+    }
+    setRingResizeHoverCompanyId(null);
+    setRingResizeActiveCompanyId(prev => (prev && prev !== selectedCompanyForRingResize ? null : prev));
+    updateRingResizePopup(selectedCompanyForRingResize);
+  }, [isCompanyRingResizeEnabled, selectedCompanyForRingResize, updateRingResizePopup]);
 
   useEffect(() => {
     const prev = prevGridConfigRef.current;
@@ -2497,7 +2900,34 @@ const NetworkGraph: React.FC = () => {
         angles?: Record<string, number>;
         fixed?: Record<string, boolean>;
         companyMemberAngles?: Record<string, number>;
+        companyRingRadiiVersion?: number;
+        companyRingRadii?: Record<string, number>;
       };
+      const nextOverrides: Record<string, number> = {};
+      if (Number(parsed.companyRingRadiiVersion) === COMPANY_RING_RADII_LAYOUT_VERSION) {
+        Object.entries(parsed.companyRingRadii || {}).forEach(([companyId, radius]) => {
+          if (!Number.isFinite(radius)) return;
+          const value = Number(radius);
+          if (value <= 8) return;
+          nextOverrides[companyId] = value;
+        });
+      }
+      setCompanyRingRadiusOverrides(prev => {
+        const prevKeys = Object.keys(prev);
+        const nextKeys = Object.keys(nextOverrides);
+        if (prevKeys.length === nextKeys.length) {
+          let same = true;
+          for (const key of nextKeys) {
+            if (Math.abs((prev[key] ?? 0) - nextOverrides[key]) > 0.1) {
+              same = false;
+              break;
+            }
+          }
+          if (same) return prev;
+        }
+        companyRingRadiusOverridesRef.current = nextOverrides;
+        return nextOverrides;
+      });
       if (parsed.companyMemberAngles) {
         const nodeMap = new Map(graph.nodes.map(node => [node.id, node as any]));
         Object.entries(parsed.companyMemberAngles).forEach(([contactId, savedAngle]) => {
@@ -2540,12 +2970,82 @@ const NetworkGraph: React.FC = () => {
           }
         });
       }
+      const typeById = new Map(graph.nodes.map(node => [node.id, node.type]));
+      const relationCompanyNeighbors = new Map<string, string[]>();
+      graph.links.forEach(link => {
+        const sourceId = typeof link.source === 'string' ? link.source : link.source.id;
+        const targetId = typeof link.target === 'string' ? link.target : link.target.id;
+        const sourceType = typeById.get(sourceId);
+        const targetType = typeById.get(targetId);
+        if (sourceType === 'relation' && targetType === 'company') {
+          const list = relationCompanyNeighbors.get(sourceId) || [];
+          list.push(targetId);
+          relationCompanyNeighbors.set(sourceId, list);
+        } else if (targetType === 'relation' && sourceType === 'company') {
+          const list = relationCompanyNeighbors.get(targetId) || [];
+          list.push(sourceId);
+          relationCompanyNeighbors.set(targetId, list);
+        }
+      });
+      const nodeById = new Map(graph.nodes.map(node => [node.id, node as any]));
+      const hashToAngle = (text: string) => {
+        let hash = 0;
+        for (let i = 0; i < text.length; i += 1) {
+          hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+        }
+        return (hash / 0xffffffff) * Math.PI * 2;
+      };
+      relationCompanyNeighbors.forEach((companyIds, relationId) => {
+        if (fixedNodeIds.has(relationId)) return;
+        const relationNode = nodeById.get(relationId);
+        if (!relationNode) return;
+        let sumX = 0;
+        let sumY = 0;
+        let count = 0;
+        companyIds.forEach(companyId => {
+          const companyNode = nodeById.get(companyId);
+          if (!companyNode) return;
+          if (!Number.isFinite(companyNode.x) || !Number.isFinite(companyNode.y)) return;
+          sumX += Number(companyNode.x);
+          sumY += Number(companyNode.y);
+          count += 1;
+        });
+        if (count <= 0) return;
+        const centerX = sumX / count;
+        const centerY = sumY / count;
+        const currentX = Number(relationNode.x);
+        const currentY = Number(relationNode.y);
+        if (!Number.isFinite(currentX) || !Number.isFinite(currentY)) {
+          const angle = hashToAngle(relationId);
+          relationNode.x = centerX + Math.cos(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+          relationNode.y = centerY + Math.sin(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+          relationNode.vx = 0;
+          relationNode.vy = 0;
+          adjusted = true;
+        } else {
+          const distance = Math.hypot(currentX - centerX, currentY - centerY);
+          if (Number.isFinite(distance) && distance > RELATION_COMPANY_REPAIR_DISTANCE) {
+            const angle = Math.atan2(currentY - centerY, currentX - centerX);
+            relationNode.x = centerX + Math.cos(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+            relationNode.y = centerY + Math.sin(angle) * RELATION_COMPANY_REPAIR_OFFSET;
+            relationNode.vx = 0;
+            relationNode.vy = 0;
+            adjusted = true;
+          }
+        }
+        if (Number.isFinite(relationNode.x) && Number.isFinite(relationNode.y)) {
+          relaxedNodeIdsRef.current.add(relationId);
+          relaxedAnchorPositionsRef.current.set(relationId, { x: Number(relationNode.x), y: Number(relationNode.y) });
+        }
+      });
+      const relationCompanyLinkedNodeIds = new Set<string>(Array.from(relationCompanyNeighbors.keys()));
       const selfNode = graph.nodes.find(node => node.type === 'contact' && (node as GraphNode).is_self) as GraphNode | undefined;
       const anchorX = Number.isFinite((selfNode as any)?.x) ? Number((selfNode as any).x) : 0;
       const anchorY = Number.isFinite((selfNode as any)?.y) ? Number((selfNode as any).y) : 0;
       graph.nodes.forEach(node => {
         if (node.id === selfNode?.id) return;
         if (companyMemberContactIdsRef.current.has(node.id)) return;
+        if (node.type === 'relation' && relationCompanyLinkedNodeIds.has(node.id)) return;
         if (fixedNodeIds.has(node.id)) return;
         if (relaxedNodeIdsRef.current.has(node.id)) return;
         let nx = (node as any).x;
@@ -3030,17 +3530,6 @@ const NetworkGraph: React.FC = () => {
                   </button>
                 </div>
                 <div className="space-y-2 rounded border border-slate-200 bg-white p-2">
-                  <p className="text-xs font-medium text-gray-700">接続ルール表示</p>
-                  <label className="text-xs text-gray-600 flex items-center gap-1">
-                    <input
-                      type="checkbox"
-                      checked={relationEventEnabled}
-                      onChange={event => setRelationEventEnabled(event.target.checked)}
-                    />
-                    2段接続（関係→イベント）を表示
-                  </label>
-                </div>
-                <div className="space-y-2 rounded border border-slate-200 bg-white p-2">
                   <p className="text-xs font-medium text-gray-700">グリッド線設定</p>
                   <div className="grid grid-cols-2 gap-2">
                     <label className="text-xs text-gray-600 flex items-center gap-1">
@@ -3141,6 +3630,78 @@ const NetworkGraph: React.FC = () => {
         <div
           ref={containerRef}
           className="flex-1 min-w-0 relative overflow-hidden"
+          style={{ cursor: (isCompanyRingResizeEnabled && (ringResizeActiveCompanyId || ringResizeHoverCompanyId)) ? ringResizeCursor || 'ew-resize' : undefined }}
+          onMouseMoveCapture={event => {
+            if (!isCompanyRingResizeEnabled || !selectedCompanyForRingResize) {
+              if (ringResizeStateRef.current) {
+                finishRingResize();
+              }
+              setRingResizeHoverCompanyId(null);
+              setRingResizeCursor(undefined);
+              return;
+            }
+            const point = toGraphPoint(event);
+            if (!point) return;
+            if (ringResizeStateRef.current) {
+              const active = ringResizeStateRef.current;
+              const nextRadius = Math.max(
+                active.minRadius,
+                Math.hypot(point.gx - active.centerX, point.gy - active.centerY),
+              );
+              applyCompanyRingRadius(active.companyId, nextRadius);
+              setRingResizeHoverCompanyId(active.companyId);
+              setRingResizeCursor(prev => {
+                const next = getRingResizeCursorByAngle(point.gx, point.gy, active.centerX, active.centerY);
+                return prev === next ? prev : next;
+              });
+              updateRingResizePopup(active.companyId);
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            const hit = findCompanyRingHit(point.gx, point.gy, selectedCompanyForRingResize);
+            if (hit) {
+              setRingResizeHoverCompanyId(hit.companyId);
+              setRingResizeCursor(prev => {
+                const next = getRingResizeCursorByAngle(point.gx, point.gy, hit.centerX, hit.centerY);
+                return prev === next ? prev : next;
+              });
+              updateRingResizePopup(hit.companyId);
+            } else {
+              setRingResizeHoverCompanyId(null);
+              setRingResizeCursor(undefined);
+              updateRingResizePopup(selectedCompanyForRingResize);
+            }
+          }}
+          onMouseDownCapture={event => {
+            if (!isCompanyRingResizeEnabled || !selectedCompanyForRingResize) return;
+            const point = toGraphPoint(event);
+            if (!point) return;
+            const hit = findCompanyRingHit(point.gx, point.gy, selectedCompanyForRingResize);
+            if (!hit) return;
+            ringResizeStateRef.current = {
+              companyId: hit.companyId,
+              centerX: hit.centerX,
+              centerY: hit.centerY,
+              minRadius: getMinCompanyMemberRingRadius(hit.count),
+            };
+            setRingResizeActiveCompanyId(hit.companyId);
+            setRingResizeHoverCompanyId(hit.companyId);
+            setRingResizeCursor(getRingResizeCursorByAngle(point.gx, point.gy, hit.centerX, hit.centerY));
+            updateRingResizePopup(hit.companyId);
+            event.preventDefault();
+            event.stopPropagation();
+          }}
+          onMouseUpCapture={() => {
+            finishRingResize();
+          }}
+          onMouseLeave={() => {
+            if (!ringResizeStateRef.current) {
+              setRingResizeHoverCompanyId(null);
+              setRingResizeCursor(undefined);
+              updateRingResizePopup(selectedCompanyForRingResize || null);
+            }
+          }}
           onClickCapture={() => {
             if (didDragNodeRef.current) return;
             const hovered = hoveredNodeRef.current;
@@ -3148,6 +3709,37 @@ const NetworkGraph: React.FC = () => {
             handleNodeClick(hovered as unknown as NodeObject);
           }}
         >
+          {ringResizePopup && (
+            <div
+              className="absolute z-20"
+              style={{ left: ringResizePopup.left, top: ringResizePopup.top }}
+              onMouseDown={event => {
+                event.stopPropagation();
+              }}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  const ring = companyMemberRingsRef.current.get(ringResizePopup.companyId);
+                  if (!ring) return;
+                  const autoRadius = getAutoCompanyMemberRingRadius(ring.count);
+                  applyCompanyRingRadius(ringResizePopup.companyId, autoRadius);
+                  setCompanyRingRadiusOverrides(prev => {
+                    if (!(ringResizePopup.companyId in prev)) return prev;
+                    const next = { ...prev };
+                    delete next[ringResizePopup.companyId];
+                    companyRingRadiusOverridesRef.current = next;
+                    return next;
+                  });
+                  scheduleLayoutSave();
+                  updateRingResizePopup(ringResizePopup.companyId);
+                }}
+                className="rounded border border-slate-300 bg-white/95 px-2 py-1 text-[11px] text-slate-700 shadow hover:bg-slate-50"
+              >
+                リングサイズをリセット
+              </button>
+            </div>
+          )}
           {graphSize.width > 0 && graphSize.height > 0 && (
             <ForceGraph2D
               ref={graphRef}
@@ -3163,8 +3755,12 @@ const NetworkGraph: React.FC = () => {
             onRenderFramePre={(ctx, globalScale) => {
               labelBoxesRef.current = [];
               zoomScaleRef.current = graphRef.current?.zoom?.() ?? globalScale ?? 1;
+              if (isCompanyRingResizeEnabled && selectedCompanyForRingResize) {
+                updateRingResizePopup(selectedCompanyForRingResize);
+              }
               const frameNodeById = new Map(graph.nodes.map(node => [node.id, node as any]));
               const rotatingCompanyId = rotatingCompanyIdRef.current;
+              const draggingNodeId = draggingNodeIdRef.current;
               companyMemberAssignmentsRef.current.forEach((assignment, contactId) => {
                 const contactNode = frameNodeById.get(contactId);
                 const companyNode = frameNodeById.get(assignment.companyId);
@@ -3184,6 +3780,19 @@ const NetworkGraph: React.FC = () => {
                   contactNode.fx = null;
                   contactNode.fy = null;
                 }
+              });
+              // 氏名ノードは通常時に現在位置へ固定し、意図しない吸引移動を防ぐ。
+              graph.nodes.forEach(node => {
+                if (node.type !== 'contact') return;
+                const typed = node as GraphNode;
+                if (draggingNodeId && String(typed.id) === draggingNodeId) return;
+                const contactNode = frameNodeById.get(typed.id);
+                if (!contactNode) return;
+                if (!Number.isFinite(contactNode.x) || !Number.isFinite(contactNode.y)) return;
+                contactNode.vx = 0;
+                contactNode.vy = 0;
+                contactNode.fx = Number(contactNode.x);
+                contactNode.fy = Number(contactNode.y);
               });
               const nextPositions = new Map<string, { x: number; y: number }>();
               graph.nodes.forEach(node => {
@@ -3239,10 +3848,27 @@ const NetworkGraph: React.FC = () => {
             onNodeClick={handleNodeClick}
             onNodeDrag={(node: NodeObject) => {
               const typed = node as GraphNode;
-              if (!gridConfig.enabled && gridNodeKeyRef.current.has(typed.id)) {
+              const isCompanyMemberRotationNode = companyMemberAssignmentsRef.current.has(typed.id);
+              const isGridLockedNode = (
+                !gridConfig.enabled
+                && !isCompanyMemberRotationNode
+              );
+              if (isGridLockedNode) {
                 const lockedNode = graphNodeById.get(typed.id) as any;
-                const fx = Number.isFinite(lockedNode?.fx) ? Number(lockedNode.fx) : Number((node as any).fx);
-                const fy = Number.isFinite(lockedNode?.fy) ? Number(lockedNode.fy) : Number((node as any).fy);
+                const fx = Number.isFinite(lockedNode?.fx)
+                  ? Number(lockedNode.fx)
+                  : Number.isFinite(lockedNode?.x)
+                  ? Number(lockedNode.x)
+                  : Number.isFinite((node as any).fx)
+                  ? Number((node as any).fx)
+                  : Number((node as any).x);
+                const fy = Number.isFinite(lockedNode?.fy)
+                  ? Number(lockedNode.fy)
+                  : Number.isFinite(lockedNode?.y)
+                  ? Number(lockedNode.y)
+                  : Number.isFinite((node as any).fy)
+                  ? Number((node as any).fy)
+                  : Number((node as any).y);
                 if (Number.isFinite(fx) && Number.isFinite(fy)) {
                   (node as any).x = fx;
                   (node as any).y = fy;
@@ -3286,42 +3912,59 @@ const NetworkGraph: React.FC = () => {
                   rotatingCompanyIdRef.current = assignment.companyId;
                   const companyX = Number(companyNode.x);
                   const companyY = Number(companyNode.y);
-                  const prev = dragLastPositionRef.current.get(typed.id);
                   const normalizeDelta = (value: number) => {
                     let result = value;
                     while (result > Math.PI) result -= Math.PI * 2;
                     while (result < -Math.PI) result += Math.PI * 2;
                     return result;
                   };
+                  const normalizeAngle = (value: number) => {
+                    let result = value;
+                    while (result >= Math.PI * 2) result -= Math.PI * 2;
+                    while (result < 0) result += Math.PI * 2;
+                    return result;
+                  };
                   const pointerDx = rawCurrentX - companyX;
                   const pointerDy = rawCurrentY - companyY;
                   const pointerDist = Math.hypot(pointerDx, pointerDy);
-                  const currentAngle = pointerDist > 1
-                    ? Math.atan2(pointerDy, pointerDx)
-                    : assignment.angle;
-                  let delta = 0;
-                  if (prev && Number.isFinite(prev.x) && Number.isFinite(prev.y)) {
-                    const prevAngle = Math.atan2(prev.y - companyY, prev.x - companyX);
-                    delta = normalizeDelta(currentAngle - prevAngle);
-                  } else {
-                    delta = normalizeDelta(currentAngle - assignment.angle);
-                  }
-                  if (Math.abs(delta) > 0.0001) {
-                    companyMemberAssignmentsRef.current.forEach((member, memberId) => {
-                      if (member.companyId !== assignment.companyId) return;
-                      member.angle += delta;
-                      const memberNode = graphNodeById.get(memberId) as any;
-                      if (!memberNode) return;
-                      const mx = companyX + Math.cos(member.angle) * member.radius;
-                      const my = companyY + Math.sin(member.angle) * member.radius;
-                      memberNode.x = mx;
-                      memberNode.y = my;
-                      memberNode.vx = 0;
-                      memberNode.vy = 0;
-                      memberNode.fx = mx;
-                      memberNode.fy = my;
-                      relaxedAnchorPositionsRef.current.set(memberId, { x: mx, y: my });
-                    });
+                  if (pointerDist > 1) {
+                    const currentAngle = Math.atan2(pointerDy, pointerDx);
+                    let rotateState = companyRingRotateSnapRef.current;
+                    if (
+                      !rotateState
+                      || rotateState.contactId !== String(typed.id)
+                      || rotateState.companyId !== assignment.companyId
+                    ) {
+                      rotateState = {
+                        contactId: String(typed.id),
+                        companyId: assignment.companyId,
+                        startPointerAngle: currentAngle,
+                        appliedSteps: 0,
+                      };
+                      companyRingRotateSnapRef.current = rotateState;
+                    }
+                    const totalDelta = normalizeDelta(currentAngle - rotateState.startPointerAngle);
+                    const targetSteps = Math.round(totalDelta / COMPANY_MEMBER_ROTATE_STEP_RAD);
+                    const stepDelta = targetSteps - rotateState.appliedSteps;
+                    if (stepDelta !== 0) {
+                      const snappedDelta = stepDelta * COMPANY_MEMBER_ROTATE_STEP_RAD;
+                      companyMemberAssignmentsRef.current.forEach((member, memberId) => {
+                        if (member.companyId !== assignment.companyId) return;
+                        member.angle = normalizeAngle(member.angle + snappedDelta);
+                        const memberNode = graphNodeById.get(memberId) as any;
+                        if (!memberNode) return;
+                        const mx = companyX + Math.cos(member.angle) * member.radius;
+                        const my = companyY + Math.sin(member.angle) * member.radius;
+                        memberNode.x = mx;
+                        memberNode.y = my;
+                        memberNode.vx = 0;
+                        memberNode.vy = 0;
+                        memberNode.fx = mx;
+                        memberNode.fy = my;
+                        relaxedAnchorPositionsRef.current.set(memberId, { x: mx, y: my });
+                      });
+                      rotateState.appliedSteps = targetSteps;
+                    }
                   }
                   const updated = companyMemberAssignmentsRef.current.get(typed.id) || assignment;
                   const ringX = companyX + Math.cos(updated.angle) * updated.radius;
@@ -3336,6 +3979,7 @@ const NetworkGraph: React.FC = () => {
                   }
                 }
               } else {
+                companyRingRotateSnapRef.current = null;
                 const prev = dragLastPositionRef.current.get(typed.id);
                 if (
                   !gridConfig.enabled
@@ -3381,7 +4025,44 @@ const NetworkGraph: React.FC = () => {
             }}
             onNodeDragEnd={(node: NodeObject) => {
               const typed = node as GraphNode;
+              const isCompanyMemberRotationNode = companyMemberAssignmentsRef.current.has(typed.id);
+              const isGridLockedNode = (
+                !gridConfig.enabled
+                && !isCompanyMemberRotationNode
+              );
+              if (isGridLockedNode) {
+                const lockedNode = graphNodeById.get(typed.id) as any;
+                const fx = Number.isFinite(lockedNode?.fx)
+                  ? Number(lockedNode.fx)
+                  : Number.isFinite(lockedNode?.x)
+                  ? Number(lockedNode.x)
+                  : Number.isFinite((node as any).fx)
+                  ? Number((node as any).fx)
+                  : Number((node as any).x);
+                const fy = Number.isFinite(lockedNode?.fy)
+                  ? Number(lockedNode.fy)
+                  : Number.isFinite(lockedNode?.y)
+                  ? Number(lockedNode.y)
+                  : Number.isFinite((node as any).fy)
+                  ? Number((node as any).fy)
+                  : Number((node as any).y);
+                if (Number.isFinite(fx) && Number.isFinite(fy)) {
+                  (node as any).x = fx;
+                  (node as any).y = fy;
+                  (node as any).fx = fx;
+                  (node as any).fy = fy;
+                  (node as any).vx = 0;
+                  (node as any).vy = 0;
+                }
+                dragLastPositionRef.current.delete(typed.id);
+                companyRingRotateSnapRef.current = null;
+                window.setTimeout(() => {
+                  didDragNodeRef.current = false;
+                }, 0);
+                return;
+              }
               draggingNodeIdRef.current = null;
+              companyRingRotateSnapRef.current = null;
               window.setTimeout(() => {
                 didDragNodeRef.current = false;
               }, 0);

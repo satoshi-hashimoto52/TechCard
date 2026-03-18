@@ -751,6 +751,10 @@ const ContactRegister: React.FC = () => {
     if (tagScope === 'group') return selectedGroupTags;
     return selectedTags;
   }, [selectedCompanyTags, selectedGroupTags, selectedTags, tagScope]);
+  const selectableVisibleTags = useMemo(
+    () => visibleTags.filter(tag => !selectedTagsByScope.includes(tag.name)),
+    [selectedTagsByScope, visibleTags],
+  );
   const markScopeTouched = useCallback(() => {
     if (tagScope === 'company') {
       setCompanyTagsTouched(true);
@@ -788,6 +792,14 @@ const ContactRegister: React.FC = () => {
     () => detectedTags.filter(tag => !isGroupTagName(tag)),
     [detectedTags, isGroupTagName],
   );
+
+  useEffect(() => {
+    if (!selectedTagOption) return;
+    const stillSelectable = selectableVisibleTags.some(tag => tag.name === selectedTagOption);
+    if (!stillSelectable) {
+      setSelectedTagOption('');
+    }
+  }, [selectableVisibleTags, selectedTagOption]);
 
   useEffect(() => {
     const companyName = form.company.trim();
@@ -1719,7 +1731,7 @@ const ContactRegister: React.FC = () => {
                     >
                       <option value="">既存タグを選択</option>
                       <optgroup label="タグ/技術">
-                      {visibleTags
+                      {selectableVisibleTags
                         .filter(tag => tag.type === 'tech')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
@@ -1728,7 +1740,7 @@ const ContactRegister: React.FC = () => {
                           ))}
                       </optgroup>
                       <optgroup label="タグ/イベント">
-                      {visibleTags
+                      {selectableVisibleTags
                         .filter(tag => tag.type === 'event')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
@@ -1737,7 +1749,7 @@ const ContactRegister: React.FC = () => {
                           ))}
                       </optgroup>
                       <optgroup label="タグ/関係">
-                      {visibleTags
+                      {selectableVisibleTags
                         .filter(tag => tag.type === 'relation')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
@@ -1900,7 +1912,7 @@ const ContactRegister: React.FC = () => {
                     >
                       <option value="">既存タグを選択</option>
                       <optgroup label="タグ/技術">
-                      {visibleTags
+                      {selectableVisibleTags
                         .filter(tag => tag.type === 'tech')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
@@ -1909,7 +1921,7 @@ const ContactRegister: React.FC = () => {
                           ))}
                       </optgroup>
                       <optgroup label="タグ/イベント">
-                      {visibleTags
+                      {selectableVisibleTags
                         .filter(tag => tag.type === 'event')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>
@@ -1918,7 +1930,7 @@ const ContactRegister: React.FC = () => {
                           ))}
                       </optgroup>
                       <optgroup label="タグ/関係">
-                      {visibleTags
+                      {selectableVisibleTags
                         .filter(tag => tag.type === 'relation')
                         .map(tag => (
                           <option key={tag.id} value={tag.name}>

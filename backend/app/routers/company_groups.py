@@ -84,6 +84,7 @@ def _group_payload(group: models.CompanyGroup) -> schemas.CompanyGroupRead:
         description=group.description,
         company_ids=[company.id for company in (group.companies or [])],
         aliases=[alias.alias for alias in (group.aliases or []) if alias.alias],
+        tags=[schemas.TagRead(id=tag.id, name=tag.name, type=tag.type) for tag in (group.tags or [])],
     )
 
 
@@ -122,7 +123,11 @@ def update_group_tags(group_id: int, payload: schemas.TagBindingRequest, db: Ses
 def read_groups(db: Session = Depends(get_db)):
     groups = (
         db.query(models.CompanyGroup)
-        .options(joinedload(models.CompanyGroup.companies), joinedload(models.CompanyGroup.aliases))
+        .options(
+            joinedload(models.CompanyGroup.companies),
+            joinedload(models.CompanyGroup.aliases),
+            joinedload(models.CompanyGroup.tags),
+        )
         .order_by(models.CompanyGroup.name.asc())
         .all()
     )

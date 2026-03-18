@@ -90,6 +90,7 @@ class CompanyGroupRead(CompanyGroupBase):
     id: int
     company_ids: List[int] = []
     aliases: List[str] = []
+    tags: List[TagRead] = []
 
     class Config:
         from_attributes = True

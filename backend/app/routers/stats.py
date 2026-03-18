@@ -237,7 +237,14 @@ def get_network(
             continue
         company_contact_counts[contact.company_id] = company_contact_counts.get(contact.company_id, 0) + 1
 
+    group_company_ids: dict[int, set[int]] = {}
+    group_by_id: dict[int, models.CompanyGroup] = {}
+
     for company in companies:
+        if company.group_id is not None:
+            group_company_ids.setdefault(company.group_id, set()).add(company.id)
+        if company.group is not None:
+            group_by_id[company.group.id] = company.group
         add_node(
             {
                 "id": f"company_{company.id}",
@@ -295,6 +302,9 @@ def get_network(
     event_meta_by_key: dict[str, tuple[str, str]] = {}
     contact_event_keys: dict[int, set[str]] = {}
     company_event_keys: dict[int, set[str]] = {}
+    company_event_key_sources: dict[tuple[int, str], str] = {}
+    company_direct_event_keys: dict[int, set[str]] = {}
+    group_event_keys: dict[int, set[str]] = {}
 
     for contact in contacts:
         keys: set[str] = set()
@@ -323,17 +333,36 @@ def get_network(
             key = _event_key(top_name, sub_name)
             event_meta_by_key[key] = (top_name, sub_name)
             keys.add(key)
-        if company.group:
-            for tag in company.group.tags or []:
-                if normalize_tag_type(tag.type) != "event":
+        if keys:
+            company_direct_event_keys[company.id] = keys
+
+    for group_id, group in group_by_id.items():
+        keys: set[str] = set()
+        for tag in group.tags or []:
+            if normalize_tag_type(tag.type) != "event":
+                continue
+            parsed = _parse_event_tag_name(tag.name)
+            if parsed is None:
+                continue
+            top_name, sub_name = parsed
+            key = _event_key(top_name, sub_name)
+            event_meta_by_key[key] = (top_name, sub_name)
+            keys.add(key)
+        if keys:
+            group_event_keys[group_id] = keys
+
+    for company in companies:
+        keys: set[str] = set()
+        direct_keys = company_direct_event_keys.get(company.id, set())
+        for key in direct_keys:
+            keys.add(key)
+            company_event_key_sources[(company.id, key)] = "company"
+        if company.group_id is not None:
+            for key in group_event_keys.get(company.group_id, set()):
+                if key in keys:
                     continue
-                parsed = _parse_event_tag_name(tag.name)
-                if parsed is None:
-                    continue
-                top_name, sub_name = parsed
-                key = _event_key(top_name, sub_name)
-                event_meta_by_key[key] = (top_name, sub_name)
                 keys.add(key)
+                company_event_key_sources[(company.id, key)] = "group"
         if keys:
             company_event_keys[company.id] = keys
 
@@ -428,7 +457,11 @@ def get_network(
                 sub_id = ensure_event_sub_node(event_key, sub_name)
                 add_edge(self_company_node_id, top_id, "company_event")
                 add_edge(top_id, sub_id, "relation_event")
-                add_edge(sub_id, f"company_{company.id}", "company_event")
+                source_scope = company_event_key_sources.get((company.id, event_key), "company")
+                if source_scope == "group" and company.group_id is not None:
+                    add_edge(sub_id, f"group_{company.group_id}", "company_event")
+                else:
+                    add_edge(sub_id, f"company_{company.id}", "company_event")
                 top_counts[top_id] = top_counts.get(top_id, 0) + 1
                 sub_counts[sub_id] = sub_counts.get(sub_id, 0) + 1
 
@@ -444,22 +477,44 @@ def get_network(
 
     # Tags
     relation_tag_counts: dict[int, int] = {}
+    company_relation_tag_company_counts: dict[int, set[int]] = {}
+    company_relation_tag_group_counts: dict[int, set[int]] = {}
     contact_tech_tag_counts: dict[int, int] = {}
     company_tech_tag_company_counts: dict[int, set[int]] = {}
     company_tech_tag_group_counts: dict[int, set[int]] = {}
+    company_direct_tech_tag_ids: dict[int, set[int]] = {}
+    company_direct_relation_tag_ids: dict[int, set[int]] = {}
 
     for company in companies:
         for tag in company.tech_tags or []:
-            if normalize_tag_type(tag.type) != "tech":
-                continue
-            company_tech_tag_company_counts.setdefault(tag.id, set()).add(company.id)
-            if company.group_id:
-                company_tech_tag_group_counts.setdefault(tag.id, set()).add(company.group_id)
-        if company.group:
-            for tag in company.group.tags or []:
-                if normalize_tag_type(tag.type) != "tech":
-                    continue
-                company_tech_tag_group_counts.setdefault(tag.id, set()).add(company.group.id)
+            tag_type = normalize_tag_type(tag.type)
+            if tag_type == "tech":
+                company_direct_tech_tag_ids.setdefault(company.id, set()).add(tag.id)
+                company_tech_tag_company_counts.setdefault(tag.id, set()).add(company.id)
+            elif tag_type == "relation":
+                company_direct_relation_tag_ids.setdefault(company.id, set()).add(tag.id)
+                company_relation_tag_company_counts.setdefault(tag.id, set()).add(company.id)
+
+    for group_id, group in group_by_id.items():
+        member_company_ids = group_company_ids.get(group_id, set())
+        if not member_company_ids:
+            continue
+        for tag in group.tags or []:
+            tag_type = normalize_tag_type(tag.type)
+            if tag_type == "tech":
+                has_company_without_tag = any(
+                    tag.id not in company_direct_tech_tag_ids.get(company_id, set())
+                    for company_id in member_company_ids
+                )
+                if has_company_without_tag:
+                    company_tech_tag_group_counts.setdefault(tag.id, set()).add(group_id)
+            elif tag_type == "relation":
+                has_company_without_tag = any(
+                    tag.id not in company_direct_relation_tag_ids.get(company_id, set())
+                    for company_id in member_company_ids
+                )
+                if has_company_without_tag:
+                    company_relation_tag_group_counts.setdefault(tag.id, set()).add(group_id)
 
     for contact in contacts:
         for tag in contact.tags or []:
@@ -485,6 +540,25 @@ def get_network(
                 continue
             contact_tech_tag_counts[tag.id] = contact_tech_tag_counts.get(tag.id, 0) + 1
             add_edge(f"contact_{contact.id}", f"tech_contact_{tag.id}", "contact_tech")
+
+    all_company_relation_tag_ids = set(company_relation_tag_company_counts.keys()) | set(company_relation_tag_group_counts.keys())
+    for tag_id in all_company_relation_tag_ids:
+        tag = tag_by_id.get(tag_id)
+        label = tag.name if tag else ""
+        company_ids = company_relation_tag_company_counts.get(tag_id, set())
+        group_ids = company_relation_tag_group_counts.get(tag_id, set())
+        add_node(
+            {
+                "id": f"relation_{tag_id}",
+                "type": "relation",
+                "label": label if label else "関係タグ",
+                "size": max(relation_tag_counts.get(tag_id, 0), len(company_ids), len(group_ids), 1),
+            }
+        )
+        for company_id in company_ids:
+            add_edge(f"company_{company_id}", f"relation_{tag_id}", "company_relation")
+        for group_id in group_ids:
+            add_edge(f"group_{group_id}", f"relation_{tag_id}", "company_relation")
 
     all_contact_tech_tag_ids = set(contact_tech_tag_counts.keys())
     all_company_tech_tag_ids = set(company_tech_tag_company_counts.keys()) | set(company_tech_tag_group_counts.keys())

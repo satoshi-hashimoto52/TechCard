@@ -26,6 +26,7 @@ interface Contact {
 interface CompanyGroup {
   id: number;
   name: string;
+  tags?: { name: string; type?: string }[];
 }
 
 type TagOption = {
@@ -38,6 +39,7 @@ const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
 const EVENT_TAG_SEPARATOR = ' / ';
 const TAG_NAME_COLLATOR = new Intl.Collator('ja', { numeric: true, sensitivity: 'base' });
+const TAG_TYPE_ORDER: Record<string, number> = { tech: 0, event: 1, relation: 2 };
 
 const normalizeTagType = (value?: string) => {
   if (!value || value === 'technology') return 'tech';
@@ -46,6 +48,20 @@ const normalizeTagType = (value?: string) => {
 
 const sortTagsByNaturalOrder = (items: TagOption[]) =>
   [...items].sort((a, b) => TAG_NAME_COLLATOR.compare(a.name || '', b.name || ''));
+
+const sortTagsByTypeAndName = <T extends { name: string; type?: string }>(items: T[]) =>
+  [...items].sort((a, b) => {
+    const typeDiff = (TAG_TYPE_ORDER[normalizeTagType(a.type)] ?? 99) - (TAG_TYPE_ORDER[normalizeTagType(b.type)] ?? 99);
+    if (typeDiff !== 0) return typeDiff;
+    return TAG_NAME_COLLATOR.compare(a.name || '', b.name || '');
+  });
+
+const tagBadgeClass = (type?: string) => {
+  const normalized = normalizeTagType(type);
+  if (normalized === 'event') return 'bg-orange-100 text-orange-800';
+  if (normalized === 'relation') return 'bg-emerald-100 text-emerald-800';
+  return 'bg-blue-100 text-blue-800';
+};
 
 const parseEventTagName = (rawName: string) => {
   const name = (rawName || '').trim();
@@ -267,6 +283,15 @@ const Contacts: React.FC = () => {
   }, [companyTechMap]);
 
   const groupedEntries = useMemo(() => {
+    const groupTagsById = new Map<number, { name: string; type?: string }[]>();
+    companyGroups.forEach(group => {
+      const normalized = sortTagsByTypeAndName(
+        (group.tags || [])
+          .filter(tag => Boolean(tag.name))
+          .map(tag => ({ name: tag.name, type: normalizeTagType(tag.type) })),
+      );
+      groupTagsById.set(group.id, normalized);
+    });
     const grouped = new Map<string, { groupId: number | null; companies: Map<string, Contact[]> }>();
     contacts.forEach(contact => {
       const groupId = contact.company?.group_id ?? null;
@@ -330,9 +355,9 @@ const Contacts: React.FC = () => {
             companyTagMap.set(name, normalizeTagType(tag.type));
           });
         });
-        const companyTags = Array.from(companyTagMap.entries())
+        const companyTags = sortTagsByTypeAndName(Array.from(companyTagMap.entries())
           .map(([name, type]) => ({ name, type }))
-          .sort((a, b) => a.name.localeCompare(b.name, 'ja'));
+        );
         const techKey = techList[0] || '';
         const nameKey = sortedContacts[0]?.name || '';
         return {
@@ -367,7 +392,8 @@ const Contacts: React.FC = () => {
         return a.company.localeCompare(b.company, 'ja');
       });
 
-      return { group: groupName, groupId: groupBucket.groupId, companies };
+      const groupTags = groupBucket.groupId ? (groupTagsById.get(groupBucket.groupId) || []) : [];
+      return { group: groupName, groupId: groupBucket.groupId, groupTags, companies };
     });
 
     groupEntries.sort((a, b) => {
@@ -377,7 +403,7 @@ const Contacts: React.FC = () => {
     });
 
     return groupEntries;
-  }, [companyTechMap, contacts, extractPrefecture, groupNameMap, sortOption]);
+  }, [companyGroups, companyTechMap, contacts, extractPrefecture, groupNameMap, sortOption]);
 
   const persistExpandedGroups = (next: Record<string, boolean>) => {
     localStorage.setItem('contacts:expandedGroups', JSON.stringify(next));
@@ -714,7 +740,17 @@ const Contacts: React.FC = () => {
               {expanded && (
                 <div className="border-t border-gray-200 p-4 space-y-6">
                   {groupEntry.groupId && (
-                    <div className="flex justify-end">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="text-xs text-gray-500">
+                        <div className="text-sm font-semibold text-slate-700 mb-1">グループタグ:</div>
+                        <div className="inline-flex flex-wrap gap-1">
+                          {groupEntry.groupTags.length > 0 ? groupEntry.groupTags.map(tag => (
+                            <span key={tag.name} className={`rounded-full px-2 py-0.5 ${tagBadgeClass(tag.type)}`}>
+                              {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
+                            </span>
+                          )) : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-500">-</span>}
+                        </div>
+                      </div>
                       <button
                         type="button"
                         onClick={() => openTagEditor('group', groupEntry.groupId as number, groupLabel)}
@@ -741,20 +777,14 @@ const Contacts: React.FC = () => {
                               <h3 className="text-base font-semibold">{companyEntry.company}</h3>
                             </div>
                           <div className="mt-2 text-xs text-gray-500 space-y-1">
-                            <div className="text-sm font-semibold text-blue-700">
-                              技術:{' '}
-                              <span className="inline-flex items-center gap-1 rounded-full bg-blue-50 px-2 py-0.5 text-blue-700">
-                                {companyEntry.techList.length > 0 ? companyEntry.techList.join(' / ') : '-'}
-                              </span>
-                            </div>
                             <div className="text-sm font-semibold text-indigo-700">
                               会社タグ:{' '}
                               <span className="inline-flex flex-wrap items-center gap-1">
                                 {companyEntry.companyTags.length > 0 ? companyEntry.companyTags.map(tag => (
-                                  <span key={tag.name} className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-700">
+                                  <span key={tag.name} className={`rounded-full px-2 py-0.5 ${tagBadgeClass(tag.type)}`}>
                                     {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
                                   </span>
-                                )) : <span className="rounded-full bg-indigo-50 px-2 py-0.5 text-indigo-500">-</span>}
+                                )) : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-slate-500">-</span>}
                               </span>
                             </div>
                             <div>連絡先数: {companyEntry.contacts.length}</div>
