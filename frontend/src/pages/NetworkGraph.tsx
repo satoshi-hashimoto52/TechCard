@@ -2089,10 +2089,20 @@ const NetworkGraph: React.FC = () => {
       (fg as any).d3AlphaDecay(0.05);
     }
     fg.d3ReheatSimulation();
-    if (selfNode && !hasCenteredRef.current) {
+    if (graph.nodes.length > 0 && !hasCenteredRef.current) {
       hasCenteredRef.current = true;
-      fg.centerAt(0, 0, 600);
-      fg.zoom(1.1, 600);
+      const fitView = () => {
+        const current = graphRef.current;
+        if (!current) return;
+        if (typeof current.zoomToFit === 'function') {
+          current.zoomToFit(700, 90);
+          return;
+        }
+        current.centerAt(0, 0, 600);
+        current.zoom(1.1, 600);
+      };
+      requestAnimationFrame(fitView);
+      window.setTimeout(fitView, 180);
     }
     if (layoutSeedRef.current != null) {
       layoutSeedRef.current = null;
