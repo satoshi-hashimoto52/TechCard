@@ -371,6 +371,7 @@ const NetworkGraph: React.FC = () => {
   const relaxedNodeIdsRef = useRef(new Set<string>());
   const relaxedAnchorPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const dragLastPositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const gridHiddenLockPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
   const gridNodeKeyRef = useRef<Map<string, string>>(new Map());
   const prevGridConfigRef = useRef(defaultGridConfig);
@@ -2112,6 +2113,7 @@ const NetworkGraph: React.FC = () => {
     relaxedNodeIdsRef.current.clear();
     relaxedAnchorPositionsRef.current.clear();
     dragLastPositionRef.current.clear();
+    gridHiddenLockPositionsRef.current.clear();
     companyRingRotateSnapRef.current = null;
     companyRingRadiusOverridesRef.current = {};
     setCompanyRingRadiusOverrides({});
@@ -2357,6 +2359,22 @@ const NetworkGraph: React.FC = () => {
     // capture center once whenグリッド有効化
     getGridCenter();
   }, [gridConfig.enabled, getGridCenter]);
+
+  useEffect(() => {
+    if (gridConfig.enabled) {
+      gridHiddenLockPositionsRef.current.clear();
+      return;
+    }
+    const next = new Map<string, { x: number; y: number }>();
+    graph.nodes.forEach(node => {
+      if (companyMemberAssignmentsRef.current.has(node.id)) return;
+      const nx = Number((node as any).x);
+      const ny = Number((node as any).y);
+      if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+      next.set(node.id, { x: nx, y: ny });
+    });
+    gridHiddenLockPositionsRef.current = next;
+  }, [graph.nodes, gridConfig.enabled, layoutEpoch]);
 
   const updateRingResizePopup = useCallback((companyId: string | null) => {
     if (!companyId) {
@@ -3781,6 +3799,26 @@ const NetworkGraph: React.FC = () => {
                   contactNode.fy = null;
                 }
               });
+              if (!gridConfig.enabled) {
+                graph.nodes.forEach(node => {
+                  if (companyMemberAssignmentsRef.current.has(node.id)) return;
+                  const lock = gridHiddenLockPositionsRef.current.get(node.id);
+                  const nx = Number((node as any).x);
+                  const ny = Number((node as any).y);
+                  if (!lock) {
+                    if (Number.isFinite(nx) && Number.isFinite(ny)) {
+                      gridHiddenLockPositionsRef.current.set(node.id, { x: nx, y: ny });
+                    }
+                    return;
+                  }
+                  (node as any).x = lock.x;
+                  (node as any).y = lock.y;
+                  (node as any).vx = 0;
+                  (node as any).vy = 0;
+                  (node as any).fx = lock.x;
+                  (node as any).fy = lock.y;
+                });
+              }
               // 氏名ノードは通常時に現在位置へ固定し、意図しない吸引移動を防ぐ。
               graph.nodes.forEach(node => {
                 if (node.type !== 'contact') return;
@@ -3854,26 +3892,29 @@ const NetworkGraph: React.FC = () => {
                 && !isCompanyMemberRotationNode
               );
               if (isGridLockedNode) {
-                const lockedNode = graphNodeById.get(typed.id) as any;
-                const fx = Number.isFinite(lockedNode?.fx)
-                  ? Number(lockedNode.fx)
-                  : Number.isFinite(lockedNode?.x)
-                  ? Number(lockedNode.x)
-                  : Number.isFinite((node as any).fx)
-                  ? Number((node as any).fx)
-                  : Number((node as any).x);
-                const fy = Number.isFinite(lockedNode?.fy)
-                  ? Number(lockedNode.fy)
-                  : Number.isFinite(lockedNode?.y)
-                  ? Number(lockedNode.y)
-                  : Number.isFinite((node as any).fy)
-                  ? Number((node as any).fy)
-                  : Number((node as any).y);
-                if (Number.isFinite(fx) && Number.isFinite(fy)) {
-                  (node as any).x = fx;
-                  (node as any).y = fy;
-                  (node as any).fx = fx;
-                  (node as any).fy = fy;
+                let lock = gridHiddenLockPositionsRef.current.get(typed.id);
+                if (!lock) {
+                  const known = nodePositionsRef.current.get(typed.id);
+                  const fx = Number.isFinite(known?.x)
+                    ? Number(known?.x)
+                    : Number.isFinite((node as any).fx)
+                    ? Number((node as any).fx)
+                    : Number((node as any).x);
+                  const fy = Number.isFinite(known?.y)
+                    ? Number(known?.y)
+                    : Number.isFinite((node as any).fy)
+                    ? Number((node as any).fy)
+                    : Number((node as any).y);
+                  if (Number.isFinite(fx) && Number.isFinite(fy)) {
+                    lock = { x: fx, y: fy };
+                    gridHiddenLockPositionsRef.current.set(typed.id, lock);
+                  }
+                }
+                if (lock) {
+                  (node as any).x = lock.x;
+                  (node as any).y = lock.y;
+                  (node as any).fx = lock.x;
+                  (node as any).fy = lock.y;
                   (node as any).vx = 0;
                   (node as any).vy = 0;
                 }
@@ -4031,29 +4072,16 @@ const NetworkGraph: React.FC = () => {
                 && !isCompanyMemberRotationNode
               );
               if (isGridLockedNode) {
-                const lockedNode = graphNodeById.get(typed.id) as any;
-                const fx = Number.isFinite(lockedNode?.fx)
-                  ? Number(lockedNode.fx)
-                  : Number.isFinite(lockedNode?.x)
-                  ? Number(lockedNode.x)
-                  : Number.isFinite((node as any).fx)
-                  ? Number((node as any).fx)
-                  : Number((node as any).x);
-                const fy = Number.isFinite(lockedNode?.fy)
-                  ? Number(lockedNode.fy)
-                  : Number.isFinite(lockedNode?.y)
-                  ? Number(lockedNode.y)
-                  : Number.isFinite((node as any).fy)
-                  ? Number((node as any).fy)
-                  : Number((node as any).y);
-                if (Number.isFinite(fx) && Number.isFinite(fy)) {
-                  (node as any).x = fx;
-                  (node as any).y = fy;
-                  (node as any).fx = fx;
-                  (node as any).fy = fy;
+                const lock = gridHiddenLockPositionsRef.current.get(typed.id);
+                if (lock) {
+                  (node as any).x = lock.x;
+                  (node as any).y = lock.y;
+                  (node as any).fx = lock.x;
+                  (node as any).fy = lock.y;
                   (node as any).vx = 0;
                   (node as any).vy = 0;
                 }
+                draggingNodeIdRef.current = null;
                 dragLastPositionRef.current.delete(typed.id);
                 companyRingRotateSnapRef.current = null;
                 window.setTimeout(() => {
