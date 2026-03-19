@@ -1,39 +1,17 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import axios from 'axios';
-
-interface Contact {
-  id: number;
-  name: string;
-  email?: string;
-  phone?: string;
-  role?: string;
-  company?: {
-    id: number;
-    name: string;
-    group_id?: number | null;
-    postal_code?: string | null;
-    address?: string | null;
-    tech_tags?: { name: string; type?: string }[];
-  };
-  tags: { name: string; type?: string }[];
-  first_met_at?: string;
-  notes?: string;
-  postal_code?: string;
-  address?: string;
-}
-
-interface CompanyGroup {
-  id: number;
-  name: string;
-  tags?: { name: string; type?: string }[];
-}
-
-type TagOption = {
-  id: number;
-  name: string;
-  type?: string;
-};
+import { createAbortController, isAbortError } from '../lib/api';
+import { Contact, fetchContacts } from '../services/contactService';
+import {
+  CompanyGroup,
+  fetchCompanyGroupTags,
+  fetchCompanyGroups,
+  fetchCompanyTags,
+  updateCompanyGroupTags,
+  updateCompanyTags,
+} from '../services/companyService';
+import { fetchNetwork } from '../services/statsService';
+import { TagOption, fetchTags } from '../services/tagService';
 
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
@@ -112,6 +90,7 @@ const Contacts: React.FC = () => {
   const [tagEditorLoading, setTagEditorLoading] = useState(false);
   const [tagEditorSaving, setTagEditorSaving] = useState(false);
   const [tagEditorError, setTagEditorError] = useState<string | null>(null);
+  const tagEditorLoadAbortRef = useRef<AbortController | null>(null);
 
   const prefectures = [
     '北海道',
@@ -189,9 +168,10 @@ const Contacts: React.FC = () => {
   }, [groupTagSet]);
 
   useEffect(() => {
+    const controller = createAbortController();
     Promise.all([
-      axios.get('http://localhost:8000/contacts/', { params: { limit: 5000 } }),
-      axios.get<CompanyGroup[]>('http://localhost:8000/company-groups'),
+      fetchContacts({ limit: 5000, signal: controller.signal }),
+      fetchCompanyGroups({ signal: controller.signal }),
     ]).then(([contactResponse, groupResponse]) => {
       const nextContacts = contactResponse.data as Contact[];
       setContacts(nextContacts);
@@ -234,11 +214,17 @@ const Contacts: React.FC = () => {
       }
       setExpandedGroups(initialExpandedGroups);
       setExpandedCompanies(initialExpandedCompanies);
+    }).catch(error => {
+      if (isAbortError(error)) return;
+      setContacts([]);
+      setCompanyGroups([]);
     });
+    return () => controller.abort();
   }, [location.state]);
 
   useEffect(() => {
-    axios.get<TagOption[]>('http://localhost:8000/tags')
+    const controller = createAbortController();
+    fetchTags({ signal: controller.signal })
       .then(response => {
         setAvailableTags(
           sortTagsByNaturalOrder((response.data || [])
@@ -247,12 +233,17 @@ const Contacts: React.FC = () => {
           ),
         );
       })
-      .catch(() => setAvailableTags([]));
+      .catch(error => {
+        if (isAbortError(error)) return;
+        setAvailableTags([]);
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
     if (companyTechMap.size > 0) return;
-    axios.get('http://localhost:8000/stats/network')
+    const controller = createAbortController();
+    fetchNetwork({ signal: controller.signal })
       .then(response => {
         const data = response.data as { nodes: { id: string; label: string }[]; edges: { source: string; target: string; type: string }[] };
         const labelMap = new Map<string, string>(data.nodes.map(node => [node.id, node.label]));
@@ -277,9 +268,11 @@ const Contacts: React.FC = () => {
         });
         setCompanyTechMap(map);
       })
-      .catch(() => {
+      .catch(error => {
+        if (isAbortError(error)) return;
         setCompanyTechMap(new Map());
       });
+    return () => controller.abort();
   }, [companyTechMap]);
 
   const groupedEntries = useMemo(() => {
@@ -430,6 +423,9 @@ const Contacts: React.FC = () => {
   };
 
   const openTagEditor = async (scope: 'company' | 'group', id: number, name: string) => {
+    tagEditorLoadAbortRef.current?.abort();
+    const controller = createAbortController();
+    tagEditorLoadAbortRef.current = controller;
     setTagEditorTarget({ scope, id, name });
     setTagEditorDraft([]);
     setTagEditorTypes({});
@@ -440,10 +436,9 @@ const Contacts: React.FC = () => {
     setTagEditorError(null);
     setTagEditorLoading(true);
     try {
-      const url = scope === 'company'
-        ? `http://localhost:8000/companies/${id}/tags`
-        : `http://localhost:8000/company-groups/${id}/tags`;
-      const response = await axios.get<TagOption[]>(url);
+      const response = scope === 'company'
+        ? await fetchCompanyTags(id, { signal: controller.signal })
+        : await fetchCompanyGroupTags(id, { signal: controller.signal });
       const tags = (response.data || [])
         .filter(tag => Boolean(tag.name))
         .map(tag => {
@@ -458,14 +453,18 @@ const Contacts: React.FC = () => {
         if (tag.name) nextTypes[tag.name] = normalizeTagType(tag.type);
       });
       setTagEditorTypes(nextTypes);
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) return;
       setTagEditorError('タグの取得に失敗しました。');
     } finally {
+      if (tagEditorLoadAbortRef.current !== controller) return;
       setTagEditorLoading(false);
     }
   };
 
   const closeTagEditor = () => {
+    tagEditorLoadAbortRef.current?.abort();
+    tagEditorLoadAbortRef.current = null;
     setTagEditorTarget(null);
     setTagEditorDraft([]);
     setTagEditorTypes({});
@@ -508,10 +507,9 @@ const Contacts: React.FC = () => {
           return { name, type };
         }),
       };
-      const url = tagEditorTarget.scope === 'company'
-        ? `http://localhost:8000/companies/${tagEditorTarget.id}/tags`
-        : `http://localhost:8000/company-groups/${tagEditorTarget.id}/tags`;
-      const response = await axios.put<TagOption[]>(url, payload);
+      const response = tagEditorTarget.scope === 'company'
+        ? await updateCompanyTags(tagEditorTarget.id, payload)
+        : await updateCompanyGroupTags(tagEditorTarget.id, payload);
       const savedTags = (response.data || [])
         .filter(tag => Boolean(tag.name))
         .map(tag => ({
@@ -575,7 +573,7 @@ const Contacts: React.FC = () => {
   const renderTagEditor = () => {
     if (!tagEditorTarget) return null;
     return (
-      <div className="mt-3 rounded border border-blue-200 bg-blue-50 p-3 space-y-3">
+      <div data-testid="contacts-tag-editor" className="mt-3 rounded border border-blue-200 bg-blue-50 p-3 space-y-3">
         <div className="flex items-center justify-between">
           <div className="text-sm font-semibold text-blue-800">
             {tagEditorTarget.scope === 'company' ? '会社タグ編集' : 'グループタグ編集'}: {tagEditorTarget.name}
@@ -604,6 +602,7 @@ const Contacts: React.FC = () => {
             </div>
             <div className="flex items-center gap-2 flex-wrap">
               <select
+                data-testid="contacts-tag-editor-select-existing"
                 value={tagEditorSelectedTag}
                 onChange={event => setTagEditorSelectedTag(event.target.value)}
                 className="border rounded px-2 py-1 text-sm min-w-[180px]"
@@ -616,6 +615,7 @@ const Contacts: React.FC = () => {
                 ))}
               </select>
               <button
+                data-testid="contacts-tag-editor-add-existing"
                 type="button"
                 onClick={() => {
                   const selected = tagEditorSelectedTag.trim();
@@ -678,6 +678,7 @@ const Contacts: React.FC = () => {
             </div>
             <div className="pt-1">
               <button
+                data-testid="contacts-tag-editor-save"
                 type="button"
                 onClick={saveTagEditor}
                 disabled={tagEditorSaving}
@@ -727,6 +728,7 @@ const Contacts: React.FC = () => {
           return (
             <div key={groupEntry.group} className="bg-white rounded-lg shadow border border-gray-200">
               <button
+                data-testid={`contacts-group-toggle-${groupEntry.groupId ?? groupEntry.group}`}
                 type="button"
                 onClick={() => toggleGroup(groupEntry.group)}
                 className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-50"
@@ -767,6 +769,7 @@ const Contacts: React.FC = () => {
                     return (
                       <div key={companyKey} className="border border-gray-100 rounded-lg">
                         <button
+                          data-testid={`contacts-company-toggle-${companyEntry.companyId ?? companyKey}`}
                           type="button"
                           onClick={() => toggleCompany(companyKey)}
                           className="w-full text-left px-4 py-3 flex items-start justify-between hover:bg-gray-50"
@@ -777,9 +780,9 @@ const Contacts: React.FC = () => {
                               <h3 className="text-base font-semibold">{companyEntry.company}</h3>
                             </div>
                           <div className="mt-2 text-xs text-gray-500 space-y-1">
-                            <div className="text-sm font-semibold text-indigo-700">
-                              会社タグ:{' '}
-                              <span className="inline-flex flex-wrap items-center gap-1">
+                              <div className="text-sm font-semibold text-indigo-700">
+                                会社タグ:{' '}
+                              <span data-testid={`contacts-company-tags-${companyEntry.companyId ?? 'none'}`} className="inline-flex flex-wrap items-center gap-1">
                                 {companyEntry.companyTags.length > 0 ? companyEntry.companyTags.map(tag => (
                                   <span key={tag.name} className={`rounded-full px-2 py-0.5 ${tagBadgeClass(tag.type)}`}>
                                     {tag.type === 'event' ? formatEventTagLabel(tag.name) : tag.name}
@@ -800,6 +803,7 @@ const Contacts: React.FC = () => {
                               </div>
                               {companyEntry.companyId && (
                                 <button
+                                  data-testid={`contacts-company-tag-edit-${companyEntry.companyId}`}
                                   type="button"
                                   onClick={() => openTagEditor('company', companyEntry.companyId as number, companyEntry.company)}
                                   className="rounded border border-blue-200 bg-blue-50 px-3 py-1 text-xs text-blue-700 hover:bg-blue-100"

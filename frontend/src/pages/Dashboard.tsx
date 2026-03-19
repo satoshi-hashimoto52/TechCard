@@ -1,33 +1,14 @@
-import React, { useEffect, useState } from 'react';
-import axios from 'axios';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import TechCardMap from '../components/TechCardMap';
-import { CompanyMapPoint } from '../components/LedJapanMap';
-
-type Summary = {
-  counts: {
-    contacts: number;
-    companies: number;
-    prefectures?: number;
-    tags: number;
-    meetings: number;
-    connectable_contacts?: number;
-    connected_contacts?: number;
-    connection_rate?: number;
-  };
-  lists: {
-    contacts: { id: number; name: string }[];
-    companies: { name: string; count: number }[];
-    prefectures?: { name: string; count: number }[];
-    tags: { name: string; count: number }[];
-    meetings: { id: number; contact_name: string | null; company_name?: string | null; overlap: number }[];
-  };
-};
-
-type CompanyDiagnostics = {
-  missing_addresses: { company_id: number; name: string }[];
-  invalidated_coords: { company_id: number; name: string; reason: string }[];
-  short_addresses: { company_id: number; name: string }[];
-};
+import { createAbortController, isAbortError } from '../lib/api';
+import {
+  CompanyDiagnostics,
+  CompanyMapPoint,
+  Summary,
+  fetchCompanyDiagnostics as fetchCompanyDiagnosticsApi,
+  fetchCompanyMap as fetchCompanyMapApi,
+  fetchSummary as fetchSummaryApi,
+} from '../services/statsService';
 
 
 const Dashboard: React.FC = () => {
@@ -53,6 +34,8 @@ const Dashboard: React.FC = () => {
   const [companyMap, setCompanyMap] = useState<CompanyMapPoint[]>([]);
   const [companyMapLoading, setCompanyMapLoading] = useState(false);
   const [companyDiagnostics, setCompanyDiagnostics] = useState<CompanyDiagnostics | null>(null);
+  const companyMapAbortRef = useRef<AbortController | null>(null);
+  const diagnosticsAbortRef = useRef<AbortController | null>(null);
   const prefectureItems = summary.lists.prefectures || [];
   const totalPrefectureCount = prefectureItems.reduce((sum, item) => sum + item.count, 0) || 1;
   const connectableContacts = Math.max(
@@ -77,9 +60,11 @@ const Dashboard: React.FC = () => {
     : 0;
 
   useEffect(() => {
-    axios.get<Summary>('http://localhost:8000/stats/summary')
+    const controller = createAbortController();
+    fetchSummaryApi({ signal: controller.signal })
       .then(response => setSummary(response.data))
       .catch(() => {
+        if (controller.signal.aborted) return;
         setSummary({
           counts: {
             contacts: 0,
@@ -100,41 +85,59 @@ const Dashboard: React.FC = () => {
           },
         });
       });
+    return () => controller.abort();
   }, []);
 
-  const fetchCompanyMap = (withRefresh = false) => {
-    const url = withRefresh
-      ? 'http://localhost:8000/stats/company-map?refresh=1'
-      : 'http://localhost:8000/stats/company-map';
-    return axios.get<CompanyMapPoint[]>(url)
+  const fetchCompanyMap = useCallback((withRefresh = false) => {
+    companyMapAbortRef.current?.abort();
+    const controller = createAbortController();
+    companyMapAbortRef.current = controller;
+    return fetchCompanyMapApi(withRefresh, { signal: controller.signal })
       .then(response => setCompanyMap(response.data))
       .catch(err => {
+        if (isAbortError(err)) return;
         console.warn('company-map load failed', err);
         setCompanyMap([]);
       });
-  };
+  }, []);
+
+  const fetchCompanyDiagnostics = useCallback(() => {
+    diagnosticsAbortRef.current?.abort();
+    const controller = createAbortController();
+    diagnosticsAbortRef.current = controller;
+    return fetchCompanyDiagnosticsApi({ signal: controller.signal })
+      .then(response => setCompanyDiagnostics(response.data))
+      .catch(err => {
+        if (isAbortError(err)) return;
+        setCompanyDiagnostics(null);
+      });
+  }, []);
 
   useEffect(() => {
     fetchCompanyMap();
     const timer = window.setInterval(() => {
       fetchCompanyMap();
     }, 3000);
-    return () => window.clearInterval(timer);
-  }, []);
+    return () => {
+      window.clearInterval(timer);
+      companyMapAbortRef.current?.abort();
+      companyMapAbortRef.current = null;
+    };
+  }, [fetchCompanyMap]);
 
   useEffect(() => {
-    axios.get<CompanyDiagnostics>('http://localhost:8000/stats/company-map/diagnostics')
-      .then(response => setCompanyDiagnostics(response.data))
-      .catch(() => setCompanyDiagnostics(null));
-  }, []);
+    fetchCompanyDiagnostics();
+    return () => {
+      diagnosticsAbortRef.current?.abort();
+      diagnosticsAbortRef.current = null;
+    };
+  }, [fetchCompanyDiagnostics]);
 
   const refreshCompanyMap = () => {
     setCompanyMapLoading(true);
     fetchCompanyMap(true)
       .finally(() => setCompanyMapLoading(false));
-    axios.get<CompanyDiagnostics>('http://localhost:8000/stats/company-map/diagnostics')
-      .then(response => setCompanyDiagnostics(response.data))
-      .catch(() => setCompanyDiagnostics(null));
+    fetchCompanyDiagnostics();
   };
 
   return (

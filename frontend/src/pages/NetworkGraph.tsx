@@ -1,8 +1,18 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import axios from 'axios';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import ContextPanel from '../components/ContextPanel';
 import ShortcutPanel from '../components/ShortcutPanel';
+import { createAbortController, isAbortError } from '../lib/api';
+import {
+  GraphData,
+  GraphLink,
+  GraphNode,
+  fetchNetwork,
+} from '../services/statsService';
+import {
+  initialInteractionState,
+  interactionReducer,
+} from '../features/networkGraph/state/interactionReducer';
 
 const NETWORK_GRAPH_COLORS = {
   self: '#CBD5E1',
@@ -81,37 +91,9 @@ const defaultGuideConfig = {
   ],
 };
 
-type GraphNode = {
-  id: string;
-  type: 'contact' | 'company' | 'group' | 'event' | 'tech' | 'relation';
-  label: string;
-  size?: number;
-  role?: string;
-  email?: string;
-  phone?: string;
-  mobile?: string;
-  postal_code?: string;
-  address?: string;
-  notes?: string;
-  company_node_id?: string;
-  is_self?: boolean;
-};
-
 type NodeObject = {
   id?: string;
   [key: string]: unknown;
-};
-
-type GraphLink = {
-  source: string | { id: string };
-  target: string | { id: string };
-  type: 'event_attendance' | 'employment' | 'company_group' | 'company_tech' | 'group_tech' | 'contact_tech' | 'tech_bridge' | 'relation' | 'company_relation' | 'group_contact' | 'company_event' | 'relation_event';
-  count?: number;
-};
-
-type GraphData = {
-  nodes: GraphNode[];
-  edges: GraphLink[];
 };
 
 type GraphView = {
@@ -268,13 +250,12 @@ const NetworkGraph: React.FC = () => {
   const [techFilter, setTechFilter] = useState<string | null>(null);
   const [companyFilter, setCompanyFilter] = useState<string | null>(null);
   const [contactFilter, setContactFilter] = useState<string | null>(null);
-  const [hoveredNode, setHoveredNode] = useState<GraphNode | null>(null);
+  const [interactionState, dispatchInteraction] = useReducer(interactionReducer, initialInteractionState);
   const [hoveredPos, setHoveredPos] = useState<{ x: number; y: number } | null>(null);
   const [searchType, setSearchType] = useState<SearchType>(displayConfigSeed.searchType);
   const [searchValue, setSearchValue] = useState('');
   const [visibleTypes, setVisibleTypes] = useState<VisibleTypes>(displayConfigSeed.visibleTypes);
   const [highlightMode, setHighlightMode] = useState(displayConfigSeed.highlightMode);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [groupCollapsed, setGroupCollapsed] = useState(displayConfigSeed.groupCollapsed);
   const [searchFocus, setSearchFocus] = useState<{ type: SearchType; value: string } | null>(null);
   const [quickOpen, setQuickOpen] = useState(false);
@@ -354,7 +335,6 @@ const NetworkGraph: React.FC = () => {
     }
   });
   const [ringResizeHoverCompanyId, setRingResizeHoverCompanyId] = useState<string | null>(null);
-  const [ringResizeActiveCompanyId, setRingResizeActiveCompanyId] = useState<string | null>(null);
   const [ringResizePopup, setRingResizePopup] = useState<{ companyId: string; left: number; top: number } | null>(null);
   const [ringResizeCursor, setRingResizeCursor] = useState<string | undefined>(undefined);
   const companyRingRadiusOverridesRef = useRef<Record<string, number>>(companyRingRadiusOverrides);
@@ -385,7 +365,7 @@ const NetworkGraph: React.FC = () => {
   const saveLayoutTimerRef = useRef<number | null>(null);
   const layoutSeedRef = useRef<number | null>(null);
   const hoverTimerRef = useRef<number | null>(null);
-  const draggingNodeIdRef = useRef<string | null>(null);
+  const draggingNodeIdRef = useRef<string | null>(interactionState.draggingNodeId);
   const rotatingCompanyIdRef = useRef<string | null>(null);
   const companyRingRotateSnapRef = useRef<{
     contactId: string;
@@ -394,11 +374,11 @@ const NetworkGraph: React.FC = () => {
     appliedSteps: number;
   } | null>(null);
   const ringResizeStateRef = useRef<{ companyId: string; centerX: number; centerY: number; minRadius: number } | null>(null);
-  const hoveredNodeRef = useRef<GraphNode | null>(null);
   const didDragNodeRef = useRef(false);
   const companyMemberAssignmentsRef = useRef<Map<string, CompanyMemberAssignment>>(new Map());
   const companyMemberRingsRef = useRef<Map<string, CompanyMemberRing>>(new Map());
   const companyMemberContactIdsRef = useRef<Set<string>>(new Set());
+  const selectedNodeId = interactionState.selectedNodeId;
 
   const searchTypeLabel = useMemo(() => {
     if (searchType === 'tech') return '技術';
@@ -409,13 +389,20 @@ const NetworkGraph: React.FC = () => {
   }, [searchType]);
 
   useEffect(() => {
-    const params: Record<string, string | number> = {};
-    if (techFilter) params.technology = techFilter;
-    if (companyFilter) params.company = companyFilter;
-    if (contactFilter) params.person = contactFilter;
-    axios.get<GraphData>('http://localhost:8000/stats/network', { params }).then(response => {
-      setRawGraph(response.data);
-    });
+    const controller = createAbortController();
+    fetchNetwork({
+      tech: techFilter,
+      company: companyFilter,
+      contact: contactFilter,
+      signal: controller.signal,
+    })
+      .then(response => {
+        setRawGraph(response.data);
+      })
+      .catch(error => {
+        if (isAbortError(error)) return;
+      });
+    return () => controller.abort();
   }, [techFilter, companyFilter, contactFilter]);
 
   useEffect(() => {
@@ -480,6 +467,10 @@ const NetworkGraph: React.FC = () => {
       }
     };
   }, []);
+
+  useEffect(() => {
+    draggingNodeIdRef.current = interactionState.draggingNodeId;
+  }, [interactionState.draggingNodeId]);
 
   const graph: GraphView = useMemo(() => {
     const allowedTypes = new Set(
@@ -1246,6 +1237,12 @@ const NetworkGraph: React.FC = () => {
     if (!selectedNodeId) return null;
     return rawNodeById.get(selectedNodeId) || graph.nodes.find(node => String(node.id) === selectedNodeId) || null;
   }, [graph.nodes, rawNodeById, selectedNodeId]);
+
+  const hoveredNode = useMemo(() => {
+    const hoveredNodeId = interactionState.hoveredNodeId;
+    if (!hoveredNodeId) return null;
+    return rawNodeById.get(hoveredNodeId) || graph.nodes.find(node => String(node.id) === hoveredNodeId) || null;
+  }, [graph.nodes, interactionState.hoveredNodeId, rawNodeById]);
 
   const contextData = useMemo(() => {
     if (!selectedNode) return null;
@@ -2173,7 +2170,7 @@ const NetworkGraph: React.FC = () => {
     companyRingRadiusOverridesRef.current = {};
     setCompanyRingRadiusOverrides({});
     setRingResizeHoverCompanyId(null);
-    setRingResizeActiveCompanyId(null);
+    dispatchInteraction({ type: 'RING_RESIZE_END' });
     setRingResizePopup(null);
     const fg = graphRef.current;
     if (fg) {
@@ -2199,8 +2196,8 @@ const NetworkGraph: React.FC = () => {
       }
       if (event.key === 'Escape') {
         setQuickOpen(false);
-        setSelectedNodeId(null);
-        setHoveredNode(null);
+        dispatchInteraction({ type: 'CANVAS_CLICK' });
+        dispatchInteraction({ type: 'HOVER_NODE', nodeId: null });
         setHoveredPos(null);
       }
     };
@@ -2218,7 +2215,7 @@ const NetworkGraph: React.FC = () => {
   }, [graph.nodes, quickQuery]);
 
   const focusNode = (target: GraphNode) => {
-    setSelectedNodeId(String(target.id));
+    dispatchInteraction({ type: 'NODE_CLICK', nodeId: String(target.id) });
     setSearchFocus({ type: target.type as any, value: target.label });
     const fg = graphRef.current;
     if (!fg) return;
@@ -2238,7 +2235,7 @@ const NetworkGraph: React.FC = () => {
       return (node.label || '').toLowerCase().includes(value);
     });
     if (!target) return;
-    setSelectedNodeId(String(target.id));
+    dispatchInteraction({ type: 'NODE_CLICK', nodeId: String(target.id) });
     const fg = graphRef.current;
     if (!fg) return;
     const focus = () => {
@@ -2913,29 +2910,33 @@ const NetworkGraph: React.FC = () => {
       });
       scheduleLayoutSave();
     }
-    setRingResizeActiveCompanyId(null);
+    dispatchInteraction({ type: 'RING_RESIZE_END' });
   }, [scheduleLayoutSave]);
 
   useEffect(() => {
-    if (!ringResizeActiveCompanyId) return;
+    if (!interactionState.isResizingRing) return;
     const onMouseUp = () => {
       finishRingResize();
     };
     window.addEventListener('mouseup', onMouseUp);
     return () => window.removeEventListener('mouseup', onMouseUp);
-  }, [finishRingResize, ringResizeActiveCompanyId]);
+  }, [finishRingResize, interactionState.isResizingRing]);
 
   useEffect(() => {
     if (!isCompanyRingResizeEnabled || !selectedCompanyForRingResize) {
       ringResizeStateRef.current = null;
       setRingResizeHoverCompanyId(null);
-      setRingResizeActiveCompanyId(null);
+      dispatchInteraction({ type: 'RING_RESIZE_END' });
       setRingResizePopup(null);
       setRingResizeCursor(undefined);
       return;
     }
     setRingResizeHoverCompanyId(null);
-    setRingResizeActiveCompanyId(prev => (prev && prev !== selectedCompanyForRingResize ? null : prev));
+    const activeCompanyId = ringResizeStateRef.current?.companyId ?? null;
+    if (activeCompanyId && activeCompanyId !== selectedCompanyForRingResize) {
+      ringResizeStateRef.current = null;
+      dispatchInteraction({ type: 'RING_RESIZE_END' });
+    }
     updateRingResizePopup(selectedCompanyForRingResize);
   }, [isCompanyRingResizeEnabled, selectedCompanyForRingResize, updateRingResizePopup]);
 
@@ -3483,12 +3484,12 @@ const NetworkGraph: React.FC = () => {
     const typed = node as GraphNode;
     const id = (typed.id ?? node.id);
     if (id == null) return;
-    setSelectedNodeId(String(id));
+    dispatchInteraction({ type: 'NODE_CLICK', nodeId: String(id) });
     if (hoverTimerRef.current != null) {
       window.clearTimeout(hoverTimerRef.current);
       hoverTimerRef.current = null;
     }
-    setHoveredNode(null);
+    dispatchInteraction({ type: 'HOVER_NODE', nodeId: null });
     setHoveredPos(null);
     if (typed.type === 'company' && graphRef.current && (node as any).x != null && (node as any).y != null) {
       graphRef.current.centerAt((node as any).x, (node as any).y, 600);
@@ -3599,6 +3600,7 @@ const NetworkGraph: React.FC = () => {
             <option value="event">イベント</option>
           </select>
           <input
+            data-testid="network-toolbar-search-input"
             type="text"
             value={searchValue}
             onChange={event => setSearchValue(event.target.value)}
@@ -3621,6 +3623,7 @@ const NetworkGraph: React.FC = () => {
           </button>
           <div className="relative ml-auto">
             <button
+              data-testid="network-settings-toggle"
               type="button"
               onClick={() => setSettingsOpen(prev => !prev)}
               className="border border-slate-300 bg-slate-200 text-slate-700 w-11 h-11 rounded-md flex items-center justify-center hover:bg-slate-300"
@@ -3744,8 +3747,13 @@ const NetworkGraph: React.FC = () => {
       <div className="bg-white rounded-lg shadow h-[calc(100%-3.5rem)] flex w-full overflow-hidden min-w-0">
         <div
           ref={containerRef}
+          data-testid="network-graph-canvas-area"
+          data-selected-node-id={interactionState.selectedNodeId || ''}
+          data-hovered-node-id={interactionState.hoveredNodeId || ''}
+          data-dragging-node-id={interactionState.draggingNodeId || ''}
+          data-is-resizing-ring={interactionState.isResizingRing ? 'true' : 'false'}
           className="flex-1 min-w-0 relative overflow-hidden"
-          style={{ cursor: (isCompanyRingResizeEnabled && (ringResizeActiveCompanyId || ringResizeHoverCompanyId)) ? ringResizeCursor || 'ew-resize' : undefined }}
+          style={{ cursor: (isCompanyRingResizeEnabled && (interactionState.isResizingRing || ringResizeHoverCompanyId)) ? ringResizeCursor || 'ew-resize' : undefined }}
           onMouseMoveCapture={event => {
             if (!isCompanyRingResizeEnabled || !selectedCompanyForRingResize) {
               if (ringResizeStateRef.current) {
@@ -3803,7 +3811,7 @@ const NetworkGraph: React.FC = () => {
               centerY: hit.centerY,
               minRadius: getMinCompanyMemberRingRadius(hit.count),
             };
-            setRingResizeActiveCompanyId(hit.companyId);
+            dispatchInteraction({ type: 'RING_RESIZE_START' });
             setRingResizeHoverCompanyId(hit.companyId);
             setRingResizeCursor(getRingResizeCursorByAngle(point.gx, point.gy, hit.centerX, hit.centerY));
             updateRingResizePopup(hit.companyId);
@@ -3824,12 +3832,15 @@ const NetworkGraph: React.FC = () => {
             const target = event.target as HTMLElement | null;
             if (target?.closest('[data-node-click-ignore="true"]')) return;
             if (didDragNodeRef.current) return;
-            const hovered = hoveredNodeRef.current;
-            if (hovered) {
-              handleNodeClick(hovered as unknown as NodeObject);
-              return;
+            const hoveredId = interactionState.hoveredNodeId;
+            if (hoveredId) {
+              const hovered = rawNodeById.get(hoveredId) || graph.nodes.find(node => String(node.id) === hoveredId);
+              if (hovered) {
+                handleNodeClick(hovered as unknown as NodeObject);
+                return;
+              }
             }
-            setSelectedNodeId(null);
+            dispatchInteraction({ type: 'CANVAS_CLICK' });
           }}
         >
           {ringResizePopup && (
@@ -4034,12 +4045,13 @@ const NetworkGraph: React.FC = () => {
               didDragNodeRef.current = true;
               if (typed.id != null) {
                 draggingNodeIdRef.current = String(typed.id);
+                dispatchInteraction({ type: 'DRAG_START', nodeId: String(typed.id) });
               }
               if (hoverTimerRef.current != null) {
                 window.clearTimeout(hoverTimerRef.current);
                 hoverTimerRef.current = null;
               }
-              setHoveredNode(null);
+              dispatchInteraction({ type: 'HOVER_NODE', nodeId: null });
               setHoveredPos(null);
               Array.from(gridOccupancyRef.current.entries()).forEach(([key, val]) => {
                 if (val === typed.id) gridOccupancyRef.current.delete(key);
@@ -4232,6 +4244,7 @@ const NetworkGraph: React.FC = () => {
                   (node as any).vy = 0;
                 }
                 draggingNodeIdRef.current = null;
+                dispatchInteraction({ type: 'DRAG_END' });
                 dragLastPositionRef.current.delete(typed.id);
                 dragSelectedClusterRef.current = null;
                 companyRingRotateSnapRef.current = null;
@@ -4241,6 +4254,7 @@ const NetworkGraph: React.FC = () => {
                 return;
               }
               draggingNodeIdRef.current = null;
+              dispatchInteraction({ type: 'DRAG_END' });
               dragSelectedClusterRef.current = null;
               companyRingRotateSnapRef.current = null;
               window.setTimeout(() => {
@@ -4292,13 +4306,13 @@ const NetworkGraph: React.FC = () => {
               scheduleLayoutSave();
             }}
             onNodeHover={(node: NodeObject | null) => {
-                hoveredNodeRef.current = (node as GraphNode | null) || null;
+                const hoverId = node && (node as GraphNode).id != null ? String((node as GraphNode).id) : null;
+                dispatchInteraction({ type: 'HOVER_NODE', nodeId: hoverId });
                 if (!ENABLE_NODE_HOVER_TOOLTIP) {
                   if (hoverTimerRef.current != null) {
                     window.clearTimeout(hoverTimerRef.current);
                     hoverTimerRef.current = null;
                   }
-                  setHoveredNode(null);
                   setHoveredPos(null);
                   return;
                 }
@@ -4307,14 +4321,14 @@ const NetworkGraph: React.FC = () => {
                   hoverTimerRef.current = null;
                 }
                 if (!node || draggingNodeIdRef.current) {
-                  setHoveredNode(null);
+                  dispatchInteraction({ type: 'HOVER_NODE', nodeId: null });
                   setHoveredPos(null);
                   return;
                 }
                 const typed = node as GraphNode;
                 hoverTimerRef.current = window.setTimeout(() => {
                   if (draggingNodeIdRef.current) return;
-                  setHoveredNode(typed);
+                  dispatchInteraction({ type: 'HOVER_NODE', nodeId: String(typed.id) });
                   if (graphRef.current && (node as any).x != null && (node as any).y != null) {
                     const coords = graphRef.current.graph2ScreenCoords((node as any).x, (node as any).y);
                     setHoveredPos({ x: coords.x, y: coords.y });
@@ -4366,8 +4380,8 @@ const NetworkGraph: React.FC = () => {
             </div>
           )}
           {quickOpen && (
-            <div className="absolute inset-0 bg-black/40 flex items-start justify-center pt-16">
-              <div className="bg-white rounded-lg shadow w-[480px] max-w-[90%] p-4">
+            <div data-testid="network-quick-search-overlay" className="absolute inset-0 bg-black/40 flex items-start justify-center pt-16">
+              <div data-testid="network-quick-search-dialog" className="bg-white rounded-lg shadow w-[480px] max-w-[90%] p-4">
                 <div className="flex items-center justify-between mb-2">
                   <div className="text-sm font-semibold">クイック検索</div>
                   <button
@@ -4379,6 +4393,7 @@ const NetworkGraph: React.FC = () => {
                   </button>
                 </div>
                 <input
+                  data-testid="network-quick-search-input"
                   autoFocus
                   type="text"
                   value={quickQuery}
@@ -4392,6 +4407,7 @@ const NetworkGraph: React.FC = () => {
                   )}
                   {quickResults.map(node => (
                     <button
+                      data-testid="network-quick-search-result"
                       key={node.id}
                       type="button"
                       onClick={() => {

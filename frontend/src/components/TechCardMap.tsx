@@ -1,49 +1,32 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import axios from 'axios';
 import Map, { Marker, NavigationControl, Popup, MapRef, Source, Layer } from 'react-map-gl/maplibre';
 import maplibregl from 'maplibre-gl';
 import Supercluster from 'supercluster';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import LedMarker from './LedMarker';
 import CompanyCluster from './CompanyCluster';
-import { CompanyMapPoint } from './LedJapanMap';
+import { createAbortController, getApiErrorMessage, isAbortError } from '../lib/api';
+import {
+  CompanyMapPoint,
+  CompanyRouteResponse,
+  RouteStep,
+  fetchCompanyRoute,
+} from '../services/statsService';
 
 const MAP_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 const isFiniteNumber = (value: unknown): value is number => Number.isFinite(value);
+const EARTH_RADIUS_M = 6371000;
+const DEG_TO_RAD = Math.PI / 180;
+const SEARCH_RESULT_LIMIT = 30;
 
-type RouteLine = {
-  type: 'LineString';
-  coordinates: [number, number][];
-};
-
-type RouteStep = {
-  lon: number;
-  lat: number;
-  kind: 'enter' | 'exit' | 'junction' | 'road' | 'other';
-  label: string;
-  road?: string | null;
-  detail?: string | null;
-};
-
-type CompanyRouteResponse = {
-  from_company_id: number;
-  from_company_name: string;
-  to_company_id: number;
-  to_company_name: string;
-  to_company_address?: string | null;
-  from_prefecture?: string | null;
-  to_prefecture?: string | null;
-  policy: string;
-  effective_mode: string;
-  distance_m: number;
-  distance_km: number;
-  duration_s?: number | null;
-  duration_min?: number | null;
-  geometry: RouteLine;
-  route_steps?: RouteStep[];
-  cached: boolean;
-  provider: string;
-  updated_at?: string | null;
+const haversineMeters = (aLat: number, aLon: number, bLat: number, bLon: number): number => {
+  const dLat = (bLat - aLat) * DEG_TO_RAD;
+  const dLon = (bLon - aLon) * DEG_TO_RAD;
+  const lat1 = aLat * DEG_TO_RAD;
+  const lat2 = bLat * DEG_TO_RAD;
+  const h = Math.sin(dLat / 2) ** 2
+    + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
 };
 
 const formatDistanceLabel = (route: CompanyRouteResponse): string => {
@@ -70,6 +53,9 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
   const [routeError, setRouteError] = useState<string | null>(null);
   const [routeLoading, setRouteLoading] = useState(false);
   const [pendingTargetName, setPendingTargetName] = useState<string | null>(null);
+  const [companySearchQuery, setCompanySearchQuery] = useState('');
+  const [focusedSearchPointKey, setFocusedSearchPointKey] = useState<string | null>(null);
+  const routeRequestAbortRef = useRef<AbortController | null>(null);
 
   const points = useMemo(() => {
     if (!companies) return [];
@@ -98,6 +84,66 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     });
     return list.filter(point => isFiniteNumber(point.lat) && isFiniteNumber(point.lon));
   }, [companies]);
+
+  const markerOffsets = useMemo(() => {
+    const thresholdMeters = 70;
+    const clustered = new Array(points.length).fill(false);
+    const offsets: Record<string, { x: number; y: number }> = {};
+    const getKey = (index: number) => `${points[index].company_id}-${index}`;
+
+    for (let i = 0; i < points.length; i += 1) {
+      if (clustered[i]) continue;
+      const cluster = [i];
+      clustered[i] = true;
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (let j = 0; j < points.length; j += 1) {
+          if (clustered[j]) continue;
+          const pointJ = points[j];
+          if (!isFiniteNumber(pointJ.lat) || !isFiniteNumber(pointJ.lon)) continue;
+          const nearAny = cluster.some(index => {
+            const pointI = points[index];
+            return haversineMeters(pointI.lat as number, pointI.lon as number, pointJ.lat as number, pointJ.lon as number) <= thresholdMeters;
+          });
+          if (!nearAny) continue;
+          clustered[j] = true;
+          cluster.push(j);
+          changed = true;
+        }
+      }
+
+      if (cluster.length <= 1) continue;
+      const sorted = cluster.slice().sort((a, b) => {
+        const pa = points[a];
+        const pb = points[b];
+        if (pa.is_self !== pb.is_self) return pa.is_self ? -1 : 1;
+        if (pa.company_id !== pb.company_id) return pa.company_id - pb.company_id;
+        return (pa.name || '').localeCompare(pb.name || '', 'ja');
+      });
+
+      const selfIndex = sorted.findIndex(index => points[index].is_self);
+      if (selfIndex >= 0) {
+        const selfPointIndex = sorted[selfIndex];
+        offsets[getKey(selfPointIndex)] = { x: 0, y: 0 };
+      }
+      const ringMembers = selfIndex >= 0
+        ? sorted.filter(index => !points[index].is_self)
+        : sorted;
+      const ringCount = ringMembers.length;
+      if (ringCount <= 0) continue;
+      const radiusPx = Math.min(34, 18 + ringCount * 2.4);
+      const startAngle = -(Math.PI / 2);
+      ringMembers.forEach((pointIndex, idx) => {
+        const angle = startAngle + (Math.PI * 2 * idx) / ringCount;
+        offsets[getKey(pointIndex)] = {
+          x: Math.round(Math.cos(angle) * radiusPx),
+          y: Math.round(Math.sin(angle) * radiusPx),
+        };
+      });
+    }
+    return offsets;
+  }, [points]);
 
   const geojson = useMemo(
     () => ({
@@ -168,6 +214,59 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     }),
     [],
   );
+
+  const searchablePoints = useMemo(() => {
+    return points.map((point, index) => {
+      const key = `${point.company_id}-${index}`;
+      const address = (point.address || point.postal_code || '').trim();
+      const city = (point.city || '').trim();
+      const searchable = [
+        point.name || '',
+        address,
+        city,
+        point.postal_code || '',
+      ]
+        .join(' ')
+        .toLowerCase();
+      return {
+        key,
+        point,
+        index,
+        address,
+        city,
+        searchable,
+      };
+    });
+  }, [points]);
+
+  const focusedSearchPoint = useMemo(() => {
+    if (!focusedSearchPointKey) return null;
+    return searchablePoints.find(item => item.key === focusedSearchPointKey) || null;
+  }, [focusedSearchPointKey, searchablePoints]);
+
+  const companySearchResults = useMemo(() => {
+    const query = companySearchQuery.trim().toLowerCase();
+    if (!query) return [];
+    const terms = query.split(/\s+/).filter(Boolean);
+    const scored = searchablePoints
+      .filter(item => terms.every(term => item.searchable.includes(term)))
+      .map(item => {
+        const name = (item.point.name || '').toLowerCase();
+        let score = 0;
+        if (name === query) score += 120;
+        else if (name.startsWith(query)) score += 80;
+        else if (name.includes(query)) score += 50;
+        if (item.address.toLowerCase().includes(query)) score += 40;
+        if (item.city.toLowerCase().includes(query)) score += 20;
+        return { ...item, score };
+      })
+      .sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        if (a.point.company_id !== b.point.company_id) return a.point.company_id - b.point.company_id;
+        return (a.address || '').localeCompare(b.address || '', 'ja');
+      });
+    return scored.slice(0, SEARCH_RESULT_LIMIT);
+  }, [companySearchQuery, searchablePoints]);
 
   const updateBounds = useCallback(() => {
     const map = mapRef.current?.getMap();
@@ -361,8 +460,6 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       };
 
       const onReady = () => {
-        console.log('regions source', map.getSource('regions'));
-        console.log('layers', map.getStyle()?.layers);
         ensureRegions();
         ensureBoundaries();
         const layers = map.getStyle()?.layers || [];
@@ -422,9 +519,57 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
   }, [updateBounds]);
 
   useEffect(() => {
-    console.log('companies', companies);
-    console.log('points', points);
-  }, [companies, points]);
+    return () => {
+      routeRequestAbortRef.current?.abort();
+      routeRequestAbortRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!focusedSearchPointKey) return;
+    const exists = searchablePoints.some(item => item.key === focusedSearchPointKey);
+    if (!exists) {
+      setFocusedSearchPointKey(null);
+    }
+  }, [focusedSearchPointKey, searchablePoints]);
+
+  const clearRouteSelection = useCallback(() => {
+    routeRequestAbortRef.current?.abort();
+    routeRequestAbortRef.current = null;
+    setSelectedRoute(null);
+    setRouteError(null);
+    setRouteLoading(false);
+    setPendingTargetName(null);
+  }, []);
+
+  const clearSearchFocus = useCallback(() => {
+    setFocusedSearchPointKey(null);
+    setHovered(null);
+  }, []);
+
+  const focusPointOnMap = useCallback((item: { key: string; point: CompanyMapPoint }) => {
+    if (!isFiniteNumber(item.point.lon) || !isFiniteNumber(item.point.lat)) return;
+    const map = mapRef.current?.getMap();
+    if (!map) return;
+    const targetZoom = Math.min(15, Math.max(map.getZoom(), 13));
+    map.easeTo({
+      center: [item.point.lon, item.point.lat],
+      zoom: targetZoom,
+      duration: 650,
+    });
+    setFocusedSearchPointKey(item.key);
+    setHovered(item.point);
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      clearRouteSelection();
+      clearSearchFocus();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [clearRouteSelection, clearSearchFocus]);
 
   const resolvePointFromFeature = useCallback((feature: any): CompanyMapPoint | null => {
     const index = Number(feature?.properties?.index);
@@ -467,24 +612,24 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
 
   const requestCompanyRoute = useCallback((company: CompanyMapPoint) => {
     if (company.is_self) {
-      setSelectedRoute(null);
-      setRouteError(null);
-      setRouteLoading(false);
-      setPendingTargetName(null);
+      clearRouteSelection();
+      setFocusedSearchPointKey(null);
       return;
     }
+    setFocusedSearchPointKey(null);
+    routeRequestAbortRef.current?.abort();
+    const controller = createAbortController();
+    routeRequestAbortRef.current = controller;
     setRouteLoading(true);
     setRouteError(null);
     setPendingTargetName(company.name || null);
-    axios
-      .get<CompanyRouteResponse>('http://localhost:8000/stats/company-route', {
-        params: {
-          to_company_id: company.company_id,
-          to_lat: company.lat,
-          to_lon: company.lon,
-          to_address: company.address,
-        },
-      })
+    fetchCompanyRoute({
+      toCompanyId: company.company_id,
+      toLat: company.lat,
+      toLon: company.lon,
+      toAddress: company.address,
+      signal: controller.signal,
+    })
       .then(response => {
         const route = response.data;
         setSelectedRoute(route);
@@ -493,14 +638,15 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         }
       })
       .catch(error => {
-        const detail = error?.response?.data?.detail;
-        setRouteError(typeof detail === 'string' ? detail : 'ルート取得に失敗しました。');
+        if (isAbortError(error)) return;
+        setRouteError(getApiErrorMessage(error, 'ルート取得に失敗しました。'));
       })
       .finally(() => {
+        if (routeRequestAbortRef.current !== controller) return;
         setRouteLoading(false);
         setPendingTargetName(null);
       });
-  }, [fitRouteToMap]);
+  }, [clearRouteSelection, fitRouteToMap]);
 
   const handleHover = useCallback((event: any) => {
     const features = event.features as any[] | undefined;
@@ -547,7 +693,13 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     points.forEach((point, index) => {
       if (!isFiniteNumber(point.lon) || !isFiniteNumber(point.lat)) return;
       if (point.lon < west || point.lon > east || point.lat < south || point.lat > north) return;
-      const screen = map.project([point.lon, point.lat]);
+      const key = `${point.company_id}-${index}`;
+      const markerOffset = markerOffsets[key] || { x: 0, y: 0 };
+      const projected = map.project([point.lon, point.lat]);
+      const screen = {
+        x: projected.x + markerOffset.x,
+        y: projected.y + markerOffset.y,
+      };
       const { width, height } = estimateLabelSize(point);
       const baseY = ((index % 3) - 1) * 6;
       const candidates = [
@@ -583,7 +735,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
           break;
         }
       }
-      offsets[`${point.company_id}-${index}`] = chosen;
+      offsets[key] = chosen;
       placed.push(rect);
     });
 
@@ -604,7 +756,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       }
       return offsets;
     });
-  }, [bounds, points, viewState.zoom]);
+  }, [bounds, markerOffsets, points, viewState.zoom]);
 
   useEffect(() => {
     computeLabelOffsets();
@@ -740,6 +892,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             >
               <LedMarker
                 company={company}
+                markerOffset={markerOffsets[`${company.company_id}-${index}`]}
                 labelOffset={labelOffsets[`${company.company_id}-${index}`]}
                 onMouseEnter={() => setHovered(company)}
                 onMouseLeave={() => setHovered(prev => (prev?.company_id === company.company_id ? null : prev))}
@@ -767,6 +920,44 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         )}
       </Map>
       </div>
+      <div className="absolute top-3 right-3 z-20 w-[420px] max-w-[92vw] pointer-events-auto">
+        <div className="rounded border border-slate-700 bg-slate-900/85 p-2 shadow-lg">
+          <div className="text-xs text-slate-300 mb-1">企業検索（Escでルート/フォーカス解除）</div>
+          <input
+            type="text"
+            value={companySearchQuery}
+            onChange={event => setCompanySearchQuery(event.target.value)}
+            placeholder="会社名・支店名・住所で検索"
+            className="w-full rounded border border-slate-600 bg-slate-950 px-2 py-1.5 text-sm text-slate-100 placeholder:text-slate-500"
+          />
+          {companySearchQuery.trim() && (
+            <div className="mt-2 max-h-56 overflow-y-auto rounded border border-slate-700 bg-slate-950/80">
+              {companySearchResults.length === 0 && (
+                <div className="px-3 py-2 text-xs text-slate-400">一致する企業・住所がありません。</div>
+              )}
+              {companySearchResults.map(item => (
+                <button
+                  key={item.key}
+                  type="button"
+                  onClick={() => focusPointOnMap(item)}
+                  className="w-full border-b border-slate-800 px-3 py-2 text-left hover:bg-slate-800/70 last:border-b-0"
+                >
+                  <div className="text-sm font-medium text-slate-100">{item.point.name}</div>
+                  <div className="text-xs text-slate-400">{item.address || '住所未登録'}</div>
+                </button>
+              ))}
+            </div>
+          )}
+          {focusedSearchPoint && (
+            <div className="mt-2 rounded border border-cyan-800/60 bg-cyan-950/40 px-2 py-1.5 text-xs text-cyan-100">
+              フォーカス中: {focusedSearchPoint.point.name}
+              <span className="ml-1 text-cyan-300">
+                ({focusedSearchPoint.address || '住所未登録'})
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
       <div className="absolute top-3 left-3 z-20 w-[380px] max-w-[92vw] max-h-[calc(100%-1.5rem)] overflow-y-auto pr-1 space-y-2 pointer-events-none">
         {!loading && points.length === 0 && (
           <div className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2 text-base text-slate-200">
@@ -774,24 +965,24 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
           </div>
         )}
         {routeLoading && (
-          <div className="rounded border border-sky-800 bg-sky-950/70 px-3 py-2 text-base text-sky-200">
+          <div data-testid="map-route-loading" className="rounded border border-sky-800 bg-sky-950/70 px-3 py-2 text-base text-sky-200">
             ルート取得中: 自社 → {pendingTargetName || '選択先'}
           </div>
         )}
         {routeError && (
-          <div className="rounded border border-rose-800 bg-rose-950/70 px-3 py-2 text-base text-rose-200">
+          <div data-testid="map-route-error" className="rounded border border-rose-800 bg-rose-950/70 px-3 py-2 text-base text-rose-200">
             {routeError}
           </div>
         )}
         {selectedRoute && !routeLoading && !routeError && (
-          <div className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-100">
+          <div data-testid="map-route-panel" className="rounded border border-slate-700 bg-slate-900/80 px-3 py-2 text-sm text-slate-100">
             <div className="font-semibold text-base text-slate-100">
               {selectedRoute.from_company_name} → {selectedRoute.to_company_name}
             </div>
             <div className="mt-1 text-sm text-slate-200">
               行き先住所: {selectedRoute.to_company_address || '未登録'}
             </div>
-            <div className="mt-1 text-sm text-slate-200">
+            <div data-testid="map-route-distance" className="mt-1 text-sm text-slate-200">
               距離: {formatDistanceLabel(selectedRoute)}
               {selectedRoute.duration_min != null ? ` / 所要: ${selectedRoute.duration_min.toFixed(1)} 分` : ''}
             </div>
@@ -809,7 +1000,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
               {selectedRoute.provider ? ` / ${selectedRoute.provider}` : ''}
             </div>
             {routeDisplaySteps.length > 0 && (
-              <div className="mt-1 text-xs text-slate-300">
+              <div data-testid="map-route-steps" className="mt-1 text-xs text-slate-300">
                 乗降・乗換・道路表示: {routeDisplaySteps.length} 箇所
               </div>
             )}

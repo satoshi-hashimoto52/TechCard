@@ -1,45 +1,27 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import axios from 'axios';
 import { QRCodeCanvas } from 'qrcode.react';
 import { useNavigate, useParams } from 'react-router-dom';
 import CardCropper from '../components/CardCropper';
 import RoiEditor, { RoiField, RoiTemplate } from '../components/RoiEditor';
-
-type OcrResult = {
-  name: string | null;
-  company: string | null;
-  branch?: string | null;
-  role?: string | null;
-  email: string | null;
-  phone: string | null;
-  mobile?: string | null;
-  address?: string | null;
-  raw_text: string;
-  filename: string;
-};
-
-type ContactRegisterResponse = {
-  id: number;
-};
-
-type TagOption = {
-  id: number;
-  name: string;
-  type: 'tech' | 'event' | 'relation' | string;
-};
-
-type CompanyGroup = {
-  id: number;
-  name: string;
-};
-
-type CompanyTagResolveResponse = {
-  company_id: number | null;
-  group_id: number | null;
-  group_name: string | null;
-  company_tags: TagOption[];
-  group_tags: TagOption[];
-};
+import { createAbortController, getApiErrorMessage, isAbortError } from '../lib/api';
+import {
+  ContactRegisterPayload,
+  ContactRegisterResponse,
+  detectCard,
+  fetchContactById,
+  fetchMobileUploadInfo,
+  fetchMobileUploadLatest,
+  ocrRegion,
+  registerContact,
+  updateContactRegistration,
+} from '../services/contactService';
+import {
+  CompanyGroup,
+  CompanyTagResolveResponse,
+  fetchCompanyGroups,
+  resolveCompanyTags,
+} from '../services/companyService';
+import { TagOption, deleteTag, extractTags, fetchTags, updateTag } from '../services/tagService';
 
 const GROUP_TAG_BLOCKLIST = ['HITACHI', 'YOKOGAWA'];
 const EVENT_TOP_LEVELS = ['Cards', 'Expo', 'Mixer', 'OJT'] as const;
@@ -77,7 +59,7 @@ const formatEventTagLabel = (name: string) => {
 
 const sortTagOptions = (tags: TagOption[]) =>
   [...tags].sort((a, b) => {
-    const typeDiff = (TAG_TYPE_ORDER[a.type] ?? 99) - (TAG_TYPE_ORDER[b.type] ?? 99);
+    const typeDiff = (TAG_TYPE_ORDER[a.type || 'tech'] ?? 99) - (TAG_TYPE_ORDER[b.type || 'tech'] ?? 99);
     if (typeDiff !== 0) return typeDiff;
     return TAG_NAME_COLLATOR.compare(a.name || '', b.name || '');
   });
@@ -197,6 +179,7 @@ const ContactRegister: React.FC = () => {
     [form.company, form.branch, form.name, form.role, form.phone, form.mobile, form.email, form.postal_code, form.address],
   );
   const detectSeqRef = useRef(0);
+  const detectAbortRef = useRef<AbortController | null>(null);
   const isBlank = (value?: string) => !value || value.trim() === '';
   const targetWidth = ROI_BASE_WIDTH;
   const targetHeight = ROI_BASE_HEIGHT;
@@ -333,20 +316,18 @@ const ContactRegister: React.FC = () => {
   };
 
   const detectCardPointsFrom = async (url: string, inputFile?: File | null) => {
+    detectAbortRef.current?.abort();
+    const controller = createAbortController();
+    detectAbortRef.current = controller;
     const seq = ++detectSeqRef.current;
     try {
       const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
       const payload = await buildDetectPayload(dataUrl);
       const size = payload ? { width: payload.width, height: payload.height } : await loadImageSize(dataUrl);
-      const response = await axios.post<{
-        points?: { x: number; y: number }[] | null;
-        source?: 'contour' | 'fallback';
-        score?: number;
-      }>(
-        'http://localhost:8000/card/detect',
-        { image: payload?.payloadUrl || dataUrl },
-        { timeout: 15000 },
-      );
+      const response = await detectCard(payload?.payloadUrl || dataUrl, {
+        timeout: 15000,
+        signal: controller.signal,
+      });
       if (seq !== detectSeqRef.current) return;
       const points = response.data?.points;
       const isDetected = response.data?.source === 'contour' || (response.data?.source == null && response.data?.score);
@@ -360,6 +341,7 @@ const ContactRegister: React.FC = () => {
       }
       setAutoCropPoints(null);
     } catch (error) {
+      if (isAbortError(error)) return;
       if (seq === detectSeqRef.current) {
         try {
           const dataUrl = inputFile ? await readFileAsDataUrl(inputFile) : await fetchImageAsDataUrl(url);
@@ -423,7 +405,6 @@ const ContactRegister: React.FC = () => {
       });
       const track = stream.getVideoTracks()[0];
       const capabilities = track.getCapabilities() as any;
-      console.log('Camera capabilities:', capabilities);
       setCameraTrack(track);
       setCameraCapabilities(capabilities);
       if (capabilities.focusMode && capabilities.focusMode.length > 0) {
@@ -690,7 +671,8 @@ const ContactRegister: React.FC = () => {
   };
 
   useEffect(() => {
-    axios.get<TagOption[]>('http://localhost:8000/tags')
+    const controller = createAbortController();
+    fetchTags({ signal: controller.signal })
       .then(response => {
         const normalizeType = (value?: string) => {
           if (!value) return 'tech';
@@ -703,16 +685,25 @@ const ContactRegister: React.FC = () => {
           .map(tag => ({ ...tag, type: normalizeType(tag.type) }));
         setAvailableTags(sortTagOptions(tags));
       })
-      .catch(() => setAvailableTags([]));
+      .catch(error => {
+        if (isAbortError(error)) return;
+        setAvailableTags([]);
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
-    axios.get<CompanyGroup[]>('http://localhost:8000/company-groups')
+    const controller = createAbortController();
+    fetchCompanyGroups({ signal: controller.signal })
       .then(response => {
         const names = (response.data || []).map(group => group.name).filter(Boolean);
         setGroupTagNames(names);
       })
-      .catch(() => setGroupTagNames([]));
+      .catch(error => {
+        if (isAbortError(error)) return;
+        setGroupTagNames([]);
+      });
+    return () => controller.abort();
   }, []);
 
   useEffect(() => {
@@ -814,8 +805,9 @@ const ContactRegister: React.FC = () => {
       if (tagScope !== 'contact') setTagScope('contact');
       return;
     }
+    const controller = createAbortController();
     const timer = window.setTimeout(() => {
-      axios.get<CompanyTagResolveResponse>('http://localhost:8000/companies/resolve', { params: { name: companyName } })
+      resolveCompanyTags(companyName, { signal: controller.signal })
         .then(response => {
           if (resolveCompanySeqRef.current !== seq) return;
           const resolved = response.data;
@@ -832,7 +824,8 @@ const ContactRegister: React.FC = () => {
             setTagScope('contact');
           }
         })
-        .catch(() => {
+        .catch(error => {
+          if (isAbortError(error)) return;
           if (resolveCompanySeqRef.current !== seq) return;
           setResolvedCompanyId(null);
           setResolvedGroupId(null);
@@ -842,13 +835,17 @@ const ContactRegister: React.FC = () => {
           if (tagScope === 'group') setTagScope('contact');
         });
     }, 250);
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
   }, [companyTagsTouched, form.company, groupTagsTouched, tagScope]);
 
   useEffect(() => {
     if (!isEdit || !id) return;
     setMode('manual');
-    axios.get(`http://localhost:8000/contacts/${id}`).then(response => {
+    const controller = createAbortController();
+    fetchContactById(Number(id), { signal: controller.signal }).then(response => {
       const data = response.data;
       setForm({
         name: data.name || '',
@@ -871,7 +868,8 @@ const ContactRegister: React.FC = () => {
       setTagScope('contact');
       setDetectedTags([]);
       setCustomTag('');
-    });
+    }).catch(() => undefined);
+    return () => controller.abort();
   }, [isEdit, id]);
 
   useEffect(() => {
@@ -1011,10 +1009,7 @@ const ContactRegister: React.FC = () => {
         const formData = new FormData();
         formData.append('field', field);
         formData.append('image', file);
-        const response = await axios.post<{ field: RoiField; text: string }>(
-          'http://localhost:8000/cards/ocr-region',
-          formData,
-        );
+        const response = await ocrRegion(formData);
         if (response.data?.text) {
           results.push({ field, text: response.data.text });
         }
@@ -1024,7 +1019,7 @@ const ContactRegister: React.FC = () => {
       results.forEach(item => applyOcrField(item.field, item.text));
       if (rawText) {
         try {
-          const tagsResponse = await axios.post<{ tags: string[] }>('http://localhost:8000/tags/extract', { text: rawText });
+          const tagsResponse = await extractTags(rawText);
           if (tagsResponse.data?.tags) {
             setDetectedTags(tagsResponse.data.tags);
           }
@@ -1073,7 +1068,7 @@ const ContactRegister: React.FC = () => {
         type: normalizeTagType(found?.type),
       };
     });
-    const payload = {
+    const payload: ContactRegisterPayload = {
       name: form.name,
       email: form.email || null,
       phone: form.phone || null,
@@ -1111,10 +1106,10 @@ const ContactRegister: React.FC = () => {
     const shouldStayOnRegister = !isEdit && mode === 'upload' && mobileContinuous;
     try {
       if (isEdit && id) {
-        const response = await axios.put<ContactRegisterResponse>(`http://localhost:8000/contacts/${id}/register`, payload);
+        const response = await updateContactRegistration(Number(id), payload);
         navigate(`/contacts/${response.data.id}`, { state: { flash: '更新しました。' } });
       } else {
-        const response = await axios.post<ContactRegisterResponse>('http://localhost:8000/contacts/register', payload);
+        const response = await registerContact(payload);
         if (shouldStayOnRegister) {
           setFlashMessage('登録しました。');
           keepFieldsForContinuous();
@@ -1123,15 +1118,15 @@ const ContactRegister: React.FC = () => {
         }
       }
     } catch (error: any) {
-      const detail = error?.response?.data?.detail;
-      const status = error?.response?.status;
+      const detail = error?.detail;
+      const status = error?.status;
       if (status === 409 && !isEdit) {
         const existingId = typeof detail === 'object' ? detail.existing_contact_id : null;
         const message = typeof detail === 'object' ? detail.message : detail;
         if (existingId) {
           const confirmed = window.confirm(`${message || '同名・同会社の連絡先が存在します。'}\n上書きしますか？`);
           if (confirmed) {
-            const response = await axios.put<ContactRegisterResponse>(`http://localhost:8000/contacts/${existingId}/register`, payload);
+            const response = await updateContactRegistration(existingId, payload);
             if (shouldStayOnRegister) {
               setFlashMessage('上書きしました。');
               keepFieldsForContinuous();
@@ -1149,7 +1144,7 @@ const ContactRegister: React.FC = () => {
       if (status === 409) {
         setSubmitError(detail?.message || detail || '既に同名の連絡先が存在します。');
       } else {
-        setSubmitError(detail?.message || detail || '登録に失敗しました。');
+        setSubmitError(getApiErrorMessage(error, detail?.message || detail || '登録に失敗しました。'));
       }
     } finally {
       setIsSubmitting(false);
@@ -1169,7 +1164,7 @@ const ContactRegister: React.FC = () => {
     setSimpleMobileError(null);
     setSimpleMobileStatus('waiting');
     try {
-      const response = await axios.get<{ base_url: string }>('http://localhost:8000/api/mobile-upload/info');
+      const response = await fetchMobileUploadInfo();
       const baseUrl = response.data?.base_url;
       if (!baseUrl) {
         throw new Error('missing base url');
@@ -1186,14 +1181,15 @@ const ContactRegister: React.FC = () => {
   useEffect(() => {
     if (!simpleMobileOpen) return;
     let stopped = false;
+    let polling = false;
+    let pollController: AbortController | null = null;
     const poll = async () => {
+      if (polling) return;
+      polling = true;
+      pollController?.abort();
+      pollController = createAbortController();
       try {
-        const response = await axios.get<{
-          success: boolean;
-          filename?: string;
-          url?: string;
-          timestamp?: number;
-        }>('http://localhost:8000/api/mobile-upload/latest');
+        const response = await fetchMobileUploadLatest({ signal: pollController.signal });
         if (stopped) return;
         if (!response.data?.success || !response.data.url || !response.data.timestamp) {
           setSimpleMobileStatus('waiting');
@@ -1220,16 +1216,20 @@ const ContactRegister: React.FC = () => {
         detectCardPointsFrom(cacheBusted, null);
         setSimpleMobileStatus('done');
       } catch (error) {
+        if (isAbortError(error)) return;
         if (!stopped) {
           setSimpleMobileError('アップロード状況の取得に失敗しました。');
           setSimpleMobileStatus('error');
         }
+      } finally {
+        polling = false;
       }
     };
     const timer = window.setInterval(poll, 1500);
     poll().catch(() => undefined);
     return () => {
       stopped = true;
+      pollController?.abort();
       window.clearInterval(timer);
     };
   }, [simpleMobileOpen, simpleMobileLastTimestamp, simpleMobileSessionStart]);
@@ -1857,7 +1857,7 @@ const ContactRegister: React.FC = () => {
                         const target = availableTags.find(tag => tag.id === manageTagId);
                         if (!target) return;
                         try {
-                          await axios.put(`http://localhost:8000/tags/${target.id}`, {
+                          await updateTag(target.id, {
                             name: target.name,
                             type: manageTagType,
                           });
@@ -1883,7 +1883,7 @@ const ContactRegister: React.FC = () => {
                         const confirmed = window.confirm(`タグ「${renderTagLabel(target.name, target.type)}」を削除しますか？`);
                         if (!confirmed) return;
                         try {
-                          await axios.delete(`http://localhost:8000/tags/${target.id}`);
+                          await deleteTag(target.id);
                           setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
                           setSelectedTags(prev => prev.filter(tag => tag !== target.name));
                           setSelectedCompanyTags(prev => prev.filter(tag => tag !== target.name));
@@ -2038,7 +2038,7 @@ const ContactRegister: React.FC = () => {
                         const target = availableTags.find(tag => tag.id === manageTagId);
                         if (!target) return;
                         try {
-                          await axios.put(`http://localhost:8000/tags/${target.id}`, {
+                          await updateTag(target.id, {
                             name: target.name,
                             type: manageTagType,
                           });
@@ -2064,7 +2064,7 @@ const ContactRegister: React.FC = () => {
                         const confirmed = window.confirm(`タグ「${renderTagLabel(target.name, target.type)}」を削除しますか？`);
                         if (!confirmed) return;
                         try {
-                          await axios.delete(`http://localhost:8000/tags/${target.id}`);
+                          await deleteTag(target.id);
                           setAvailableTags(prev => prev.filter(tag => tag.id !== target.id));
                           setSelectedTags(prev => prev.filter(tag => tag !== target.name));
                           setSelectedCompanyTags(prev => prev.filter(tag => tag !== target.name));

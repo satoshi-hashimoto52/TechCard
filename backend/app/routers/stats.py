@@ -547,6 +547,7 @@ def _request_route_with_fallback_providers(
     *,
     avoid_highways: bool,
 ) -> tuple[dict[str, object], float, float, list[dict[str, object]], str]:
+    provider_candidates: list[tuple[dict[str, object], float, float, list[dict[str, object]], str]] = []
     provider_errors: list[str] = []
     try:
         geometry, distance_m, duration_s, route_steps = _request_openrouteservice_route(
@@ -556,7 +557,7 @@ def _request_route_with_fallback_providers(
             to_lon,
             avoid_highways=avoid_highways,
         )
-        return geometry, distance_m, duration_s, route_steps, "openrouteservice"
+        provider_candidates.append((geometry, distance_m, duration_s, route_steps, "openrouteservice"))
     except RuntimeError as exc:
         provider_errors.append(str(exc))
 
@@ -568,9 +569,14 @@ def _request_route_with_fallback_providers(
             to_lon,
             avoid_highways=avoid_highways,
         )
-        return geometry, distance_m, duration_s, route_steps, "osrm_public"
+        provider_candidates.append((geometry, distance_m, duration_s, route_steps, "osrm_public"))
     except RuntimeError as exc:
         provider_errors.append(str(exc))
+
+    if provider_candidates:
+        # 利用可能な候補のうち、所要時間が最短のルートを採用する。
+        provider_candidates.sort(key=lambda item: (item[2], item[1]))
+        return provider_candidates[0]
 
     raise RuntimeError(" / ".join(provider_errors) if provider_errors else "route_provider_failed")
 
@@ -603,6 +609,37 @@ def _fallback_straight_route(
         "coordinates": [[from_lon, from_lat], [to_lon, to_lat]],
     }
     return geometry, distance_m, None, []
+
+
+def _estimate_display_duration_s(
+    distance_m: float,
+    duration_s: float | None,
+    *,
+    effective_mode: str,
+    provider: str,
+) -> float | None:
+    if duration_s is None:
+        return None
+    if duration_s <= 0:
+        return None
+    if provider == "fallback_straight":
+        return duration_s
+
+    distance_km = max(0.0, distance_m / 1000.0)
+    is_intra_pref = effective_mode.startswith("intra_pref")
+    if not is_intra_pref:
+        # 県外は従来どおり生値を採用（補正なし）
+        return duration_s
+
+    # 県内移動は信号待ち・右左折・市街地混雑の影響をより強めに補正
+    factor = 1.28
+    penalty_min = min(10.0, max(3.0, 3.8 + distance_km * 0.40))
+
+    adjusted = (duration_s * factor) + (penalty_min * 60.0)
+    min_bump = 240.0 if distance_km >= 3 else 120.0
+    adjusted = max(duration_s + min_bump, adjusted)
+    adjusted = min(adjusted, (duration_s * 1.60) + 900.0)
+    return adjusted
 
 
 def get_db():
@@ -844,6 +881,13 @@ def get_company_route(
             db.add(cache)
             db.commit()
         if geometry:
+            raw_duration_s = cache.duration_s
+            display_duration_s = _estimate_display_duration_s(
+                cache.distance_m,
+                raw_duration_s,
+                effective_mode=cache.effective_mode or policy,
+                provider=cache.provider or "openrouteservice",
+            )
             return {
                 "from_company_id": from_company.id,
                 "from_company_name": from_company.name,
@@ -856,8 +900,10 @@ def get_company_route(
                 "effective_mode": cache.effective_mode or policy,
                 "distance_m": cache.distance_m,
                 "distance_km": round(cache.distance_m / 1000, 2),
-                "duration_s": cache.duration_s,
-                "duration_min": round((cache.duration_s or 0.0) / 60, 1) if cache.duration_s else None,
+                "duration_s_raw": raw_duration_s,
+                "duration_min_raw": round((raw_duration_s or 0.0) / 60, 1) if raw_duration_s else None,
+                "duration_s": display_duration_s,
+                "duration_min": round(display_duration_s / 60, 1) if display_duration_s else None,
                 "geometry": geometry,
                 "route_steps": route_steps,
                 "cached": True,
@@ -937,6 +983,13 @@ def get_company_route(
     db.add(cache)
     db.commit()
 
+    display_duration_s = _estimate_display_duration_s(
+        distance_m,
+        duration_s,
+        effective_mode=effective_mode,
+        provider=provider,
+    )
+
     return {
         "from_company_id": from_company.id,
         "from_company_name": from_company.name,
@@ -949,8 +1002,10 @@ def get_company_route(
         "effective_mode": effective_mode,
         "distance_m": distance_m,
         "distance_km": round(distance_m / 1000, 2),
-        "duration_s": duration_s,
-        "duration_min": round(duration_s / 60, 1) if duration_s else None,
+        "duration_s_raw": duration_s,
+        "duration_min_raw": round(duration_s / 60, 1) if duration_s else None,
+        "duration_s": display_duration_s,
+        "duration_min": round(display_duration_s / 60, 1) if display_duration_s else None,
         "geometry": geometry,
         "route_steps": route_steps,
         "cached": False,
@@ -1484,6 +1539,18 @@ def _normalize_address(value: str) -> str:
     return cleaned
 
 
+def _normalize_address_to_lot_base(value: str) -> str:
+    normalized = _normalize_address(value)
+    if not normalized:
+        return ""
+    # 1843-6 -> 1843
+    lot_base = re.sub(r"([0-9]+)[-ー−‐－][0-9]+.*$", r"\1", normalized)
+    # 5317番地 / 5317番12号 -> 5317
+    lot_base = re.sub(r"([0-9]+)番地?[0-9]*(?:号)?$", r"\1", lot_base)
+    lot_base = re.sub(r"\s+", " ", lot_base).strip()
+    return lot_base
+
+
 def _geocode_nominatim(query: str):
     if not query:
         return None
@@ -1572,26 +1639,45 @@ def _select_best_address(addresses: dict[tuple[str, str], int] | None):
 
 def _geocode_company(address: str, postal_code: str):
     normalized_address = _normalize_address(address)
+    lot_base_address = _normalize_address_to_lot_base(address)
     zip_address = ""
     if postal_code:
         zip_result = _zipcloud_lookup(postal_code)
         if zip_result:
             zip_address = _build_address_from_zipcloud(zip_result)
 
-    if zip_address:
-        latlon = _geocode_gsi(zip_address)
-        if latlon:
-            return latlon, zip_address, zip_address
-    if zip_address and address:
-        combined = f"{zip_address} {address}"
-        latlon = _geocode_gsi(combined)
-        if latlon:
-            return latlon, combined, zip_address
+    gsi_queries: list[str] = []
+
+    def append_query(query: str):
+        normalized_query = _normalize_address(query)
+        if not normalized_query:
+            return
+        if normalized_query in gsi_queries:
+            return
+        gsi_queries.append(normalized_query)
+
+    # 番地付き住所を最優先し、同一点化しやすい郵便番号のみ検索は最後に回す
     if normalized_address:
-        latlon = _geocode_gsi(normalized_address)
+        append_query(normalized_address)
+    if lot_base_address and lot_base_address != normalized_address:
+        append_query(lot_base_address)
+    if zip_address and normalized_address:
+        append_query(f"{zip_address} {normalized_address}")
+    if zip_address and lot_base_address and lot_base_address != normalized_address:
+        append_query(f"{zip_address} {lot_base_address}")
+    if zip_address:
+        append_query(zip_address)
+
+    for query in gsi_queries:
+        latlon = _geocode_gsi(query)
+        if latlon:
+            return latlon, query, zip_address
+
+    if normalized_address:
+        latlon = _geocode_nominatim(normalized_address)
         if latlon:
             return latlon, normalized_address, zip_address
-    if address:
+    if address and address != normalized_address:
         latlon = _geocode_nominatim(address)
         if latlon:
             return latlon, address, zip_address
@@ -1646,7 +1732,10 @@ async def get_company_map(refresh: bool = Query(False), db: Session = Depends(ge
         )
         entry["count"] += 1
         postal = (contact.postal_code or "").strip()
-        address = (contact.address or "").strip()
+        raw_address = (contact.address or "").strip()
+        # 地図表示の集約は「番地まで」を有効値とし、階層表記やビル名差分は同一扱いにする
+        normalized_address = _normalize_address(raw_address)
+        address = normalized_address or raw_address
         address_key = (postal, address)
         if address_key != ("", ""):
             entry["addresses"][address_key] = entry["addresses"].get(address_key, 0) + 1

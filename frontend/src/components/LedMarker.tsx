@@ -7,14 +7,25 @@ type LedMarkerProps = {
   onMouseLeave?: () => void;
   onClick?: () => void;
   labelOffset?: { x: number; y: number };
+  markerOffset?: { x: number; y: number };
 };
 
-const LedMarker: React.FC<LedMarkerProps> = ({ company, onMouseEnter, onMouseLeave, onClick, labelOffset }) => {
+const LedMarker: React.FC<LedMarkerProps> = ({
+  company,
+  onMouseEnter,
+  onMouseLeave,
+  onClick,
+  labelOffset,
+  markerOffset,
+}) => {
   const offset = labelOffset ?? { x: 14, y: -10 };
+  const markerTransform = markerOffset ? `translate(${markerOffset.x}px, ${markerOffset.y}px)` : undefined;
   return (
     <button
       type="button"
+      data-testid={`map-company-marker-${company.company_id}`}
       className={`led-marker-wrap ${company.is_self ? 'led-marker-wrap--self' : ''}`}
+      style={{ transform: markerTransform }}
       onMouseEnter={onMouseEnter}
       onMouseLeave={onMouseLeave}
       onClick={onClick}
