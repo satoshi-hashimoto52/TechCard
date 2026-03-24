@@ -1248,14 +1248,13 @@ def get_network(
 
     def ensure_event_top_node(top_name: str, source_scope: str) -> str:
         scope = "company" if source_scope == "company" else "person"
-        scope_label = "会社" if scope == "company" else "個人"
         top_id = f"event_top_{scope}_{top_name.lower()}"
         if top_id not in node_ids:
             add_node(
                 {
                     "id": top_id,
                     "type": "event",
-                    "label": f"{_EVENT_TOP_LABELS.get(top_name, top_name)} ({scope_label})",
+                    "label": _EVENT_TOP_LABELS.get(top_name, top_name),
                     "size": 1,
                 }
             )

@@ -18,6 +18,118 @@ const isFiniteNumber = (value: unknown): value is number => Number.isFinite(valu
 const EARTH_RADIUS_M = 6371000;
 const DEG_TO_RAD = Math.PI / 180;
 const SEARCH_RESULT_LIMIT = 30;
+const PREF_BOUNDARY_MIN_ZOOM = 6;
+const PREF_BOUNDARY_MAX_ZOOM = 9;
+const REGION_BOUNDARY_MAX_ZOOM = 7;
+const REGION_DISPLAY_MAX_ZOOM = PREF_BOUNDARY_MIN_ZOOM;
+
+const REGION_ORDER = [
+  'Hokkaido',
+  'Tohoku',
+  'Kanto',
+  'Chubu',
+  'Kinki',
+  'Chugoku',
+  'Shikoku',
+  'Kyushu',
+] as const;
+
+const PREFECTURE_TO_REGION: Record<string, (typeof REGION_ORDER)[number]> = {
+  北海道: 'Hokkaido',
+  青森県: 'Tohoku',
+  岩手県: 'Tohoku',
+  宮城県: 'Tohoku',
+  秋田県: 'Tohoku',
+  山形県: 'Tohoku',
+  福島県: 'Tohoku',
+  茨城県: 'Kanto',
+  栃木県: 'Kanto',
+  群馬県: 'Kanto',
+  埼玉県: 'Kanto',
+  千葉県: 'Kanto',
+  東京都: 'Kanto',
+  神奈川県: 'Kanto',
+  新潟県: 'Chubu',
+  富山県: 'Chubu',
+  石川県: 'Chubu',
+  福井県: 'Chubu',
+  山梨県: 'Chubu',
+  長野県: 'Chubu',
+  岐阜県: 'Chubu',
+  静岡県: 'Chubu',
+  愛知県: 'Chubu',
+  三重県: 'Chubu',
+  滋賀県: 'Kinki',
+  京都府: 'Kinki',
+  大阪府: 'Kinki',
+  兵庫県: 'Kinki',
+  奈良県: 'Kinki',
+  和歌山県: 'Kinki',
+  鳥取県: 'Chugoku',
+  島根県: 'Chugoku',
+  岡山県: 'Chugoku',
+  広島県: 'Chugoku',
+  山口県: 'Chugoku',
+  徳島県: 'Shikoku',
+  香川県: 'Shikoku',
+  愛媛県: 'Shikoku',
+  高知県: 'Shikoku',
+  福岡県: 'Kyushu',
+  佐賀県: 'Kyushu',
+  長崎県: 'Kyushu',
+  熊本県: 'Kyushu',
+  大分県: 'Kyushu',
+  宮崎県: 'Kyushu',
+  鹿児島県: 'Kyushu',
+  沖縄県: 'Kyushu',
+};
+const PREFECTURES = Object.keys(PREFECTURE_TO_REGION);
+type RegionGeometry = {
+  region: string;
+  geometry: {
+    type: string;
+    coordinates: any;
+  };
+};
+
+const isPointInRing = (lon: number, lat: number, ring: number[][]): boolean => {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
+    const xi = ring[i]?.[0];
+    const yi = ring[i]?.[1];
+    const xj = ring[j]?.[0];
+    const yj = ring[j]?.[1];
+    if (!isFiniteNumber(xi) || !isFiniteNumber(yi) || !isFiniteNumber(xj) || !isFiniteNumber(yj)) continue;
+    const intersects = ((yi > lat) !== (yj > lat))
+      && (lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+};
+
+const isPointInPolygon = (lon: number, lat: number, polygon: number[][][]): boolean => {
+  if (!Array.isArray(polygon) || polygon.length === 0) return false;
+  const [outer, ...holes] = polygon;
+  if (!Array.isArray(outer) || outer.length < 3) return false;
+  if (!isPointInRing(lon, lat, outer)) return false;
+  return !holes.some(hole => Array.isArray(hole) && hole.length >= 3 && isPointInRing(lon, lat, hole));
+};
+
+const resolveRegionByGeometry = (lon: number, lat: number, regions: RegionGeometry[]): string | null => {
+  for (const region of regions) {
+    if (!region?.geometry) continue;
+    const geometryType = region.geometry.type;
+    const coordinates = region.geometry.coordinates;
+    if (geometryType === 'Polygon' && isPointInPolygon(lon, lat, coordinates)) {
+      return region.region;
+    }
+    if (geometryType === 'MultiPolygon' && Array.isArray(coordinates)) {
+      const hit = coordinates.some((polygon: number[][][]) => isPointInPolygon(lon, lat, polygon));
+      if (hit) return region.region;
+    }
+  }
+  return null;
+};
 
 const haversineMeters = (aLat: number, aLon: number, bLat: number, bLon: number): number => {
   const dLat = (bLat - aLat) * DEG_TO_RAD;
@@ -45,9 +157,11 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
   const mapRef = useRef<MapRef | null>(null);
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const mapLoadedRef = useRef(false);
+  const regionGeometriesRef = useRef<RegionGeometry[]>([]);
   const [hovered, setHovered] = useState<CompanyMapPoint | null>(null);
   const [viewState, setViewState] = useState({ longitude: 138, latitude: 37, zoom: 5 });
   const [bounds, setBounds] = useState<[number, number, number, number] | null>(null);
+  const [regionGeometryVersion, setRegionGeometryVersion] = useState(0);
   const [labelOffsets, setLabelOffsets] = useState<Record<string, { x: number; y: number }>>({});
   const [selectedRoute, setSelectedRoute] = useState<CompanyRouteResponse | null>(null);
   const [routeError, setRouteError] = useState<string | null>(null);
@@ -176,6 +290,43 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     if (!bounds) return [];
     return cluster.getClusters(bounds as any, Math.round(viewState.zoom));
   }, [cluster, bounds, viewState.zoom]);
+  const regionClusters = useMemo(() => {
+    const byRegion = new globalThis.Map<string, { count: number; latSum: number; lonSum: number; samples: number }>();
+    points.forEach(point => {
+      const byGeometry = (isFiniteNumber(point.lon) && isFiniteNumber(point.lat))
+        ? resolveRegionByGeometry(point.lon, point.lat, regionGeometriesRef.current)
+        : null;
+      let region = byGeometry || '';
+      if (!region) {
+        const address = `${point.address || ''} ${point.city || ''}`;
+        const prefecture = PREFECTURES.find(pref => address.includes(pref));
+        if (prefecture) {
+          region = PREFECTURE_TO_REGION[prefecture];
+        }
+      }
+      if (!region) return;
+      const current = byRegion.get(region) || { count: 0, latSum: 0, lonSum: 0, samples: 0 };
+      current.count += 1;
+      if (isFiniteNumber(point.lat) && isFiniteNumber(point.lon)) {
+        current.latSum += point.lat;
+        current.lonSum += point.lon;
+        current.samples += 1;
+      }
+      byRegion.set(region, current);
+    });
+    return REGION_ORDER
+      .map(region => {
+        const item = byRegion.get(region);
+        if (!item || item.samples === 0 || item.count <= 0) return null;
+        return {
+          region,
+          count: item.count,
+          lat: item.latSum / item.samples,
+          lon: item.lonSum / item.samples,
+        };
+      })
+      .filter(Boolean) as Array<{ region: (typeof REGION_ORDER)[number]; count: number; lat: number; lon: number }>;
+  }, [points, regionGeometryVersion]);
   const routeGeoJson = useMemo(() => {
     if (!selectedRoute?.geometry?.coordinates?.length) return null;
     return {
@@ -297,6 +448,21 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
       map.on('error', (err: any) => {
         console.error('map error', err?.error || err);
       });
+      const bringBoundaryLayersToFront = () => {
+        const lift = (id: string) => {
+          if (!map.getLayer(id)) return;
+          try {
+            map.moveLayer(id);
+          } catch (error) {
+            console.warn('move layer failed', id, error);
+          }
+        };
+        // Keep admin boundaries visible above basemap/route layers.
+        lift('city-boundary');
+        lift('pref-boundary');
+        lift('region-boundary');
+        lift('region-label');
+      };
       const ensureRegions = async () => {
         if (map.getSource('regions')) {
           return;
@@ -327,6 +493,19 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
         }
         if (!regionData) {
           return;
+        }
+        const nextRegionGeometries: RegionGeometry[] = (Array.isArray(regionData?.features) ? regionData.features : [])
+          .map((feature: any) => {
+            const region = String(feature?.properties?.region || '').trim();
+            const geometry = feature?.geometry;
+            if (!region || !geometry || !geometry.type || !geometry.coordinates) return null;
+            if (geometry.type !== 'Polygon' && geometry.type !== 'MultiPolygon') return null;
+            return { region, geometry };
+          })
+          .filter((item: RegionGeometry | null): item is RegionGeometry => Boolean(item));
+        if (nextRegionGeometries.length > 0) {
+          regionGeometriesRef.current = nextRegionGeometries;
+          setRegionGeometryVersion(prev => prev + 1);
         }
         map.addSource('regions', {
           type: 'geojson',
@@ -425,10 +604,39 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             id: 'region-boundary',
             type: 'line',
             source: 'regions-boundary',
-            maxzoom: 6,
+            maxzoom: REGION_BOUNDARY_MAX_ZOOM,
             paint: {
-              'line-color': '#334155',
-              'line-width': 2,
+              'line-color': [
+                'match',
+                ['get', 'region'],
+                'Hokkaido',
+                '#60a5fa',
+                'Tohoku',
+                '#34d399',
+                'Kanto',
+                '#fbbf24',
+                'Chubu',
+                '#f97316',
+                'Kinki',
+                '#f43f5e',
+                'Chugoku',
+                '#a78bfa',
+                'Shikoku',
+                '#22d3ee',
+                'Kyushu',
+                '#84cc16',
+                '#94a3b8',
+              ],
+              'line-width': [
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                4,
+                2.6,
+                6,
+                3.4,
+              ],
+              'line-opacity': 0.95,
             },
           });
         }
@@ -437,11 +645,20 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             id: 'pref-boundary',
             type: 'line',
             source: 'pref-boundary',
-            minzoom: 6,
-            maxzoom: 9,
+            minzoom: PREF_BOUNDARY_MIN_ZOOM,
+            maxzoom: PREF_BOUNDARY_MAX_ZOOM,
             paint: {
-              'line-color': '#1f2937',
-              'line-width': 1.2,
+              'line-color': '#f8fafc',
+              'line-width': [
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                6,
+                1.8,
+                9,
+                2.4,
+              ],
+              'line-opacity': 0.9,
             },
           });
         }
@@ -450,18 +667,27 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             id: 'city-boundary',
             type: 'line',
             source: 'city-boundary',
-            minzoom: 9,
+            minzoom: PREF_BOUNDARY_MAX_ZOOM,
             paint: {
-              'line-color': '#111827',
-              'line-width': 0.8,
+              'line-color': '#93c5fd',
+              'line-width': [
+                'interpolate',
+                ['linear'],
+                ['zoom'],
+                9,
+                1.1,
+                12,
+                1.5,
+              ],
+              'line-opacity': 0.82,
             },
           });
         }
       };
 
       const onReady = () => {
-        ensureRegions();
-        ensureBoundaries();
+        ensureRegions().finally(() => bringBoundaryLayersToFront());
+        ensureBoundaries().finally(() => bringBoundaryLayersToFront());
         const layers = map.getStyle()?.layers || [];
         layers.forEach((layer: any) => {
           if (layer.type !== 'symbol' || !layer.id) return;
@@ -495,6 +721,7 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
             console.warn('label color update failed', layer.id, error);
           }
         });
+        bringBoundaryLayersToFront();
       };
 
       if (map.isStyleLoaded()) {
@@ -505,6 +732,23 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
     },
     [updateBounds],
   );
+
+  useEffect(() => {
+    const map = mapRef.current?.getMap();
+    if (!map || !mapLoadedRef.current) return;
+    const lift = (id: string) => {
+      if (!map.getLayer(id)) return;
+      try {
+        map.moveLayer(id);
+      } catch {
+        // ignore transient style/layer timing errors
+      }
+    };
+    lift('city-boundary');
+    lift('pref-boundary');
+    lift('region-boundary');
+    lift('region-label');
+  }, [routeGeoJson]);
 
   useEffect(() => {
     if (!canvasRef.current) return;
@@ -841,7 +1085,22 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
           </Marker>
         ))}
 
-        {viewState.zoom < 7 &&
+        {viewState.zoom < REGION_DISPLAY_MAX_ZOOM &&
+          regionClusters.map(item => (
+            <Marker key={`region-${item.region}`} longitude={item.lon} latitude={item.lat} anchor="center">
+              <CompanyCluster
+                count={item.count}
+                onClick={() => {
+                  mapRef.current?.getMap().easeTo({
+                    center: [item.lon, item.lat],
+                    zoom: PREF_BOUNDARY_MIN_ZOOM + 0.2,
+                  });
+                }}
+              />
+            </Marker>
+          ))}
+
+        {viewState.zoom >= REGION_DISPLAY_MAX_ZOOM && viewState.zoom < 7 &&
           clusters.map((clusterItem: any) => {
             const [longitude, latitude] = clusterItem.geometry.coordinates;
             if (clusterItem.properties.cluster) {

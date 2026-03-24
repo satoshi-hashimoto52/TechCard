@@ -34,7 +34,7 @@ const PERSON_LINK_COLOR = 'rgba(251, 146, 60, 0.8)';
 const PERSON_LINK_DIM_COLOR = 'rgba(251, 146, 60, 0.3)';
 const PERSON_LINK_ACTIVE_COLOR = 'rgba(251, 146, 60, 0.95)';
 const LAYOUT_STORAGE_KEY = 'techcard_network_layout_v1';
-const COMPANY_RING_RADII_LAYOUT_VERSION = 2;
+const COMPANY_RING_RADII_LAYOUT_VERSION = 3;
 const DISPLAY_STORAGE_KEY = 'techcard_display_config';
 const DEPTH_LAYOUT_RADIUS_STEP = 260;
 const PRIVATE_AREA_RING_COUNT = 4;
@@ -159,20 +159,25 @@ const defaultDisplayConfig: DisplayConfig = {
   searchType: 'tech',
 };
 
-const getAutoCompanyMemberRingRadius = (count: number): number => {
+const getCompanyMemberRingBaseRadius = (cellSize: number): number =>
+  Math.max(COMPANY_MEMBER_RING_BASE_RADIUS, Number(cellSize) || 120);
+
+const getAutoCompanyMemberRingRadiusByCell = (count: number, cellSize: number): number => {
+  const baseRadius = getCompanyMemberRingBaseRadius(cellSize);
   const safeCount = Math.max(1, count);
   const target = Math.max(
-    COMPANY_MEMBER_RING_BASE_RADIUS,
+    baseRadius,
     (Math.max(3, safeCount) * COMPANY_MEMBER_RING_MEMBER_GAP) / (Math.PI * 2),
   );
-  const steps = Math.ceil((target - COMPANY_MEMBER_RING_BASE_RADIUS) / COMPANY_MEMBER_RING_AUTO_STEP);
-  return COMPANY_MEMBER_RING_BASE_RADIUS + Math.max(0, steps) * COMPANY_MEMBER_RING_AUTO_STEP;
+  const steps = Math.ceil((target - baseRadius) / COMPANY_MEMBER_RING_AUTO_STEP);
+  return baseRadius + Math.max(0, steps) * COMPANY_MEMBER_RING_AUTO_STEP;
 };
 
-const getMinCompanyMemberRingRadius = (count: number): number => {
+const getMinCompanyMemberRingRadiusByCell = (count: number, cellSize: number): number => {
+  const baseRadius = getCompanyMemberRingBaseRadius(cellSize);
   const compactGap = COMPANY_MEMBER_RING_MEMBER_GAP * 0.58;
   const compactCircumference = Math.max(3, count) * compactGap;
-  return Math.max(COMPANY_MEMBER_RING_BASE_RADIUS, compactCircumference / (Math.PI * 2));
+  return Math.max(baseRadius, compactCircumference / (Math.PI * 2));
 };
 
 const splitCompanyLabelForDisplay = (label: string): { corporateType: string; companyName: string } | null => {
@@ -358,6 +363,9 @@ const NetworkGraph: React.FC = () => {
     anchorId: string;
     offsets: Map<string, { dx: number; dy: number }>;
   } | null>(null);
+  const dragLinePathRef = useRef<{ draggedId: string; anchorId: string; path: string[] } | null>(null);
+  const dragLineFollowerLocksRef = useRef<Set<string>>(new Set());
+  const dragLineAnchorLockRef = useRef<{ anchorId: string; x: number; y: number } | null>(null);
   const gridHiddenLockPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const orbitAnglesRef = useRef<Map<string, number>>(new Map());
   const gridNodeKeyRef = useRef<Map<string, string>>(new Map());
@@ -514,50 +522,6 @@ const NetworkGraph: React.FC = () => {
     }
     if (collapsed) {
       const contactCompany = new Map<string, string>();
-      const techConnectedToSelf = new Set<string>();
-      const techCompanyMap = new Map<string, Set<string>>();
-      if (visibleTypes.contact) {
-        const nodeById = new Map(rawGraph.nodes.map(node => [node.id, node]));
-        rawGraph.edges.forEach(edge => {
-          if (edge.type !== 'contact_tech') return;
-          const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-          const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-          const contactId = sourceId.startsWith('contact_')
-            ? sourceId
-            : targetId.startsWith('contact_')
-            ? targetId
-            : null;
-          const techId = sourceId.startsWith('tech_')
-            ? sourceId
-            : targetId.startsWith('tech_')
-            ? targetId
-            : null;
-          if (!contactId || !techId) return;
-          const contact = nodeById.get(contactId) as GraphNode | undefined;
-          if (contact && contact.is_self) {
-            techConnectedToSelf.add(techId);
-          }
-        });
-        rawGraph.edges.forEach(edge => {
-          if (edge.type !== 'company_tech') return;
-          const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-          const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-          const companyId = sourceId.startsWith('company_')
-            ? sourceId
-            : targetId.startsWith('company_')
-            ? targetId
-            : null;
-          const techId = sourceId.startsWith('tech_')
-            ? sourceId
-            : targetId.startsWith('tech_')
-            ? targetId
-            : null;
-          if (!companyId || !techId) return;
-          const list = techCompanyMap.get(techId) || new Set<string>();
-          list.add(companyId);
-          techCompanyMap.set(techId, list);
-        });
-      }
       rawGraph.edges.forEach(edge => {
         if (edge.type !== 'employment') return;
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
@@ -578,51 +542,10 @@ const NetworkGraph: React.FC = () => {
         companyGroup.set(companyId, groupId);
       });
       const nodeIds = new Set(filteredNodes.map(node => node.id));
-      const links: GraphLink[] = [];
-      rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'event_attendance' && edge.type !== 'relation') return;
+      const links: GraphLink[] = rawGraph.edges.filter(edge => {
         const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
         const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-        if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
-        links.push(edge);
-      });
-      rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'company_tech' && edge.type !== 'group_tech' && edge.type !== 'contact_tech' && edge.type !== 'tech_bridge' && edge.type !== 'company_relation') return;
-        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-        if (!nodeIds.has(sourceId) || !nodeIds.has(targetId)) return;
-        if (edge.type === 'contact_tech' && visibleTypes.contact) {
-          const techId = sourceId.startsWith('tech_')
-            ? sourceId
-            : targetId.startsWith('tech_')
-            ? targetId
-            : null;
-          if (techId && !techConnectedToSelf.has(techId)) {
-            return;
-          }
-        }
-        if (edge.type === 'company_tech' && visibleTypes.contact) {
-          const techId = sourceId.startsWith('tech_')
-            ? sourceId
-            : targetId.startsWith('tech_')
-            ? targetId
-            : null;
-          const companyId = sourceId.startsWith('company_')
-            ? sourceId
-            : targetId.startsWith('company_')
-            ? targetId
-            : null;
-          if (techId && techConnectedToSelf.has(techId)) {
-            return;
-          }
-          if (techId && companyId) {
-            const allowedCompanies = techCompanyMap.get(techId);
-            if (!allowedCompanies || !allowedCompanies.has(companyId)) {
-              return;
-            }
-          }
-        }
-        links.push(edge);
+        return nodeIds.has(sourceId) && nodeIds.has(targetId);
       });
       rawGraph.edges.forEach(edge => {
         if (edge.type !== 'employment') return;
@@ -698,8 +621,6 @@ const NetworkGraph: React.FC = () => {
       return { nodes: filteredNodes, links };
     }
 
-    const techConnectedToSelf = new Set<string>();
-    const techCompanyMap = new Map<string, Set<string>>();
     const contactCompany = new Map<string, string>();
     const relationEventKeys = new Set<string>();
     const selfContactIds = new Set<string>();
@@ -707,7 +628,6 @@ const NetworkGraph: React.FC = () => {
     const selfRelationIds = new Set<string>();
     const contactRelationIds = new Map<string, Set<string>>();
     if (visibleTypes.contact) {
-      const nodeById = new Map(rawGraph.nodes.map(node => [node.id, node]));
       rawGraph.nodes.forEach(node => {
         if (node.type === 'contact' && node.is_self) {
           selfContactIds.add(node.id);
@@ -729,45 +649,6 @@ const NetworkGraph: React.FC = () => {
           : null;
         if (!companyId || !contactId) return;
         contactCompany.set(contactId, companyId);
-      });
-      rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'contact_tech') return;
-        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-        const contactId = sourceId.startsWith('contact_')
-          ? sourceId
-          : targetId.startsWith('contact_')
-          ? targetId
-          : null;
-        const techId = sourceId.startsWith('tech_')
-          ? sourceId
-          : targetId.startsWith('tech_')
-          ? targetId
-          : null;
-        if (!contactId || !techId) return;
-        const contact = nodeById.get(contactId) as GraphNode | undefined;
-        if (contact && contact.is_self) {
-          techConnectedToSelf.add(techId);
-        }
-      });
-      rawGraph.edges.forEach(edge => {
-        if (edge.type !== 'company_tech') return;
-        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-        const companyId = sourceId.startsWith('company_')
-          ? sourceId
-          : targetId.startsWith('company_')
-          ? targetId
-          : null;
-        const techId = sourceId.startsWith('tech_')
-          ? sourceId
-          : targetId.startsWith('tech_')
-          ? targetId
-          : null;
-        if (!companyId || !techId) return;
-        const list = techCompanyMap.get(techId) || new Set<string>();
-        list.add(companyId);
-        techCompanyMap.set(techId, list);
       });
       rawGraph.edges.forEach(edge => {
         if (edge.type !== 'event_attendance') return;
@@ -844,41 +725,6 @@ const NetworkGraph: React.FC = () => {
     }
 
     const links = rawGraph.edges.filter(edge => {
-      if (edge.type === 'contact_tech' && visibleTypes.contact) {
-        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-        const techId = sourceId.startsWith('tech_')
-          ? sourceId
-          : targetId.startsWith('tech_')
-          ? targetId
-          : null;
-        if (techId && !techConnectedToSelf.has(techId)) {
-          return false;
-        }
-      }
-      if (edge.type === 'company_tech' && visibleTypes.contact) {
-        const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
-        const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
-        const techId = sourceId.startsWith('tech_')
-          ? sourceId
-          : targetId.startsWith('tech_')
-          ? targetId
-          : null;
-        const companyId = sourceId.startsWith('company_')
-          ? sourceId
-          : targetId.startsWith('company_')
-          ? targetId
-          : null;
-        if (techId && techConnectedToSelf.has(techId)) {
-          return false;
-        }
-        if (techId && companyId) {
-          const allowedCompanies = techCompanyMap.get(techId);
-          if (!allowedCompanies || !allowedCompanies.has(companyId)) {
-            return false;
-          }
-        }
-      }
       const sourceId = typeof edge.source === 'string' ? edge.source : edge.source.id;
       const targetId = typeof edge.target === 'string' ? edge.target : edge.target.id;
       return nodeIds.has(sourceId) && nodeIds.has(targetId);
@@ -988,8 +834,8 @@ const NetworkGraph: React.FC = () => {
       if (total === 0) return;
       const overrideRadius = Number(companyRingRadiusOverrides[companyId]);
       const radius = Number.isFinite(overrideRadius) && overrideRadius > 8
-        ? Math.max(getMinCompanyMemberRingRadius(total), overrideRadius)
-        : getAutoCompanyMemberRingRadius(total);
+        ? Math.max(getMinCompanyMemberRingRadiusByCell(total, gridConfig.cellSize), overrideRadius)
+        : getAutoCompanyMemberRingRadiusByCell(total, gridConfig.cellSize);
       companyRings.set(companyId, { radius, count: total });
       ordered.forEach((member, index) => {
         const angle = (index / total) * Math.PI * 2 - Math.PI / 2;
@@ -1007,7 +853,7 @@ const NetworkGraph: React.FC = () => {
       companyRings,
       contactIds: new Set(contactAssignments.keys()),
     };
-  }, [companyRingRadiusOverrides, graph.nodes, rawGraph.edges]);
+  }, [companyRingRadiusOverrides, graph.nodes, rawGraph.edges, gridConfig.cellSize]);
 
   const contactRelations = useMemo(() => {
     const map = new Map<string, string[]>();
@@ -2355,6 +2201,76 @@ const NetworkGraph: React.FC = () => {
     return result;
   }, [graphAdjacency]);
 
+  const getNodePositionById = useCallback((nodeId: string): { x: number; y: number } | null => {
+    const node = graphNodeById.get(nodeId) as any;
+    const cached = nodePositionsRef.current.get(nodeId);
+    const x = Number.isFinite(node?.x) ? Number(node.x) : Number(cached?.x);
+    const y = Number.isFinite(node?.y) ? Number(node.y) : Number(cached?.y);
+    if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+    return { x, y };
+  }, [graphNodeById]);
+
+  const resolveDragLinePath = useCallback((draggedId: string): { anchorId: string; path: string[] } | null => {
+    const parentMap = parentMapRef.current;
+    if (!parentMap || parentMap.size === 0) return null;
+    const selfId = selfNodeIdRef.current;
+    const selfCompanyId = selfCompanyNodeIdRef.current;
+
+    const chainFromDragged: string[] = [draggedId];
+    let cursor: string | null = draggedId;
+    let guard = 0;
+    while (cursor && guard < 96) {
+      const parentId: string | null = (parentMap.get(cursor) ?? null) as string | null;
+      if (!parentId) break;
+      chainFromDragged.push(parentId);
+      cursor = parentId;
+      guard += 1;
+    }
+    if (chainFromDragged.length < 2) return null;
+
+    let anchorId: string | null = null;
+    if (selfCompanyId && chainFromDragged.includes(selfCompanyId)) {
+      anchorId = selfCompanyId;
+    } else if (selfId && chainFromDragged.includes(selfId)) {
+      anchorId = selfId;
+    } else {
+      anchorId = chainFromDragged[chainFromDragged.length - 1] || null;
+    }
+    if (!anchorId) return null;
+    const anchorIndex = chainFromDragged.indexOf(anchorId);
+    if (anchorIndex < 1) return null;
+
+    const path = chainFromDragged.slice(0, anchorIndex + 1).reverse();
+    if (path.length < 2) return null;
+    return { anchorId, path };
+  }, []);
+
+  const releaseDragLineLocks = useCallback(() => {
+    dragLineFollowerLocksRef.current.forEach(nodeId => {
+      const node = graphNodeById.get(nodeId) as any;
+      if (!node) return;
+      if (fixedNodeIdsRef.current.has(nodeId)) return;
+      if (companyMemberAssignmentsRef.current.has(nodeId)) return;
+      node.fx = null;
+      node.fy = null;
+    });
+    dragLineFollowerLocksRef.current.clear();
+    const anchorLock = dragLineAnchorLockRef.current;
+    if (anchorLock) {
+      const anchorNode = graphNodeById.get(anchorLock.anchorId) as any;
+      if (
+        anchorNode
+        && !fixedNodeIdsRef.current.has(anchorLock.anchorId)
+        && !companyMemberAssignmentsRef.current.has(anchorLock.anchorId)
+      ) {
+        anchorNode.fx = null;
+        anchorNode.fy = null;
+      }
+    }
+    dragLineAnchorLockRef.current = null;
+    dragLinePathRef.current = null;
+  }, [graphNodeById]);
+
   const getLayoutCenter = useCallback(() => {
     const selfId = selfNodeIdRef.current;
     if (!selfId) return { x: 0, y: 0 };
@@ -2414,7 +2330,10 @@ const NetworkGraph: React.FC = () => {
   const snapNodeToGrid = useCallback(
     (node: any, config: typeof gridConfig) => {
       if (!config.enabled) return;
-      if (node.type === 'contact') return;
+      if (node.type === 'contact') {
+        fixedNodeIdsRef.current.delete(String(node.id));
+        return;
+      }
       // release previous occupancy by this node
       Array.from(gridOccupancyRef.current.entries()).forEach(([key, val]) => {
         if (val === node.id) gridOccupancyRef.current.delete(key);
@@ -2430,8 +2349,11 @@ const NetworkGraph: React.FC = () => {
         node.vy = 0;
         node.fx = chosen.x;
         node.fy = chosen.y;
+        fixedNodeIdsRef.current.add(String(node.id));
         gridOccupancyRef.current.set(chosen.key, String(node.id));
         gridNodeKeyRef.current.set(String(node.id), chosen.key);
+      } else {
+        fixedNodeIdsRef.current.delete(String(node.id));
       }
     },
     [findNearestSquareCell],
@@ -2557,7 +2479,7 @@ const NetworkGraph: React.FC = () => {
   const applyCompanyRingRadius = useCallback((companyId: string, inputRadius: number) => {
     const ring = companyMemberRingsRef.current.get(companyId);
     if (!ring) return;
-    const minRadius = getMinCompanyMemberRingRadius(ring.count);
+    const minRadius = getMinCompanyMemberRingRadiusByCell(ring.count, gridConfig.cellSize);
     const nextRadius = Math.max(minRadius, Math.min(2200, Number(inputRadius) || minRadius));
     ring.radius = nextRadius;
     const companyNode = graphNodeById.get(companyId) as any;
@@ -2583,7 +2505,7 @@ const NetworkGraph: React.FC = () => {
     });
     nodePositionsRef.current.set(companyId, { x: companyX, y: companyY });
     graphRef.current?.d3ReheatSimulation?.();
-  }, [graphNodeById]);
+  }, [graphNodeById, gridConfig.cellSize]);
 
   const snapCompanyRingRadiusToGrid = useCallback((inputRadius: number, minRadius: number) => {
     const raw = Number(inputRadius);
@@ -3809,7 +3731,7 @@ const NetworkGraph: React.FC = () => {
               companyId: hit.companyId,
               centerX: hit.centerX,
               centerY: hit.centerY,
-              minRadius: getMinCompanyMemberRingRadius(hit.count),
+              minRadius: getMinCompanyMemberRingRadiusByCell(hit.count, gridConfig.cellSize),
             };
             dispatchInteraction({ type: 'RING_RESIZE_START' });
             setRingResizeHoverCompanyId(hit.companyId);
@@ -3857,7 +3779,7 @@ const NetworkGraph: React.FC = () => {
                 onClick={() => {
                   const ring = companyMemberRingsRef.current.get(ringResizePopup.companyId);
                   if (!ring) return;
-                  const autoRadius = getAutoCompanyMemberRingRadius(ring.count);
+                  const autoRadius = getAutoCompanyMemberRingRadiusByCell(ring.count, gridConfig.cellSize);
                   applyCompanyRingRadius(ringResizePopup.companyId, autoRadius);
                   setCompanyRingRadiusOverrides(prev => {
                     if (!(ringResizePopup.companyId in prev)) return prev;
@@ -4014,6 +3936,7 @@ const NetworkGraph: React.FC = () => {
                 && !isCompanyMemberRotationNode
               );
               if (isGridLockedNode) {
+                releaseDragLineLocks();
                 let lock = gridHiddenLockPositionsRef.current.get(typed.id);
                 if (!lock) {
                   const known = nodePositionsRef.current.get(typed.id);
@@ -4071,6 +3994,7 @@ const NetworkGraph: React.FC = () => {
                 && Number.isFinite(rawCurrentX)
                 && Number.isFinite(rawCurrentY)
               ) {
+                releaseDragLineLocks();
                 const companyNode = graphNodeById.get(assignment.companyId) as any;
                 if (companyNode && Number.isFinite(companyNode.x) && Number.isFinite(companyNode.y)) {
                   rotatingCompanyIdRef.current = assignment.companyId;
@@ -4144,76 +4068,89 @@ const NetworkGraph: React.FC = () => {
                 }
               } else {
                 companyRingRotateSnapRef.current = null;
-                const isSelectedAnchorDrag = selectedNodeId === typed.id;
-                if (isSelectedAnchorDrag && Number.isFinite(rawCurrentX) && Number.isFinite(rawCurrentY)) {
-                  let cluster = dragSelectedClusterRef.current;
-                  if (!cluster || cluster.anchorId !== typed.id) {
-                    const offsets = new Map<string, { dx: number; dy: number }>();
-                    const neighbors = graphAdjacency.get(typed.id) || new Set<string>();
-                    neighbors.forEach(neighborId => {
-                      const follower = graphNodeById.get(neighborId) as any;
-                      if (!follower) return;
-                      if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
-                      offsets.set(String(neighborId), {
-                        dx: Number(follower.x) - rawCurrentX,
-                        dy: Number(follower.y) - rawCurrentY,
-                      });
-                    });
-                    cluster = { anchorId: typed.id, offsets };
-                    dragSelectedClusterRef.current = cluster;
-                  }
-                  cluster.offsets.forEach((offset, id) => {
+                dragSelectedClusterRef.current = null;
+                if (Number.isFinite(rawCurrentX) && Number.isFinite(rawCurrentY)) {
+                  // Clear previous drag locks and rebuild per-frame to avoid drift.
+                  dragLineFollowerLocksRef.current.forEach(id => {
                     const follower = graphNodeById.get(id) as any;
                     if (!follower) return;
-                    if (id === typed.id) return;
-                    const nx = rawCurrentX + offset.dx;
-                    const ny = rawCurrentY + offset.dy;
-                    if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
-                    follower.x = nx;
-                    follower.y = ny;
-                    follower.vx = 0;
-                    follower.vy = 0;
-                    if (follower.fx != null && follower.fy != null) {
-                      follower.fx = nx;
-                      follower.fy = ny;
-                    }
-                    follower.ringAngle = Math.atan2(ny, nx);
-                    relaxedAnchorPositionsRef.current.set(id, { x: nx, y: ny });
+                    if (fixedNodeIdsRef.current.has(id)) return;
+                    if (companyMemberAssignmentsRef.current.has(id)) return;
+                    follower.fx = null;
+                    follower.fy = null;
                   });
-                } else {
-                  dragSelectedClusterRef.current = null;
-                  const prev = dragLastPositionRef.current.get(typed.id);
-                  if (
-                    !gridConfig.enabled
-                    && prev
-                    && Number.isFinite(rawCurrentX)
-                    && Number.isFinite(rawCurrentY)
-                  ) {
-                    const dx = rawCurrentX - prev.x;
-                    const dy = rawCurrentY - prev.y;
-                    if (Math.abs(dx) + Math.abs(dy) > 0.01) {
-                      const followers = getDragFollowers(typed.id, 3);
-                      followers.forEach(({ id, depth }) => {
-                        const follower = graphNodeById.get(id) as any;
-                        if (!follower) return;
-                        if (follower.is_self) return;
-                        if (fixedNodeIdsRef.current.has(id)) return;
-                        const factor = depth === 1 ? 0.58 : depth === 2 ? 0.34 : 0.2;
-                        const mx = dx * factor;
-                        const my = dy * factor;
-                        if (!Number.isFinite(follower.x) || !Number.isFinite(follower.y)) return;
-                        follower.x += mx;
-                        follower.y += my;
+                  dragLineFollowerLocksRef.current.clear();
+
+                  let linePath = dragLinePathRef.current;
+                  if (!linePath || linePath.draggedId !== typed.id) {
+                    const resolved = resolveDragLinePath(typed.id);
+                    linePath = resolved
+                      ? { draggedId: typed.id, anchorId: resolved.anchorId, path: resolved.path }
+                      : null;
+                    dragLinePathRef.current = linePath;
+                  }
+
+                  if (linePath && linePath.path.length >= 3) {
+                    let anchorLock = dragLineAnchorLockRef.current;
+                    if (!anchorLock || anchorLock.anchorId !== linePath.anchorId) {
+                      const anchorNode = graphNodeById.get(linePath.anchorId) as any;
+                      const anchorPos = getNodePositionById(linePath.anchorId);
+                      if (anchorPos) {
+                        if (anchorLock && anchorLock.anchorId !== linePath.anchorId) {
+                          const prevAnchorNode = graphNodeById.get(anchorLock.anchorId) as any;
+                          if (
+                            prevAnchorNode
+                            && !fixedNodeIdsRef.current.has(anchorLock.anchorId)
+                            && !companyMemberAssignmentsRef.current.has(anchorLock.anchorId)
+                          ) {
+                            prevAnchorNode.fx = null;
+                            prevAnchorNode.fy = null;
+                          }
+                        }
+                        anchorLock = { anchorId: linePath.anchorId, x: anchorPos.x, y: anchorPos.y };
+                        dragLineAnchorLockRef.current = anchorLock;
+                        if (anchorNode) {
+                          anchorNode.x = anchorPos.x;
+                          anchorNode.y = anchorPos.y;
+                          anchorNode.vx = 0;
+                          anchorNode.vy = 0;
+                          anchorNode.fx = anchorPos.x;
+                          anchorNode.fy = anchorPos.y;
+                        }
+                      }
+                    }
+                    const anchor = anchorLock ? { x: anchorLock.x, y: anchorLock.y } : null;
+                    if (anchor) {
+                      const totalSegments = linePath.path.length - 1;
+                      for (let i = 1; i < linePath.path.length - 1; i += 1) {
+                        const followerId = linePath.path[i];
+                        if (!followerId || followerId === typed.id) continue;
+                        if (fixedNodeIdsRef.current.has(followerId)) continue;
+                        if (companyMemberAssignmentsRef.current.has(followerId)) continue;
+                        const follower = graphNodeById.get(followerId) as any;
+                        if (!follower) continue;
+                        const t = i / totalSegments;
+                        const nx = anchor.x + (rawCurrentX - anchor.x) * t;
+                        const ny = anchor.y + (rawCurrentY - anchor.y) * t;
+                        if (!Number.isFinite(nx) || !Number.isFinite(ny)) continue;
+                        follower.x = nx;
+                        follower.y = ny;
                         follower.vx = 0;
                         follower.vy = 0;
-                        follower.ringAngle = Math.atan2(follower.y, follower.x);
-                        if (follower.fx != null && follower.fy != null) {
-                          follower.fx += mx;
-                          follower.fy += my;
-                        }
-                      });
+                        follower.fx = nx;
+                        follower.fy = ny;
+                        follower.ringAngle = Math.atan2(ny, nx);
+                        relaxedNodeIdsRef.current.add(followerId);
+                        relaxedAnchorPositionsRef.current.set(followerId, { x: nx, y: ny });
+                        dragLineFollowerLocksRef.current.add(followerId);
+                      }
                     }
                   }
+
+                  // ドラッグ追従範囲は「自分/自社 -> 対象ノード」の主経路上ノードのみに限定する。
+                  // （経路外ノードは動かさない）
+                } else {
+                  releaseDragLineLocks();
                 }
               }
               if (projectedDragPos) {
@@ -4248,6 +4185,7 @@ const NetworkGraph: React.FC = () => {
                 dragLastPositionRef.current.delete(typed.id);
                 dragSelectedClusterRef.current = null;
                 companyRingRotateSnapRef.current = null;
+                releaseDragLineLocks();
                 window.setTimeout(() => {
                   didDragNodeRef.current = false;
                 }, 0);
@@ -4257,6 +4195,7 @@ const NetworkGraph: React.FC = () => {
               dispatchInteraction({ type: 'DRAG_END' });
               dragSelectedClusterRef.current = null;
               companyRingRotateSnapRef.current = null;
+              releaseDragLineLocks();
               window.setTimeout(() => {
                 didDragNodeRef.current = false;
               }, 0);
