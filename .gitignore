@@ -50,3 +50,4 @@ env/
 
 # エージェント指示用テキスト
 task.md
+logs/pids.txt
