@@ -47,3 +47,6 @@ __pycache__/
 .venv/
 venv/
 env/
+
+# エージェント指示用テキスト
+task.md
