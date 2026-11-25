@@ -63,6 +63,7 @@ const SAVED_LAYOUT_RADIALIZE_BLEND = 0.55;
 const SAVED_LAYOUT_RADIUS_LIMIT_RATIO = 1.7;
 const SAVED_LAYOUT_RADIUS_PADDING = 120;
 const GRID_STORAGE_KEY = 'techcard_grid_config';
+const GRID_ORIGIN = { x: 0, y: 0 } as const;
 const GUIDE_STORAGE_KEY = 'techcard_distance_guide_config';
 const HOVER_TOOLTIP_DELAY_MS = 220;
 const CUT_ALL_CONNECTIONS = false;
@@ -252,6 +253,8 @@ const NetworkGraph: React.FC = () => {
   const [rawGraph, setRawGraph] = useState<GraphData>({ nodes: [], edges: [] });
   const [layoutEpoch, setLayoutEpoch] = useState(0);
   const [graphSize, setGraphSize] = useState<{ width: number; height: number }>({ width: 0, height: 0 });
+  // ForceGraph2Dはサイズ確定後にマウントされるため、レイアウト初期化系のeffectはこの値の変化でも再実行する。
+  const isGraphMounted = graphSize.width > 0 && graphSize.height > 0;
   const [techFilter, setTechFilter] = useState<string | null>(null);
   const [companyFilter, setCompanyFilter] = useState<string | null>(null);
   const [contactFilter, setContactFilter] = useState<string | null>(null);
@@ -354,10 +357,13 @@ const NetworkGraph: React.FC = () => {
   const hasCenteredRef = useRef(false);
   const zoomScaleRef = useRef(1);
   const nodePositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
-  const gridCenterRef = useRef<{ x: number; y: number } | null>(null);
   const fixedNodeIdsRef = useRef(new Set<string>());
   const relaxedNodeIdsRef = useRef(new Set<string>());
   const relaxedAnchorPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  // 手動配置していない未固定ノードの座標は、シミュレーション停止時の座標だけを保存する。
+  // 停止前に別操作で保存が走った場合は、前回保存（読み込み）済みの座標を維持する。
+  const autoSettledPositionsRef = useRef<Map<string, { x: number; y: number }>>(new Map());
+  const lastSavedPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
   const dragLastPositionRef = useRef<Map<string, { x: number; y: number }>>(new Map());
   const dragSelectedClusterRef = useRef<{
     anchorId: string;
@@ -1195,6 +1201,10 @@ const NetworkGraph: React.FC = () => {
   const isCompanyRingResizeEnabled = Boolean(selectedCompanyForRingResize);
 
   useEffect(() => {
+    // 会社リング割当はレイアウト復元・描画でも参照するため、ForceGraph未マウント時も先に反映する。
+    companyMemberAssignmentsRef.current = companyMemberLayout.contactAssignments;
+    companyMemberRingsRef.current = companyMemberLayout.companyRings;
+    companyMemberContactIdsRef.current = companyMemberLayout.contactIds;
     const fg = graphRef.current;
     if (!fg) return;
     const selfNode = graph.nodes.find(node => node.type === 'contact' && (node as GraphNode).is_self) as GraphNode | undefined;
@@ -1205,9 +1215,6 @@ const NetworkGraph: React.FC = () => {
     }
     selfNodeIdRef.current = selfNode.id;
     selfCompanyNodeIdRef.current = selfNode.company_node_id ?? null;
-    companyMemberAssignmentsRef.current = companyMemberLayout.contactAssignments;
-    companyMemberRingsRef.current = companyMemberLayout.companyRings;
-    companyMemberContactIdsRef.current = companyMemberLayout.contactIds;
 
     const nodesById = new Map(graph.nodes.map(node => [node.id, node]));
     companyMemberLayout.contactIds.forEach(contactId => {
@@ -1872,9 +1879,22 @@ const NetworkGraph: React.FC = () => {
       return force;
     };
 
+    // 会社リング上の氏名ノードは毎フレーム会社座標から再投影されるため、反発力・employmentリンク力の発生源にすると
+    // 会社ノードを押し続けて追従し合い、未固定の会社ノードが際限なく流れる。リング配置専用として力を発生させない。
+    const isCompanyRingMemberLink = (link: any) => {
+      if (link.type !== 'employment') return false;
+      const sourceId = String(typeof link.source === 'object' ? link.source?.id : link.source);
+      const targetId = String(typeof link.target === 'object' ? link.target?.id : link.target);
+      const sourceAssignment = companyMemberAssignmentsRef.current.get(sourceId);
+      if (sourceAssignment && sourceAssignment.companyId === targetId) return true;
+      const targetAssignment = companyMemberAssignmentsRef.current.get(targetId);
+      return Boolean(targetAssignment && targetAssignment.companyId === sourceId);
+    };
     const charge = fg.d3Force('charge') as any;
     if (charge && typeof charge.strength === 'function') {
-      charge.strength(LAYOUT_CHARGE_STRENGTH);
+      charge.strength((node: any) => (
+        companyMemberContactIdsRef.current.has(String(node.id)) ? 0 : LAYOUT_CHARGE_STRENGTH
+      ));
     }
 
     const linkForce = fg.d3Force('link') as any;
@@ -1893,7 +1913,10 @@ const NetworkGraph: React.FC = () => {
           return 150;
         });
         if (typeof linkForce.strength === 'function') {
-          linkForce.strength((link: any) => (link.type === 'employment' ? 0.24 : 0.14));
+          linkForce.strength((link: any) => {
+            if (isCompanyRingMemberLink(link)) return 0;
+            return link.type === 'employment' ? 0.24 : 0.14;
+          });
         }
       }
 
@@ -1903,13 +1926,10 @@ const NetworkGraph: React.FC = () => {
     fg.d3Force('relation-orbit', null);
     fg.d3Force('low-degree-separation', null);
     fg.d3Force('depth-anchor', depthAnchorForce(0.14));
-    const centerForce = fg.d3Force('center') as any;
-    if (centerForce && typeof centerForce.x === 'function') {
-      centerForce.x(0);
-    }
-    if (centerForce && typeof centerForce.y === 'function') {
-      centerForce.y(0);
-    }
+    // d3.forceCenterは全ノードの重心を原点へ平行移動させるが、固定ノード（fx/fy）や毎フレーム固定する氏名ノードは
+    // 元に戻されるため、補正量が未固定ノードだけに集中し、alphaが残る間ずっと一方向へ流れ続ける。
+    // 原点基準の配置はdepth-anchorが担うため、centerは無効化する。
+    fg.d3Force('center', null);
     fg.d3Force('radial', null);
     fg.d3Force('depth', null);
     fg.d3Force('align', null);
@@ -1950,7 +1970,7 @@ const NetworkGraph: React.FC = () => {
     if (layoutSeedRef.current != null) {
       layoutSeedRef.current = null;
     }
-  }, [graph, nodeDegreeMap, layoutEpoch, companyMemberLayout]);
+  }, [graph, nodeDegreeMap, layoutEpoch, companyMemberLayout, isGraphMounted]);
 
   const applySearch = (value: string, type: typeof searchType) => {
     const trimmed = value.trim();
@@ -1993,11 +2013,12 @@ const NetworkGraph: React.FC = () => {
     }
     labelOffsetsRef.current.clear();
     labelAngleOverridesRef.current.clear();
+    autoSettledPositionsRef.current.clear();
+    lastSavedPositionsRef.current = {};
     ringResizeStateRef.current = null;
     gridOccupancyRef.current.clear();
     gridNodeKeyRef.current.clear();
     nodePositionsRef.current.clear();
-    gridCenterRef.current = null;
     layoutSeedRef.current = 1;
     graph.nodes.forEach(node => {
       delete (node as any).x;
@@ -2279,12 +2300,10 @@ const NetworkGraph: React.FC = () => {
     return { x: pos.x ?? 0, y: pos.y ?? 0 };
   }, [graphNodeById]);
 
-  const getGridCenter = useCallback(() => {
-    if (!gridConfig.enabled) return getLayoutCenter();
-    if (gridCenterRef.current) return gridCenterRef.current;
-    gridCenterRef.current = getLayoutCenter();
-    return gridCenterRef.current;
-  }, [getLayoutCenter, gridConfig.enabled]);
+  // 格子の基準点は原点に固定する。以前は「自分」ノードの現在座標を基準にしていたため、
+  // 自分ノードが格子点から外れているとGrid OFF→ON切り替え時に固定済みノードが一斉にずれて保存されていた。
+  // リロード時は従来から自分ノード未確定の段階で原点が採用されていたため、既存の保存レイアウトとも一致する。
+  const getGridCenter = useCallback(() => GRID_ORIGIN, []);
 
   const gridOccupancyRef = useRef(new Map<string, string>());
 
@@ -2358,31 +2377,6 @@ const NetworkGraph: React.FC = () => {
     },
     [findNearestSquareCell],
   );
-
-  useEffect(() => {
-    if (!gridConfig.enabled) {
-      gridCenterRef.current = null;
-      return;
-    }
-    // capture center once whenグリッド有効化
-    getGridCenter();
-  }, [gridConfig.enabled, getGridCenter]);
-
-  useEffect(() => {
-    if (gridConfig.enabled) {
-      gridHiddenLockPositionsRef.current.clear();
-      return;
-    }
-    const next = new Map<string, { x: number; y: number }>();
-    graph.nodes.forEach(node => {
-      if (companyMemberAssignmentsRef.current.has(node.id)) return;
-      const nx = Number((node as any).x);
-      const ny = Number((node as any).y);
-      if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
-      next.set(node.id, { x: nx, y: ny });
-    });
-    gridHiddenLockPositionsRef.current = next;
-  }, [graph.nodes, gridConfig.enabled, layoutEpoch]);
 
   const updateRingResizePopup = useCallback((companyId: string | null) => {
     if (!companyId) {
@@ -2770,10 +2764,20 @@ const NetworkGraph: React.FC = () => {
         const nx = (node as any).x;
         const ny = (node as any).y;
         if (Number.isFinite(nx) && Number.isFinite(ny)) {
-          positions[node.id] = { x: nx, y: ny };
           const fx = (node as any).fx;
           const fy = (node as any).fy;
-          if (fx !== null && fx !== undefined && fy !== null && fy !== undefined) {
+          const isFixed = fx !== null && fx !== undefined && fy !== null && fy !== undefined;
+          if (!isFixed && !relaxedNodeIdsRef.current.has(node.id)) {
+            // 自動配置の未固定ノード: 停止時の座標 → 前回保存済みの座標の順で採用し、
+            // シミュレーション途中の座標では保存しない（保存値がなければ停止時に初めて記録する）。
+            const settled = autoSettledPositionsRef.current.get(node.id) ?? lastSavedPositionsRef.current[node.id];
+            if (settled && Number.isFinite(settled.x) && Number.isFinite(settled.y)) {
+              positions[node.id] = { x: settled.x, y: settled.y };
+            }
+            return;
+          }
+          positions[node.id] = { x: nx, y: ny };
+          if (isFixed) {
             fixed[node.id] = true;
           }
         }
@@ -2794,6 +2798,17 @@ const NetworkGraph: React.FC = () => {
           companyMemberAngles[contactId] = assignment.angle;
         }
       });
+      // ドラッグで配置した未固定ノード（relaxed）は、リロード後もその位置で保持するため記録する。
+      const relaxed: Record<string, boolean> = {};
+      relaxedNodeIdsRef.current.forEach(nodeId => {
+        if (!positions[nodeId] || fixed[nodeId]) return;
+        relaxed[nodeId] = true;
+        // 現在座標は保持力と反発力の釣り合いで僅かにずれるため、保持位置（ドロップ位置）を保存して累積ずれを防ぐ。
+        const anchor = relaxedAnchorPositionsRef.current.get(nodeId);
+        if (anchor && Number.isFinite(anchor.x) && Number.isFinite(anchor.y)) {
+          positions[nodeId] = { x: anchor.x, y: anchor.y };
+        }
+      });
       const companyRingRadii: Record<string, number> = {};
       Object.entries(companyRingRadiusOverridesRef.current).forEach(([companyId, radius]) => {
         if (!Number.isFinite(radius)) return;
@@ -2806,12 +2821,14 @@ const NetworkGraph: React.FC = () => {
         labels,
         angles,
         fixed,
+        relaxed,
         companyMemberAngles,
         companyRingRadiiVersion: COMPANY_RING_RADII_LAYOUT_VERSION,
         companyRingRadii,
       };
       try {
         localStorage.setItem(LAYOUT_STORAGE_KEY, JSON.stringify(payload));
+        lastSavedPositionsRef.current = positions;
       } catch (error) {
         console.warn('layout save failed', error);
       }
@@ -2929,7 +2946,10 @@ const NetworkGraph: React.FC = () => {
 
   useEffect(() => {
     const raw = localStorage.getItem(LAYOUT_STORAGE_KEY);
-    if (!raw) return;
+    if (!raw) {
+      lastSavedPositionsRef.current = {};
+      return;
+    }
     try {
       let adjusted = false;
       const parsed = JSON.parse(raw) as {
@@ -2937,10 +2957,13 @@ const NetworkGraph: React.FC = () => {
         labels?: Record<string, { x: number; y: number }>;
         angles?: Record<string, number>;
         fixed?: Record<string, boolean>;
+        relaxed?: Record<string, boolean>;
         companyMemberAngles?: Record<string, number>;
         companyRingRadiiVersion?: number;
         companyRingRadii?: Record<string, number>;
       };
+      // 自動配置ノードは、停止前の保存でこの保存済み座標を維持する
+      lastSavedPositionsRef.current = { ...(parsed.positions ?? {}) };
       const nextOverrides: Record<string, number> = {};
       if (Number(parsed.companyRingRadiiVersion) === COMPANY_RING_RADII_LAYOUT_VERSION) {
         Object.entries(parsed.companyRingRadii || {}).forEach(([companyId, radius]) => {
@@ -3004,6 +3027,10 @@ const NetworkGraph: React.FC = () => {
             if (fixedNodeIds.has(node.id)) {
               (node as any).fx = saved.x;
               (node as any).fy = saved.y;
+            } else if (parsed.relaxed?.[node.id]) {
+              // ドラッグ配置済みの未固定ノードは、放射状補正をかけずに保存位置で保持する。
+              relaxedNodeIdsRef.current.add(node.id);
+              relaxedAnchorPositionsRef.current.set(node.id, { x: saved.x, y: saved.y });
             }
           }
         });
@@ -3126,6 +3153,7 @@ const NetworkGraph: React.FC = () => {
         Object.entries(parsed.angles ?? {}).map(([key, value]) => [key, value]),
       );
       if (parsed.fixed) {
+        // Grid表示・非表示に関わらず、切り替え時と同じ原点基準の格子で占有セルを再構築する。
         const center = getGridCenter();
         const cellSize = Math.max(24, Number(gridConfig.cellSize) || 120);
         gridOccupancyRef.current.clear();
@@ -3200,7 +3228,26 @@ const NetworkGraph: React.FC = () => {
     } catch (error) {
       console.warn('layout load failed', error);
     }
-  }, [graph.nodes, layoutEpoch, gridConfig.cellSize, getGridCenter, scheduleLayoutSave]);
+  }, [graph.nodes, layoutEpoch, gridConfig.cellSize, getGridCenter, scheduleLayoutSave, isGraphMounted]);
+
+  // Grid非表示時のロック位置（固定済みノードのみ）は、保存レイアウトの復元後の座標で取得する。
+  // （復元effectより先に取得すると、初期配置の座標でロックされ保存レイアウトが失われる）
+  useEffect(() => {
+    if (gridConfig.enabled) {
+      gridHiddenLockPositionsRef.current.clear();
+      return;
+    }
+    const next = new Map<string, { x: number; y: number }>();
+    graph.nodes.forEach(node => {
+      if (companyMemberAssignmentsRef.current.has(node.id)) return;
+      if (!fixedNodeIdsRef.current.has(node.id)) return;
+      const nx = Number((node as any).x);
+      const ny = Number((node as any).y);
+      if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+      next.set(node.id, { x: nx, y: ny });
+    });
+    gridHiddenLockPositionsRef.current = next;
+  }, [graph.nodes, gridConfig.enabled, layoutEpoch, isGraphMounted]);
 
   const drawNodeLabel = useCallback((node: NodeObject, ctx: CanvasRenderingContext2D, globalScale: number) => {
     const typed = node as GraphNode;
@@ -3594,7 +3641,7 @@ const NetworkGraph: React.FC = () => {
                     </label>
                   </div>
                   <p className="text-[11px] text-gray-500">
-                    Grid表示中に「個人以外」をドラッグするとセル固定。Grid非表示時は固定を維持したまま編集ロック。
+                    Grid表示中に「個人以外」をドラッグするとセル固定。グリッド非表示中も固定済みノードは移動できません。
                   </p>
                 </div>
                 <div className="space-y-2 rounded border border-slate-200 bg-white p-2">
@@ -3839,8 +3886,10 @@ const NetworkGraph: React.FC = () => {
                 }
               });
               if (!gridConfig.enabled) {
+                // Grid非表示時は固定済みノードだけを固定座標に保持する（未固定ノードは移動可能）。
                 graph.nodes.forEach(node => {
                   if (companyMemberAssignmentsRef.current.has(node.id)) return;
+                  if (!fixedNodeIdsRef.current.has(node.id)) return;
                   const lock = gridHiddenLockPositionsRef.current.get(node.id);
                   const nx = Number((node as any).x);
                   const ny = Number((node as any).y);
@@ -3927,13 +3976,33 @@ const NetworkGraph: React.FC = () => {
               }}
               linkDirectionalArrowLength={6}
               linkDirectionalArrowRelPos={1}
+            onEngineStop={() => {
+              // シミュレーション停止時点の画面上の座標を、自動配置の未固定ノードの保存座標として確定する。
+              let recorded = 0;
+              graph.nodes.forEach(node => {
+                if (companyMemberContactIdsRef.current.has(node.id)) return;
+                if (relaxedNodeIdsRef.current.has(node.id)) return;
+                const typed = node as any;
+                if (typed.fx != null && typed.fy != null) return;
+                const nx = Number(typed.x);
+                const ny = Number(typed.y);
+                if (!Number.isFinite(nx) || !Number.isFinite(ny)) return;
+                autoSettledPositionsRef.current.set(node.id, { x: nx, y: ny });
+                recorded += 1;
+              });
+              if (recorded > 0) {
+                scheduleLayoutSave();
+              }
+            }}
             onNodeClick={handleNodeClick}
             onNodeDrag={(node: NodeObject) => {
               const typed = node as GraphNode;
               const isCompanyMemberRotationNode = companyMemberAssignmentsRef.current.has(typed.id);
+              // Grid非表示時にドラッグ不可なのは固定済みノードのみ（docs/project_spec.md 6.6）。
               const isGridLockedNode = (
                 !gridConfig.enabled
                 && !isCompanyMemberRotationNode
+                && fixedNodeIdsRef.current.has(String(typed.id))
               );
               if (isGridLockedNode) {
                 releaseDragLineLocks();
@@ -4169,6 +4238,7 @@ const NetworkGraph: React.FC = () => {
               const isGridLockedNode = (
                 !gridConfig.enabled
                 && !isCompanyMemberRotationNode
+                && fixedNodeIdsRef.current.has(String(typed.id))
               );
               if (isGridLockedNode) {
                 const lock = gridHiddenLockPositionsRef.current.get(typed.id);

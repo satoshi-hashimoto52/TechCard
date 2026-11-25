@@ -73,6 +73,9 @@ export type CompanyRouteResponse = {
   duration_min?: number | null;
   geometry: RouteLine;
   route_steps?: RouteStep[];
+  highway_roads?: string[];
+  has_highway?: boolean;
+  fallback_reason?: string | null;
   cached: boolean;
   provider: string;
   updated_at?: string | null;
@@ -129,6 +132,8 @@ type FetchNetworkFilters = {
   signal?: AbortSignal;
 };
 
+const COMPANY_ROUTE_TIMEOUT_MS = 30000;
+
 type FetchCompanyRouteParams = {
   toCompanyId: number;
   toLat: number | null;
@@ -168,6 +173,8 @@ export const fetchCompanyRoute = (
 ): Promise<AxiosResponse<CompanyRouteResponse>> => {
   return api.get<CompanyRouteResponse>('/stats/company-route', {
     signal: params.signal,
+    // Backendは経路候補(約9秒)+IC・JCT名補完(約4秒)の時間予算で応答する。画面側が先に打ち切らないよう余裕を持たせる。
+    timeout: COMPANY_ROUTE_TIMEOUT_MS,
     params: {
       to_company_id: params.toCompanyId,
       to_lat: params.toLat,

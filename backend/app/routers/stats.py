@@ -14,11 +14,14 @@ import urllib.parse
 import urllib.request
 import urllib.error
 import logging
+from concurrent.futures import ThreadPoolExecutor, wait as wait_futures
 from ..database import SessionLocal
 from .. import models
 
 router = APIRouter(prefix="/stats", tags=["stats"])
 logger = logging.getLogger("techcard.geocode")
+# uvicornのログ設定（INFO以上をlogs/backend-*.logへ出力）に乗せるため、uvicorn.errorの子ロガーにする
+route_logger = logging.getLogger("uvicorn.error").getChild("techcard_route")
 _GEOCODE_SEMAPHORE = asyncio.Semaphore(1)
 _ADDRESS_GEOCODE_CACHE: dict[tuple[str, str], tuple[float, float]] = {}
 _ADDRESS_GEOCODE_INFLIGHT: set[tuple[str, str]] = set()
@@ -34,6 +37,22 @@ _OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 _IC_JCT_LOOKUP_CACHE: dict[str, str | None] = {}
 _ORS_DIRECTIONS_URL = "https://api.openrouteservice.org/v2/directions/driving-car/geojson"
 _OSRM_ROUTE_URL = "https://router.project-osrm.org/route/v1/driving"
+# 代替ルーティングサービス（FOSSGIS運営の公開OSRM / Valhalla）
+_FOSSGIS_OSRM_ROUTE_URL = "https://routing.openstreetmap.de/routed-car/route/v1/driving"
+_VALHALLA_ROUTE_URL = "https://valhalla1.openstreetmap.de/route"
+# 画面側（fetchCompanyRoute）のタイムアウトより十分短く収めるための時間予算
+_ROUTE_PROVIDER_TIMEOUT_S = 8.0
+_ROUTE_PROVIDER_BUDGET_S = 9.0
+_ROUTE_ENRICH_BUDGET_S = 4.0
+_IC_JCT_LOOKUP_TIMEOUT_S = 3.5
+# 経路選択ロジックの版。変更時はキャッシュを再計算させる（旧キャッシュで新しい選択が省略されないようにする）
+_ROUTE_CACHE_KEY_VERSION = "v3"
+_HIGHWAY_NAME_PATTERN = re.compile(r"(自動車道|高速|首都高|Expressway|Motorway)", re.IGNORECASE)
+_HIGHWAY_REF_PATTERN = re.compile(r"^(?:E\d{1,3}[A-Z]?|C\d)$")
+# 高速道路を含む経路とみなす最小走行距離（出口名などの一致による誤判定を避ける）
+_HIGHWAY_MIN_DISTANCE_M = 1000.0
+_INTER_PREF_ROUTE_MODES = {"inter_pref_highway", "inter_pref_road"}
+_INTRA_PREF_ROUTE_MODES = {"intra_pref_local", "intra_pref_local_fallback"}
 
 
 def _parse_event_tag_name(raw_name: str | None) -> tuple[str, str] | None:
@@ -106,7 +125,8 @@ def _extract_prefecture(value: str | None) -> str | None:
 
 
 def _coord_key(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> str:
-    return f"{from_lat:.6f},{from_lon:.6f}|{to_lat:.6f},{to_lon:.6f}"
+    # 版を含めることで、経路選択ロジック変更前のキャッシュを一致させない
+    return f"{_ROUTE_CACHE_KEY_VERSION}|{from_lat:.6f},{from_lon:.6f}|{to_lat:.6f},{to_lon:.6f}"
 
 
 def _has_cached_route_steps(raw_steps: str | None) -> bool:
@@ -211,7 +231,8 @@ def _normalize_route_steps(raw_steps: list[dict[str, object]]) -> list[dict[str,
 
 def _extract_ic_jct_name_candidate(*values: str | None) -> str | None:
     for value in values:
-        text = (value or "").strip()
+        # ラベルの表示用接頭辞（「乗り口: 」等）を除いてから名前として扱う（接頭辞の二重付与を防ぐ）
+        text = re.sub(r"^(?:(?:乗り口|降り口|乗換|経由)\s*:\s*)+", "", (value or "").strip())
         if not text:
             continue
         if _IC_JCT_NAME_PATTERN.search(text):
@@ -226,13 +247,14 @@ def _extract_ic_jct_name_candidate(*values: str | None) -> str | None:
     return None
 
 
-def _lookup_nearest_ic_jct_name(lon: float, lat: float) -> str | None:
+def _lookup_nearest_ic_jct_name(lon: float, lat: float, timeout_s: float = 10.0) -> str | None:
     cache_key = f"{lat:.5f},{lon:.5f}"
     if cache_key in _IC_JCT_LOOKUP_CACHE:
         return _IC_JCT_LOOKUP_CACHE[cache_key]
 
+    server_timeout = max(1, int(timeout_s))
     query = f"""
-    [out:json][timeout:8];
+    [out:json][timeout:{server_timeout}];
     (
       node(around:1800,{lat:.6f},{lon:.6f})["highway"="motorway_junction"];
       node(around:1800,{lat:.6f},{lon:.6f})["name"~"(IC|JCT|インター|ジャンクション)",i];
@@ -253,7 +275,7 @@ def _lookup_nearest_ic_jct_name(lon: float, lat: float) -> str | None:
     nearest_name: str | None = None
     nearest_distance = float("inf")
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
             raw = response.read().decode("utf-8")
         payload = json.loads(raw)
         elements = payload.get("elements") or []
@@ -284,18 +306,61 @@ def _lookup_nearest_ic_jct_name(lon: float, lat: float) -> str | None:
             if distance < nearest_distance:
                 nearest_distance = distance
                 nearest_name = name
-    except Exception:
-        nearest_name = None
+    except Exception as exc:
+        # タイムアウト・通信エラーはキャッシュしない（同一プロセス内で恒久的に名前が欠けるのを防ぐ）
+        route_logger.warning("ic_jct_lookup_failed lat=%.5f lon=%.5f error=%s", lat, lon, str(exc)[:120])
+        return None
 
     _IC_JCT_LOOKUP_CACHE[cache_key] = nearest_name
     return nearest_name
 
 
-def _enrich_route_steps_with_ic_jct_names(route_steps: list[dict[str, object]]) -> tuple[list[dict[str, object]], bool]:
+def _enrich_route_steps_with_ic_jct_names(
+    route_steps: list[dict[str, object]],
+    budget_s: float = _ROUTE_ENRICH_BUDGET_S,
+) -> tuple[list[dict[str, object]], bool]:
+    # IC・JCT名が不明な乗降点だけを並列に補完し、全体を時間予算内に収める。
+    # 予算内に終わらなかった地点は名前なしのまま返す（画面側のタイムアウトを優先して防ぐ）。
+    pending: dict[int, tuple[float, float]] = {}
+    for index, step in enumerate(route_steps):
+        if not isinstance(step, dict):
+            continue
+        kind = str(step.get("kind") or "").strip().lower()
+        if kind not in {"enter", "exit", "junction"}:
+            continue
+        if _extract_ic_jct_name_candidate(
+            str(step.get("label") or ""), str(step.get("road") or ""), str(step.get("detail") or "")
+        ):
+            continue
+        if len(pending) >= 8:
+            break
+        lon = step.get("lon")
+        lat = step.get("lat")
+        if isinstance(lon, (int, float)) and isinstance(lat, (int, float)):
+            if math.isfinite(float(lon)) and math.isfinite(float(lat)):
+                pending[index] = (float(lon), float(lat))
+
+    looked_up: dict[int, str | None] = {}
+    if pending and budget_s > 0.5:
+        lookup_timeout = min(_IC_JCT_LOOKUP_TIMEOUT_S, budget_s)
+        executor = ThreadPoolExecutor(max_workers=min(4, len(pending)))
+        futures = {
+            executor.submit(_lookup_nearest_ic_jct_name, lon, lat, lookup_timeout): index
+            for index, (lon, lat) in pending.items()
+        }
+        done, not_done = wait_futures(list(futures.keys()), timeout=budget_s)
+        for future in done:
+            try:
+                looked_up[futures[future]] = future.result()
+            except Exception:
+                looked_up[futures[future]] = None
+        if not_done:
+            route_logger.warning("ic_jct_lookup_budget_exceeded pending=%d budget_s=%.1f", len(not_done), budget_s)
+        executor.shutdown(wait=False, cancel_futures=True)
+
     changed = False
-    lookups = 0
     result: list[dict[str, object]] = []
-    for step in route_steps:
+    for index, step in enumerate(route_steps):
         if not isinstance(step, dict):
             continue
         copied = dict(step)
@@ -306,14 +371,7 @@ def _enrich_route_steps_with_ic_jct_names(route_steps: list[dict[str, object]]) 
         label = str(copied.get("label") or "").strip()
         road = str(copied.get("road") or "").strip()
         detail = str(copied.get("detail") or "").strip()
-        current_name = _extract_ic_jct_name_candidate(label, road, detail)
-        if current_name is None and lookups < 8:
-            lon = copied.get("lon")
-            lat = copied.get("lat")
-            if isinstance(lon, (int, float)) and isinstance(lat, (int, float)):
-                if math.isfinite(float(lon)) and math.isfinite(float(lat)):
-                    lookups += 1
-                    current_name = _lookup_nearest_ic_jct_name(float(lon), float(lat))
+        current_name = _extract_ic_jct_name_candidate(label, road, detail) or looked_up.get(index)
         if current_name:
             next_label = _build_route_step_label(kind, current_name, "", "")
             if copied.get("label") != next_label:
@@ -414,6 +472,88 @@ def _extract_osrm_route_steps(route: dict[str, object]) -> list[dict[str, object
     return _normalize_route_steps(raw_steps)
 
 
+def _collect_highway_roads(segments: list[tuple[list[str], float]]) -> tuple[list[str], float]:
+    # (道路名・路線番号の一覧, 区間距離m) から高速道路区間を抽出し、距離の長い順の道路名と合計距離を返す。
+    distance_by_name: dict[str, float] = {}
+    highway_distance_m = 0.0
+    for names, distance_m in segments:
+        cleaned = [
+            part.strip()
+            for name in names
+            if name
+            for part in re.split(r"[;；]", name)
+            if part.strip()
+        ]
+        if not cleaned:
+            continue
+        is_highway = any(
+            _HIGHWAY_NAME_PATTERN.search(name) or _HIGHWAY_REF_PATTERN.match(name)
+            for name in cleaned
+        )
+        if not is_highway:
+            continue
+        highway_distance_m += max(0.0, float(distance_m or 0.0))
+        display_names = [name for name in cleaned if _HIGHWAY_NAME_PATTERN.search(name)] or cleaned
+        for name in display_names:
+            # 英語表記（Expressway等）は日本語名がある場合は省略する
+            if re.fullmatch(r"[A-Za-z0-9 .\-()]+", name) and any(
+                re.search(r"[^\x00-\x7f]", other) for other in display_names
+            ):
+                continue
+            distance_by_name[name] = distance_by_name.get(name, 0.0) + max(0.0, float(distance_m or 0.0))
+    ordered = [name for name, _ in sorted(distance_by_name.items(), key=lambda item: -item[1])]
+    if any(re.search(r"[^\x00-\x7f]", name) for name in ordered):
+        # 日本語の道路名がある場合、英語名・路線番号のみの表記は表示用一覧から除く
+        ordered = [name for name in ordered if re.search(r"[^\x00-\x7f]", name)]
+    return ordered[:8], highway_distance_m
+
+
+def _make_route_candidate(
+    provider: str,
+    geometry: dict[str, object],
+    distance_m: float,
+    duration_s: float,
+    route_steps: list[dict[str, object]],
+    road_segments: list[tuple[list[str], float]],
+    *,
+    avoid_highways: bool,
+) -> dict[str, object]:
+    highway_roads, highway_distance_m = _collect_highway_roads(road_segments)
+    return {
+        "provider": provider,
+        "geometry": geometry,
+        "distance_m": distance_m,
+        "duration_s": duration_s,
+        "route_steps": route_steps,
+        "highway_roads": highway_roads,
+        "highway_distance_m": highway_distance_m,
+        "avoid_highways": avoid_highways,
+    }
+
+
+def _route_candidate_has_highway(candidate: dict[str, object]) -> bool:
+    return float(candidate.get("highway_distance_m") or 0.0) >= _HIGHWAY_MIN_DISTANCE_M
+
+
+def _read_json_response(request: urllib.request.Request, label: str, timeout_s: float) -> dict[str, object]:
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_s) as response:
+            raw = response.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = ""
+        try:
+            body = exc.read().decode("utf-8")
+        except Exception:
+            body = ""
+        raise RuntimeError(f"{label}_http_{exc.code}:{body[:160]}")
+    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
+        raise RuntimeError(f"{label}_network:{exc}")
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"{label}_invalid_json:{exc}")
+
+
 def _request_openrouteservice_route(
     from_lat: float,
     from_lon: float,
@@ -421,20 +561,25 @@ def _request_openrouteservice_route(
     to_lon: float,
     *,
     avoid_highways: bool,
-) -> tuple[dict[str, object], float, float, list[dict[str, object]]]:
+    timeout_s: float = _ROUTE_PROVIDER_TIMEOUT_S,
+) -> list[dict[str, object]]:
     api_key = os.getenv("ORS_API_KEY", "").strip()
     if not api_key:
         raise RuntimeError("ors_api_key_missing")
     payload: dict[str, object] = {
         "coordinates": [[from_lon, from_lat], [to_lon, to_lat]],
         "instructions": True,
+        # 既定の"recommended"ではなく、自動車の所要時間優先で問い合わせる
+        "preference": "fastest",
     }
     if avoid_highways:
         payload["options"] = {"avoid_features": ["highways"]}
-    request_data = json.dumps(payload).encode("utf-8")
+    else:
+        # 代替経路も候補として受け取る（ORS側の制限で長距離では返らない場合がある）
+        payload["alternative_routes"] = {"target_count": 3, "share_factor": 0.6, "weight_factor": 1.6}
     request = urllib.request.Request(
         _ORS_DIRECTIONS_URL,
-        data=request_data,
+        data=json.dumps(payload).encode("utf-8"),
         method="POST",
         headers={
             "Authorization": api_key,
@@ -443,60 +588,69 @@ def _request_openrouteservice_route(
             "User-Agent": "techcard-routing/1.0",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=16) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8")
-        except Exception:
-            body = ""
-        raise RuntimeError(f"ors_http_{exc.code}:{body[:160]}")
-    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-        raise RuntimeError(f"ors_network:{exc}")
-
-    data = json.loads(raw)
+    data = _read_json_response(request, "ors", timeout_s)
     features = data.get("features") or []
     if not features:
         raise RuntimeError("ors_no_route")
-    feature = features[0] or {}
-    geometry = feature.get("geometry") or {}
-    coordinates = geometry.get("coordinates") or []
-    if geometry.get("type") != "LineString" or not coordinates:
+    candidates: list[dict[str, object]] = []
+    for feature in features:
+        if not isinstance(feature, dict):
+            continue
+        geometry = feature.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        if geometry.get("type") != "LineString" or not coordinates:
+            continue
+        summary = (feature.get("properties") or {}).get("summary") or {}
+        distance_m = float(summary.get("distance") or 0.0)
+        duration_s = float(summary.get("duration") or 0.0)
+        if distance_m <= 0:
+            continue
+        road_segments: list[tuple[list[str], float]] = []
+        for segment in (feature.get("properties") or {}).get("segments") or []:
+            if not isinstance(segment, dict):
+                continue
+            for step in segment.get("steps") or []:
+                if isinstance(step, dict):
+                    road_segments.append(([str(step.get("name") or "")], float(step.get("distance") or 0.0)))
+        candidates.append(
+            _make_route_candidate(
+                "openrouteservice",
+                {"type": "LineString", "coordinates": coordinates},
+                distance_m,
+                duration_s,
+                _extract_ors_route_steps(feature, coordinates),
+                road_segments,
+                avoid_highways=avoid_highways,
+            )
+        )
+    if not candidates:
         raise RuntimeError("ors_geometry_invalid")
-    summary = (feature.get("properties") or {}).get("summary") or {}
-    distance_m = float(summary.get("distance") or 0.0)
-    duration_s = float(summary.get("duration") or 0.0)
-    if distance_m <= 0:
-        raise RuntimeError("ors_distance_invalid")
-    route_steps = _extract_ors_route_steps(feature, coordinates)
-    return (
-        {"type": "LineString", "coordinates": coordinates},
-        distance_m,
-        duration_s,
-        route_steps,
-    )
+    return candidates
 
 
-def _request_osrm_public_route(
+def _request_osrm_route(
+    base_url: str,
+    provider: str,
     from_lat: float,
     from_lon: float,
     to_lat: float,
     to_lon: float,
     *,
     avoid_highways: bool,
-) -> tuple[dict[str, object], float, float, list[dict[str, object]]]:
+    timeout_s: float = _ROUTE_PROVIDER_TIMEOUT_S,
+) -> list[dict[str, object]]:
     coord_path = f"{from_lon:.6f},{from_lat:.6f};{to_lon:.6f},{to_lat:.6f}"
     params = {
         "overview": "full",
         "geometries": "geojson",
         "steps": "true",
+        # OSRMの自動車プロファイルは所要時間で重み付けされる（距離優先の指定はない）。
+        # 県外の高速道路優先のため、代替経路も候補として受け取る
+        "alternatives": "false" if avoid_highways else "3",
     }
     if avoid_highways:
         params["exclude"] = "motorway"
-    query = urllib.parse.urlencode(params)
-    url = f"{_OSRM_ROUTE_URL}/{coord_path}?{query}"
+    url = f"{base_url}/{coord_path}?{urllib.parse.urlencode(params)}"
     request = urllib.request.Request(
         url,
         headers={
@@ -504,81 +658,292 @@ def _request_osrm_public_route(
             "User-Agent": "techcard-routing/1.0",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=16) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8")
-        except Exception:
-            body = ""
-        raise RuntimeError(f"osrm_http_{exc.code}:{body[:160]}")
-    except (urllib.error.URLError, TimeoutError, socket.timeout) as exc:
-        raise RuntimeError(f"osrm_network:{exc}")
-
-    data = json.loads(raw)
+    data = _read_json_response(request, provider, timeout_s)
     routes = data.get("routes") or []
     if not routes:
-        raise RuntimeError("osrm_no_route")
-    route = routes[0] or {}
-    geometry = route.get("geometry") or {}
-    coordinates = geometry.get("coordinates") or []
-    if geometry.get("type") != "LineString" or not coordinates:
-        raise RuntimeError("osrm_geometry_invalid")
-    distance_m = float(route.get("distance") or 0.0)
-    duration_s = float(route.get("duration") or 0.0)
-    if distance_m <= 0:
-        raise RuntimeError("osrm_distance_invalid")
-    route_steps = _extract_osrm_route_steps(route)
-    return (
-        {"type": "LineString", "coordinates": coordinates},
-        distance_m,
-        duration_s,
-        route_steps,
-    )
+        raise RuntimeError(f"{provider}_no_route")
+    candidates: list[dict[str, object]] = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        geometry = route.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        if geometry.get("type") != "LineString" or not coordinates:
+            continue
+        distance_m = float(route.get("distance") or 0.0)
+        duration_s = float(route.get("duration") or 0.0)
+        if distance_m <= 0:
+            continue
+        road_segments: list[tuple[list[str], float]] = []
+        for leg in route.get("legs") or []:
+            if not isinstance(leg, dict):
+                continue
+            for step in leg.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                refs = [part for part in re.split(r"[;,]", str(step.get("ref") or "")) if part.strip()]
+                road_segments.append(([str(step.get("name") or ""), *refs], float(step.get("distance") or 0.0)))
+        candidates.append(
+            _make_route_candidate(
+                provider,
+                {"type": "LineString", "coordinates": coordinates},
+                distance_m,
+                duration_s,
+                _extract_osrm_route_steps(route),
+                road_segments,
+                avoid_highways=avoid_highways,
+            )
+        )
+    if not candidates:
+        raise RuntimeError(f"{provider}_geometry_invalid")
+    return candidates
 
 
-def _request_route_with_fallback_providers(
+def _decode_polyline6(encoded: str) -> list[list[float]]:
+    coordinates: list[list[float]] = []
+    index = 0
+    lat = 0
+    lon = 0
+    length = len(encoded)
+    while index < length:
+        values: list[int] = []
+        for _ in range(2):
+            shift = 0
+            result = 0
+            while True:
+                if index >= length:
+                    return coordinates
+                byte = ord(encoded[index]) - 63
+                index += 1
+                result |= (byte & 0x1F) << shift
+                shift += 5
+                if byte < 0x20:
+                    break
+            values.append(~(result >> 1) if result & 1 else (result >> 1))
+        lat += values[0]
+        lon += values[1]
+        coordinates.append([lon / 1e6, lat / 1e6])
+    return coordinates
+
+
+def _valhalla_sign_texts(sign: object, key: str) -> list[str]:
+    if not isinstance(sign, dict):
+        return []
+    texts: list[str] = []
+    for element in sign.get(key) or []:
+        if isinstance(element, dict):
+            text = str(element.get("text") or "").strip()
+            if text:
+                texts.append(text)
+    return texts
+
+
+def _extract_valhalla_route_steps(
+    maneuvers: list[dict[str, object]],
+    coordinates: list[list[float]],
+) -> list[dict[str, object]]:
+    raw_steps: list[dict[str, object]] = []
+    for maneuver in maneuvers:
+        if not isinstance(maneuver, dict):
+            continue
+        try:
+            point_index = int(maneuver.get("begin_shape_index") or 0)
+        except (TypeError, ValueError):
+            continue
+        if point_index < 0 or point_index >= len(coordinates):
+            continue
+        lon, lat = coordinates[point_index]
+        maneuver_type = maneuver.get("type")
+        # Valhallaの操作種別: 17-19=ランプ, 20-21=出口, 22-24=分岐, 25/37/38=合流
+        if maneuver_type in (17, 18, 19):
+            maneuver_text = "on ramp"
+        elif maneuver_type in (20, 21):
+            maneuver_text = "off ramp"
+        elif maneuver_type in (25, 37, 38):
+            maneuver_text = "merge"
+        else:
+            maneuver_text = ""
+        street_names = [str(name) for name in (maneuver.get("street_names") or []) if name]
+        road_name = " / ".join(street_names[:3])
+        sign = maneuver.get("sign")
+        exit_names = _valhalla_sign_texts(sign, "exit_name_elements")
+        toward = _valhalla_sign_texts(sign, "exit_toward_elements")
+        destinations = (exit_names[:1] or toward[:1] or [""])[0]
+        instruction = str(maneuver.get("instruction") or "").strip()
+        kind = _classify_route_step_kind(maneuver_text, "", road_name, " ".join(exit_names + toward))
+        raw_steps.append(
+            {
+                "lon": lon,
+                "lat": lat,
+                "kind": kind,
+                "road": road_name or None,
+                "label": _build_route_step_label(kind, road_name, destinations, instruction),
+                "detail": instruction or None,
+            }
+        )
+    return _normalize_route_steps(raw_steps)
+
+
+def _request_valhalla_route(
     from_lat: float,
     from_lon: float,
     to_lat: float,
     to_lon: float,
     *,
     avoid_highways: bool,
-) -> tuple[dict[str, object], float, float, list[dict[str, object]], str]:
-    provider_candidates: list[tuple[dict[str, object], float, float, list[dict[str, object]], str]] = []
-    provider_errors: list[str] = []
-    try:
-        geometry, distance_m, duration_s, route_steps = _request_openrouteservice_route(
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            avoid_highways=avoid_highways,
+    timeout_s: float = _ROUTE_PROVIDER_TIMEOUT_S,
+) -> list[dict[str, object]]:
+    payload: dict[str, object] = {
+        "locations": [{"lat": from_lat, "lon": from_lon}, {"lat": to_lat, "lon": to_lon}],
+        "costing": "auto",
+        "units": "kilometers",
+        "language": "ja-JP",
+    }
+    if avoid_highways:
+        # OSRMの公開サーバーはexclude=motorwayに非対応のため、一般道優先はValhallaのuse_highwaysで表現する
+        payload["costing_options"] = {"auto": {"use_highways": 0.0, "shortest": False}}
+    else:
+        # 距離最短（shortest）ではなく所要時間ベースのコストで探索し、代替経路も候補として受け取る
+        payload["costing_options"] = {"auto": {"shortest": False}}
+        payload["alternates"] = 3
+    # urlencodeは空白を「+」にするがValhallaはJSONとして解釈できない（HTTP 400）ため、空白なしJSONを%エンコードする
+    query = "json=" + urllib.parse.quote(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), safe="")
+    request = urllib.request.Request(
+        f"{_VALHALLA_ROUTE_URL}?{query}",
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "techcard-routing/1.0",
+        },
+    )
+    data = _read_json_response(request, "valhalla", timeout_s)
+    trips = [data.get("trip")] + [
+        item.get("trip") for item in (data.get("alternates") or []) if isinstance(item, dict)
+    ]
+    candidates: list[dict[str, object]] = []
+    for trip in trips:
+        if not isinstance(trip, dict) or trip.get("status") not in (0, None):
+            continue
+        legs = [leg for leg in (trip.get("legs") or []) if isinstance(leg, dict)]
+        if not legs:
+            continue
+        coordinates: list[list[float]] = []
+        maneuvers: list[dict[str, object]] = []
+        road_segments: list[tuple[list[str], float]] = []
+        for leg in legs:
+            leg_coordinates = _decode_polyline6(str(leg.get("shape") or ""))
+            offset = len(coordinates)
+            coordinates.extend(leg_coordinates)
+            for maneuver in leg.get("maneuvers") or []:
+                if not isinstance(maneuver, dict):
+                    continue
+                shifted = dict(maneuver)
+                try:
+                    shifted["begin_shape_index"] = int(maneuver.get("begin_shape_index") or 0) + offset
+                except (TypeError, ValueError):
+                    pass
+                maneuvers.append(shifted)
+                road_segments.append(
+                    (
+                        [str(name) for name in (maneuver.get("street_names") or []) if name],
+                        float(maneuver.get("length") or 0.0) * 1000.0,
+                    )
+                )
+        summary = trip.get("summary") or {}
+        distance_m = float(summary.get("length") or 0.0) * 1000.0
+        duration_s = float(summary.get("time") or 0.0)
+        if distance_m <= 0 or len(coordinates) < 2:
+            continue
+        candidates.append(
+            _make_route_candidate(
+                "valhalla_fossgis",
+                {"type": "LineString", "coordinates": coordinates},
+                distance_m,
+                duration_s,
+                _extract_valhalla_route_steps(maneuvers, coordinates),
+                road_segments,
+                avoid_highways=avoid_highways,
+            )
         )
-        provider_candidates.append((geometry, distance_m, duration_s, route_steps, "openrouteservice"))
-    except RuntimeError as exc:
-        provider_errors.append(str(exc))
+    if not candidates:
+        raise RuntimeError("valhalla_no_route")
+    return candidates
 
-    try:
-        geometry, distance_m, duration_s, route_steps = _request_osrm_public_route(
-            from_lat,
-            from_lon,
-            to_lat,
-            to_lon,
-            avoid_highways=avoid_highways,
-        )
-        provider_candidates.append((geometry, distance_m, duration_s, route_steps, "osrm_public"))
-    except RuntimeError as exc:
-        provider_errors.append(str(exc))
 
-    if provider_candidates:
-        # 利用可能な候補のうち、所要時間が最短のルートを採用する。
-        provider_candidates.sort(key=lambda item: (item[2], item[1]))
-        return provider_candidates[0]
+def _collect_route_candidates(
+    from_lat: float,
+    from_lon: float,
+    to_lat: float,
+    to_lon: float,
+    *,
+    modes: tuple[bool, ...],
+    budget_s: float = _ROUTE_PROVIDER_BUDGET_S,
+) -> tuple[list[dict[str, object]], list[str]]:
+    # 複数の外部サービスへ並列に問い合わせ、時間予算内に返った候補をすべて集める。
+    # 1サービスが失敗・遅延しても、他のサービスの候補で経路を決められる。
+    jobs: list[tuple[str, object, tuple, dict]] = []
+    for avoid_highways in modes:
+        suffix = "avoid" if avoid_highways else "normal"
+        common = {"avoid_highways": avoid_highways, "timeout_s": _ROUTE_PROVIDER_TIMEOUT_S}
+        coords = (from_lat, from_lon, to_lat, to_lon)
+        jobs.append((f"openrouteservice:{suffix}", _request_openrouteservice_route, coords, common))
+        jobs.append((f"valhalla_fossgis:{suffix}", _request_valhalla_route, coords, common))
+        if not avoid_highways:
+            # 公開OSRMはexclude=motorwayに非対応（HTTP 400）のため、一般道優先の問い合わせには使わない
+            jobs.append((f"osrm_public:{suffix}", _request_osrm_route, (_OSRM_ROUTE_URL, "osrm_public", *coords), common))
+            jobs.append(
+                (f"osrm_fossgis:{suffix}", _request_osrm_route, (_FOSSGIS_OSRM_ROUTE_URL, "osrm_fossgis", *coords), common)
+            )
 
-    raise RuntimeError(" / ".join(provider_errors) if provider_errors else "route_provider_failed")
+    candidates: list[dict[str, object]] = []
+    errors: list[str] = []
+    started = time.monotonic()
+    executor = ThreadPoolExecutor(max_workers=len(jobs))
+    futures = {executor.submit(fn, *args, **kwargs): label for label, fn, args, kwargs in jobs}
+    done, not_done = wait_futures(list(futures.keys()), timeout=budget_s)
+    for future in done:
+        label = futures[future]
+        try:
+            candidates.extend(future.result())
+        except Exception as exc:
+            errors.append(f"{label}={str(exc)[:160]}")
+    for future in not_done:
+        errors.append(f"{futures[future]}=budget_timeout_{budget_s:.0f}s")
+    executor.shutdown(wait=False, cancel_futures=True)
+    route_logger.info(
+        "route_candidates elapsed=%.1fs candidates=%d errors=%s",
+        time.monotonic() - started,
+        len(candidates),
+        errors,
+    )
+    if errors:
+        route_logger.warning("route_provider_errors %s", " / ".join(errors))
+    return candidates, errors
+
+
+def _select_route_candidate(
+    candidates: list[dict[str, object]],
+    *,
+    prefer_highway: bool,
+    prefer_no_highway: bool,
+) -> dict[str, object] | None:
+    if not candidates:
+        return None
+
+    def by_duration(item: dict[str, object]) -> tuple[float, float]:
+        # 推定所要時間（秒）が最小のものを採用する。走行距離は所要時間が同じ場合の比較にだけ使う。
+        duration = float(item.get("duration_s") or 0.0)
+        return (duration if duration > 0 else float("inf"), float(item.get("distance_m") or 0.0))
+
+    if prefer_highway:
+        # 県外: 高速道路を含む候補を対象に、走行距離にかかわらず推定所要時間が最短のものを採用する
+        highway_candidates = [item for item in candidates if _route_candidate_has_highway(item)]
+        if highway_candidates:
+            return min(highway_candidates, key=by_duration)
+    if prefer_no_highway:
+        local_candidates = [item for item in candidates if not _route_candidate_has_highway(item)]
+        if local_candidates:
+            return min(local_candidates, key=by_duration)
+    return min(candidates, key=by_duration)
 
 
 def _haversine_distance_m(from_lat: float, from_lon: float, to_lat: float, to_lon: float) -> float:
@@ -856,12 +1221,15 @@ def get_company_route(
         .first()
     )
     cached_steps_available = _has_cached_route_steps(cache.steps_json) if cache is not None else False
+    valid_cached_modes = _INTRA_PREF_ROUTE_MODES if same_prefecture else _INTER_PREF_ROUTE_MODES
     if (
         cache is not None
         and not refresh
         and cache.coord_key == coord_key
         and cached_steps_available
         and (cache.provider or "") != "fallback_straight"
+        # 旧ロジックで作られたキャッシュ（例: 県外のinter_pref_mixed）は使わず、新しい経路選択で再計算する
+        and (cache.effective_mode or "") in valid_cached_modes
     ):
         try:
             geometry = json.loads(cache.geometry_json)
@@ -882,12 +1250,27 @@ def get_company_route(
             db.commit()
         if geometry:
             raw_duration_s = cache.duration_s
+            effective_mode = cache.effective_mode or policy
             display_duration_s = _estimate_display_duration_s(
                 cache.distance_m,
                 raw_duration_s,
-                effective_mode=cache.effective_mode or policy,
+                effective_mode=effective_mode,
                 provider=cache.provider or "openrouteservice",
             )
+            # キャッシュには道路別距離を保持していないため、経路ステップの道路名から高速道路名を復元する
+            # （計算時と同じ整形を通すため、出現順を保つよう各ステップに逓減する仮の距離を与える）
+            step_road_names: list[tuple[list[str], float]] = []
+            for order, step in enumerate(route_steps):
+                if not isinstance(step, dict):
+                    continue
+                names = [
+                    name
+                    for name in re.split(r"\s*[/,、]\s*", str(step.get("road") or ""))
+                    if name and _IC_JCT_NAME_PATTERN.search(name) is None and not re.search(r"(入口|出口)$", name)
+                ]
+                if names:
+                    step_road_names.append((names, float(len(route_steps) - order)))
+            cached_highway_roads, _ = _collect_highway_roads(step_road_names)
             return {
                 "from_company_id": from_company.id,
                 "from_company_name": from_company.name,
@@ -897,7 +1280,7 @@ def get_company_route(
                 "from_prefecture": from_prefecture,
                 "to_prefecture": to_prefecture,
                 "policy": policy,
-                "effective_mode": cache.effective_mode or policy,
+                "effective_mode": effective_mode,
                 "distance_m": cache.distance_m,
                 "distance_km": round(cache.distance_m / 1000, 2),
                 "duration_s_raw": raw_duration_s,
@@ -906,63 +1289,89 @@ def get_company_route(
                 "duration_min": round(display_duration_s / 60, 1) if display_duration_s else None,
                 "geometry": geometry,
                 "route_steps": route_steps,
+                "highway_roads": cached_highway_roads[:8],
+                "has_highway": effective_mode == "inter_pref_highway" or bool(cached_highway_roads),
+                "fallback_reason": None,
                 "cached": True,
                 "provider": cache.provider or "openrouteservice",
                 "updated_at": cache.updated_at.isoformat() if cache.updated_at else None,
             }
 
-    effective_mode = policy
-    provider = "openrouteservice"
-    geometry: dict[str, object]
-    distance_m: float
-    duration_s: float | None
-    route_steps: list[dict[str, object]]
+    # 県内は一般道優先（高速回避）の候補を優先し、取れなければ通常ルートへ。
+    # 2段階を直列にすると時間予算を超えるため、両方を同時に問い合わせる。
+    modes: tuple[bool, ...] = (True, False) if same_prefecture else (False,)
+    candidates, provider_errors = _collect_route_candidates(
+        from_lat,
+        from_lon,
+        target_lat,
+        target_lon,
+        modes=modes,
+    )
+    # 比較した候補（距離・推定所要時間・高速道路）をログに残し、採用理由を後から確認できるようにする
+    for candidate in sorted(candidates, key=lambda item: float(item.get("duration_s") or 0.0)):
+        route_logger.info(
+            "route_candidate to_company_id=%s provider=%s avoid=%s distance_km=%.1f duration_s=%.0f highway_km=%.1f highway=%s",
+            to_company.id,
+            candidate.get("provider"),
+            bool(candidate.get("avoid_highways")),
+            float(candidate.get("distance_m") or 0.0) / 1000,
+            float(candidate.get("duration_s") or 0.0),
+            float(candidate.get("highway_distance_m") or 0.0) / 1000,
+            list(candidate.get("highway_roads") or [])[:4],  # type: ignore[arg-type]
+        )
+    selected: dict[str, object] | None
     if same_prefecture:
-        try:
-            geometry, distance_m, duration_s, route_steps, provider = _request_route_with_fallback_providers(
-                from_lat,
-                from_lon,
-                target_lat,
-                target_lon,
-                avoid_highways=True,
+        selected = _select_route_candidate(
+            [item for item in candidates if item.get("avoid_highways")],
+            prefer_highway=False,
+            prefer_no_highway=True,
+        )
+        effective_mode = "intra_pref_local"
+        if selected is None:
+            selected = _select_route_candidate(
+                [item for item in candidates if not item.get("avoid_highways")],
+                prefer_highway=False,
+                prefer_no_highway=False,
             )
-        except RuntimeError:
-            try:
-                geometry, distance_m, duration_s, route_steps, provider = _request_route_with_fallback_providers(
-                    from_lat,
-                    from_lon,
-                    target_lat,
-                    target_lon,
-                    avoid_highways=False,
-                )
-                effective_mode = "intra_pref_local_fallback"
-            except RuntimeError:
-                geometry, distance_m, duration_s, route_steps = _fallback_straight_route(
-                    from_lat,
-                    from_lon,
-                    target_lat,
-                    target_lon,
-                )
-                effective_mode = "intra_pref_straight_fallback"
-                provider = "fallback_straight"
+            effective_mode = "intra_pref_local_fallback"
     else:
-        try:
-            geometry, distance_m, duration_s, route_steps, provider = _request_route_with_fallback_providers(
-                from_lat,
-                from_lon,
-                target_lat,
-                target_lon,
-                avoid_highways=False,
-            )
-        except RuntimeError:
-            geometry, distance_m, duration_s, route_steps = _fallback_straight_route(
-                from_lat,
-                from_lon,
-                target_lat,
-                target_lon,
-            )
-            effective_mode = "inter_pref_straight_fallback"
-            provider = "fallback_straight"
+        selected = _select_route_candidate(candidates, prefer_highway=True, prefer_no_highway=False)
+        effective_mode = "inter_pref_highway" if selected and _route_candidate_has_highway(selected) else "inter_pref_road"
+
+    fallback_reason: str | None = None
+    highway_roads: list[str] = []
+    if selected is not None:
+        provider = str(selected["provider"])
+        geometry = selected["geometry"]  # type: ignore[assignment]
+        distance_m = float(selected["distance_m"])
+        duration_s = float(selected["duration_s"]) if selected.get("duration_s") else None
+        route_steps = list(selected["route_steps"])  # type: ignore[arg-type]
+        highway_roads = list(selected.get("highway_roads") or [])  # type: ignore[arg-type]
+        route_logger.info(
+            "route_selected to_company_id=%s mode=%s provider=%s distance_km=%.1f duration_min=%.1f highway=%s candidates=%d",
+            to_company.id,
+            effective_mode,
+            provider,
+            distance_m / 1000,
+            (duration_s or 0.0) / 60,
+            highway_roads[:4],
+            len(candidates),
+        )
+    else:
+        geometry, distance_m, duration_s, route_steps = _fallback_straight_route(
+            from_lat,
+            from_lon,
+            target_lat,
+            target_lon,
+        )
+        effective_mode = "intra_pref_straight_fallback" if same_prefecture else "inter_pref_straight_fallback"
+        provider = "fallback_straight"
+        fallback_reason = " / ".join(provider_errors) if provider_errors else "route_provider_failed"
+        route_logger.warning(
+            "route_straight_fallback to_company_id=%s reason=%s",
+            to_company.id,
+            fallback_reason,
+        )
 
     route_steps, _ = _enrich_route_steps_with_ic_jct_names(route_steps)
 
@@ -1008,6 +1417,9 @@ def get_company_route(
         "duration_min": round(display_duration_s / 60, 1) if display_duration_s else None,
         "geometry": geometry,
         "route_steps": route_steps,
+        "highway_roads": highway_roads,
+        "has_highway": bool(selected is not None and _route_candidate_has_highway(selected)),
+        "fallback_reason": fallback_reason,
         "cached": False,
         "provider": provider,
         "updated_at": cache.updated_at.isoformat() if cache.updated_at else None,

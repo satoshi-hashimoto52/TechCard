@@ -1254,10 +1254,27 @@ const TechCardMap: React.FC<{ companies: CompanyMapPoint[]; loading?: boolean }>
                     ? '県内（直線フォールバック）'
                     : selectedRoute.effective_mode === 'inter_pref_straight_fallback'
                       ? '県外（直線フォールバック）'
-                      : '県外（一般道+高速）'}
+                      : selectedRoute.effective_mode === 'inter_pref_highway'
+                        ? '県外（高速道路を使う経路のうち所要時間最短）'
+                        : selectedRoute.effective_mode === 'inter_pref_road'
+                          ? '県外（通常の道路ルート：高速道路を含む候補なし）'
+                          : '県外（一般道+高速）'}
               {selectedRoute.cached ? ' / キャッシュ' : ' / API最新'}
               {selectedRoute.provider ? ` / ${selectedRoute.provider}` : ''}
             </div>
+            {isStraightFallback && (
+              <div
+                data-testid="map-route-straight-warning"
+                className="mt-1 rounded border border-orange-500/70 bg-orange-950/60 px-2 py-1 text-sm text-orange-200"
+              >
+                道路ルートを取得できなかったため、出発地と目的地を結ぶ直線（道路ではありません）を破線で表示しています。距離は直線距離です。
+              </div>
+            )}
+            {!isStraightFallback && selectedRoute.highway_roads && selectedRoute.highway_roads.length > 0 && (
+              <div data-testid="map-route-highways" className="mt-1 text-sm text-slate-300">
+                高速道路: {selectedRoute.highway_roads.join(' / ')}
+              </div>
+            )}
             {routeDisplaySteps.length > 0 && (
               <div data-testid="map-route-steps" className="mt-1 text-xs text-slate-300">
                 乗降・乗換・道路表示: {routeDisplaySteps.length} 箇所
